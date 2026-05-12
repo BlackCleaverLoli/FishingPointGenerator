@@ -1,0 +1,15 @@
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <DalamudApiLevel>15</DalamudApiLevel>
+    <Version>0.1.0.0</Version>
+    <AssemblyName>FishingPointGenerator</AssemblyName>
+    <RootNamespace>FishingPointGenerator.Plugin</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <OmenToolsProjectPath Condition="'$(OmenToolsProjectPath)' == ''">..\..\..\OmenTools\OmenTools.csproj</OmenToolsProjectPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FishingPointGenerator.Core\FishingPointGenerator.Core.csproj" />
+    <ProjectReference Include="$(OmenToolsProjectPath)" />
+  </ItemGroup>
+</Project>

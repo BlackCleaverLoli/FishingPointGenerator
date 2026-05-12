@@ -1,0 +1,15 @@
+{
+  "Author": "MistyDai",
+  "Name": "FishingPointGenerator",
+  "InternalName": "FishingPointGenerator",
+  "AssemblyVersion": "0.1.0.0",
+  "Description": "Development tool for generating and labeling fishing approach points.",
+  "Punchline": "Generate labeled fishing approach points.",
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 15,
+  "Tags": [
+    "fishing",
+    "tooling",
+    "navigation"
+  ]
+}
