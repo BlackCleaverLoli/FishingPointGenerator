@@ -29,6 +29,11 @@ internal sealed class TerritoryGeometryCache
         return cachedSurvey;
     }
 
+    public string DebugScanNearby(float radiusMeters)
+    {
+        return scanner.DebugScanNearby(radiusMeters);
+    }
+
     public void Clear()
     {
         cachedSurvey = null;

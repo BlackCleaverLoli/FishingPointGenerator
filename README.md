@@ -34,6 +34,7 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点
 /fpg target <fishingSpotId>
 /fpg scan
 /fpg scantarget
+/fpg debugnear [radius]
 /fpg flag
 /fpg flagstand
 /fpg confirm

@@ -200,6 +200,18 @@ internal sealed class SpotWorkflowSession
         LastMessage = $"已从全图缓存生成 FishingSpot {CurrentTarget!.FishingSpotId} 点缓存：{scan.Candidates.Count} 个候选点，{CurrentTargetBlocks.Count} 个块。";
     }
 
+    public void DebugScanNearby(float radiusMeters)
+    {
+        try
+        {
+            LastMessage = scanService.DebugScanNearby(radiusMeters);
+        }
+        catch (Exception ex)
+        {
+            LastMessage = $"附近碰撞面调试失败：{ex.Message}";
+        }
+    }
+
     public void PlaceCurrentTargetFlag()
     {
         if (!EnsureCurrentTarget())

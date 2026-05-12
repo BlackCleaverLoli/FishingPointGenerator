@@ -38,8 +38,13 @@ internal sealed class FishingCastMonitor : IDisposable
 
         try
         {
-            var fishingSpotId = GetLogMessageParamUInt(item, 1);
-            if (!session.RecordCastFill(fishingSpotId))
+            var param1 = GetLogMessageParamUInt(item, 0);
+            var param2 = GetLogMessageParamUInt(item, 1);
+            var param3 = GetLogMessageParamUInt(item, 2);
+
+            pluginLog.Debug($"FPG cast log: {logMessageId}|{param1}|{param2}|{param3}");
+
+            if (!session.RecordCastFill(param2))
                 return;
 
             DService.Instance().Chat.Print($"[FPG] {session.LastMessage}");

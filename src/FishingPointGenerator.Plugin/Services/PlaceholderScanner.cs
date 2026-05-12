@@ -18,6 +18,11 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
     public string Name => "占位扫描器";
     public bool IsPlaceholder => true;
 
+    public string DebugScanNearby(float radiusMeters)
+    {
+        return "占位扫描器不支持附近碰撞面调试。";
+    }
+
     public TerritorySurveyDocument ScanCurrentTerritory()
     {
         var service = DService.Instance();

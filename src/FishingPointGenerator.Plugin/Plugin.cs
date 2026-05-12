@@ -1,3 +1,4 @@
+using System.Globalization;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
@@ -22,6 +23,7 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg target <fishingSpotId> - 选择当前区域内的目标\n"
         + "/fpg scan - 扫描当前区域全图并缓存候选点\n"
         + "/fpg scantarget - 从全图缓存生成已选目标缓存\n"
+        + "/fpg debugnear [radius] - 只分析角色附近碰撞面并输出调试日志\n"
         + "/fpg flag - 为已选钓场中心插旗\n"
         + "/fpg flagstand - 为推荐点位插旗\n"
         + "/fpg confirm - 确认已选目标的推荐\n"
@@ -131,6 +133,21 @@ public sealed class Plugin : IDalamudPlugin
 
             case "scantarget":
                 session.ScanCurrentTarget();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "debugnear":
+                var debugRadius = 35f;
+                if (parts.Length >= 2
+                    && (!float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out debugRadius)
+                        || debugRadius <= 0f))
+                {
+                    Print("用法：/fpg debugnear [radius]");
+                    return;
+                }
+
+                session.DebugScanNearby(debugRadius);
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;

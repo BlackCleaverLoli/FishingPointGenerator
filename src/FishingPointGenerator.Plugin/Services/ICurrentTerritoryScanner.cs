@@ -7,4 +7,5 @@ internal interface ICurrentTerritoryScanner
     string Name { get; }
     bool IsPlaceholder { get; }
     TerritorySurveyDocument ScanCurrentTerritory();
+    string DebugScanNearby(float radiusMeters);
 }

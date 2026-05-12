@@ -18,8 +18,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float NearbyEdgeHeightTolerance = 1.25f;
     private const float CandidateDedupeCellSize = 1.25f;
     private const float CandidateRotationDedupeRadians = 0.15f;
+    private const float DebugCellSize = 10f;
     private const int MaxSamplesPerEdge = 40;
     private const int MaxCandidates = 10000;
+    private const int MaxDebugCells = 18;
+    private const int MaxDebugCandidates = 16;
+    private const int MaxDebugWaterMaterials = 8;
+    private const int MaxDebugWaterSamples = 8;
 
     private readonly IPluginLog pluginLog;
 
@@ -30,6 +35,72 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
     public string Name => "当前布局可钓/可走边界扫描器";
     public bool IsPlaceholder => false;
+
+    public string DebugScanNearby(float radiusMeters)
+    {
+        var service = DService.Instance();
+        var player = service.ObjectTable.LocalPlayer;
+        var currentTerritoryId = service.ClientState.TerritoryType;
+        if (currentTerritoryId == 0 || player is null)
+            return "附近扫描失败：没有可用区域或本地玩家。";
+
+        var radius = Math.Clamp(radiusMeters, 5f, 200f);
+        var playerPosition = player.Position;
+        var scene = new ActiveLayoutScene();
+        scene.FillFromActiveLayout();
+        var territoryId = scene.TerritoryId != 0 ? scene.TerritoryId : currentTerritoryId;
+        var extractor = new CollisionSceneExtractor(scene);
+        var allTriangles = extractor.ExtractTriangles();
+        var filterRadius = radius + NearbyEdgeMatchDistance + BoundaryPointOffsetTowardWalkableMeters;
+        var nearbyTriangles = allTriangles
+            .Where(triangle => HorizontalDistanceToTriangle(playerPosition, triangle) <= filterRadius)
+            .ToList();
+        var fishableTriangles = nearbyTriangles
+            .Where(triangle => triangle.IsFishable && triangle.Area > 0.05f)
+            .ToList();
+        var walkableTriangles = nearbyTriangles
+            .Where(triangle => triangle.IsWalkable && triangle.Area > 0.05f)
+            .ToList();
+
+        var buckets = BuildEdgeBuckets(fishableTriangles, walkableTriangles);
+        var sharedBuckets = buckets.Values.Count(bucket => bucket.FishableEdges.Count > 0 && bucket.WalkableEdges.Count > 0);
+        var fishableEdges = BuildEdges(fishableTriangles);
+        var walkableEdges = BuildEdges(walkableTriangles);
+        var fishableOuterEdges = BuildOuterEdges(fishableTriangles);
+        var walkableOuterEdges = BuildOuterEdges(walkableTriangles);
+        var nearbyMatches = CountNearbyEdgeMatches(
+            fishableOuterEdges.Count > 0 ? fishableOuterEdges : fishableEdges,
+            walkableOuterEdges.Count > 0 ? walkableOuterEdges : walkableEdges);
+        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles)
+            .Where(candidate => HorizontalDistance(candidate.Position.ToVector3(), playerPosition) <= radius)
+            .ToList();
+        var waterSummary = CreateWaterSurfaceSummary(playerPosition, fishableTriangles);
+
+        pluginLog.Information(
+            "FPG nearby scan: territory={TerritoryId} player=({PlayerX:F2},{PlayerY:F2},{PlayerZ:F2}) radius={Radius:F1} allTriangles={AllTriangles} nearbyTriangles={NearbyTriangles} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} fishableEdges={FishableEdges} walkableEdges={WalkableEdges} fishableOuterEdges={FishableOuterEdges} walkableOuterEdges={WalkableOuterEdges} sharedEdgeBuckets={SharedEdgeBuckets} nearbyEdgeMatches={NearbyEdgeMatches} candidates={Candidates} water={WaterSummary}",
+            territoryId,
+            playerPosition.X,
+            playerPosition.Y,
+            playerPosition.Z,
+            radius,
+            allTriangles.Count,
+            nearbyTriangles.Count,
+            fishableTriangles.Count,
+            walkableTriangles.Count,
+            fishableEdges.Count,
+            walkableEdges.Count,
+            fishableOuterEdges.Count,
+            walkableOuterEdges.Count,
+            sharedBuckets,
+            nearbyMatches,
+            candidates.Count,
+            FormatWaterSummary(waterSummary));
+        LogDebugWaterSurfaces(playerPosition, fishableTriangles, waterSummary);
+        LogDebugCells(playerPosition, fishableTriangles, walkableTriangles, candidates);
+        LogDebugCandidates(playerPosition, candidates);
+
+        return $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbyEdges={nearbyMatches} candidates={candidates.Count}。详情见 Dalamud log。";
+    }
 
     public TerritorySurveyDocument ScanCurrentTerritory()
     {
@@ -187,8 +258,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         HashSet<CandidateKey> candidateKeys,
         List<CandidateScratch> candidates)
     {
-        var walkableIndex = new BoundaryEdgeIndex(BuildEdges(walkableTriangles), NearbyEdgeIndexCellSize);
-        foreach (var fishableEdge in BuildEdges(fishableTriangles))
+        var fishableEdges = BuildOuterEdges(fishableTriangles);
+        if (fishableEdges.Count == 0)
+            fishableEdges = BuildEdges(fishableTriangles);
+
+        var walkableEdges = BuildOuterEdges(walkableTriangles);
+        if (walkableEdges.Count == 0)
+            walkableEdges = BuildEdges(walkableTriangles);
+
+        var walkableIndex = new BoundaryEdgeIndex(walkableEdges, NearbyEdgeIndexCellSize);
+        foreach (var fishableEdge in fishableEdges)
         {
             var nearestWalkableEdge = walkableIndex.FindNearest(fishableEdge);
             if (nearestWalkableEdge is null)
@@ -196,6 +275,24 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
             AddBoundaryEdgeSamples(fishableEdge, nearestWalkableEdge.Value, candidateKeys, candidates, exactSharedEdge: false);
         }
+    }
+
+    private static int CountNearbyEdgeMatches(
+        IReadOnlyList<BoundaryEdge> fishableEdges,
+        IReadOnlyList<BoundaryEdge> walkableEdges)
+    {
+        if (fishableEdges.Count == 0 || walkableEdges.Count == 0)
+            return 0;
+
+        var walkableIndex = new BoundaryEdgeIndex(walkableEdges, NearbyEdgeIndexCellSize);
+        var count = 0;
+        foreach (var fishableEdge in fishableEdges)
+        {
+            if (walkableIndex.FindNearest(fishableEdge) is not null)
+                count++;
+        }
+
+        return count;
     }
 
     private static IReadOnlyList<BoundaryEdge> BuildEdges(IReadOnlyList<ExtractedSceneTriangle> triangles)
@@ -209,6 +306,37 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         }
 
         return edges;
+    }
+
+    private static IReadOnlyList<BoundaryEdge> BuildOuterEdges(IReadOnlyList<ExtractedSceneTriangle> triangles)
+    {
+        var buckets = new Dictionary<EdgeKey, List<BoundaryEdge>>();
+        foreach (var triangle in triangles)
+        {
+            AddOuterEdge(buckets, new BoundaryEdge(triangle.A, triangle.B, triangle));
+            AddOuterEdge(buckets, new BoundaryEdge(triangle.B, triangle.C, triangle));
+            AddOuterEdge(buckets, new BoundaryEdge(triangle.C, triangle.A, triangle));
+        }
+
+        return buckets
+            .Where(bucket => bucket.Value.Count == 1)
+            .Select(bucket => bucket.Value[0])
+            .ToList();
+    }
+
+    private static void AddOuterEdge(Dictionary<EdgeKey, List<BoundaryEdge>> buckets, BoundaryEdge edge)
+    {
+        if (edge.HorizontalLength < MinimumBoundaryEdgeLength)
+            return;
+
+        var key = EdgeKey.From(edge.Start, edge.End);
+        if (!buckets.TryGetValue(key, out var list))
+        {
+            list = [];
+            buckets[key] = list;
+        }
+
+        list.Add(edge);
     }
 
     private static void AddEdge(List<BoundaryEdge> edges, BoundaryEdge edge)
@@ -239,10 +367,10 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             var t = (sampleIndex + 0.5f) / sampleCount;
             var edgePoint = Vector3.Lerp(fishableEdge.Start, fishableEdge.End, t);
             var position = edgePoint + (direction * BoundaryPointOffsetTowardWalkableMeters);
-            if (TryProjectYOnTriangleXz(walkableEdge.Triangle, position.X, position.Z, out var y))
-                position.Y = y;
-            else
-                position.Y = edgePoint.Y;
+            if (!TryProjectYOnTriangleXz(walkableEdge.Triangle, position.X, position.Z, out var y))
+                continue;
+
+            position.Y = y;
 
             var key = CandidateKey.From(position, rotation);
             if (!candidateKeys.Add(key))
@@ -327,6 +455,20 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return MathF.Sqrt((dx * dx) + (dz * dz));
     }
 
+    private static float HorizontalDistanceToTriangle(Vector3 point, ExtractedSceneTriangle triangle)
+    {
+        var p = new Vector2(point.X, point.Z);
+        var a = new Vector2(triangle.A.X, triangle.A.Z);
+        var b = new Vector2(triangle.B.X, triangle.B.Z);
+        var c = new Vector2(triangle.C.X, triangle.C.Z);
+        if (PointInTriangle(p, a, b, c))
+            return 0f;
+
+        return MathF.Min(
+            DistanceToSegment(p, a, b),
+            MathF.Min(DistanceToSegment(p, b, c), DistanceToSegment(p, c, a)));
+    }
+
     private static float HorizontalDistanceToSegment(Vector3 point, BoundaryEdge edge)
     {
         var p = new Vector2(point.X, point.Z);
@@ -339,6 +481,225 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         var t = Math.Clamp(Vector2.Dot(p - start, segment) / lengthSquared, 0f, 1f);
         return Vector2.Distance(p, start + (segment * t));
+    }
+
+    private static bool PointInTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
+    {
+        var ab = Cross(point - a, b - a);
+        var bc = Cross(point - b, c - b);
+        var ca = Cross(point - c, a - c);
+        var hasNegative = ab < 0f || bc < 0f || ca < 0f;
+        var hasPositive = ab > 0f || bc > 0f || ca > 0f;
+        return !(hasNegative && hasPositive);
+    }
+
+    private static float DistanceToSegment(Vector2 point, Vector2 start, Vector2 end)
+    {
+        var segment = end - start;
+        var lengthSquared = segment.LengthSquared();
+        if (lengthSquared <= 0.0001f)
+            return Vector2.Distance(point, start);
+
+        var t = Math.Clamp(Vector2.Dot(point - start, segment) / lengthSquared, 0f, 1f);
+        return Vector2.Distance(point, start + (segment * t));
+    }
+
+    private static float Cross(Vector2 left, Vector2 right)
+    {
+        return (left.X * right.Y) - (left.Y * right.X);
+    }
+
+    private void LogDebugCells(
+        Vector3 playerPosition,
+        IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
+        IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
+        IReadOnlyList<ApproachCandidate> candidates)
+    {
+        var cells = new Dictionary<GridCell, DebugCellCounts>();
+        foreach (var triangle in fishableTriangles)
+            GetDebugCell(cells, playerPosition, triangle.Centroid).FishableTriangles++;
+        foreach (var triangle in walkableTriangles)
+            GetDebugCell(cells, playerPosition, triangle.Centroid).WalkableTriangles++;
+        foreach (var candidate in candidates)
+            GetDebugCell(cells, playerPosition, candidate.Position.ToVector3()).Candidates++;
+
+        foreach (var item in cells
+            .OrderBy(item => Math.Abs(item.Key.X) + Math.Abs(item.Key.Z))
+            .ThenBy(item => item.Key.X)
+            .ThenBy(item => item.Key.Z)
+            .Take(MaxDebugCells))
+        {
+            pluginLog.Debug(
+                "FPG nearby cell: cell=({CellX},{CellZ}) fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} candidates={Candidates}",
+                item.Key.X,
+                item.Key.Z,
+                item.Value.FishableTriangles,
+                item.Value.WalkableTriangles,
+                item.Value.Candidates);
+        }
+    }
+
+    private void LogDebugCandidates(Vector3 playerPosition, IReadOnlyList<ApproachCandidate> candidates)
+    {
+        var index = 0;
+        foreach (var candidate in candidates
+            .OrderBy(candidate => HorizontalDistance(candidate.Position.ToVector3(), playerPosition))
+            .ThenByDescending(candidate => candidate.Score)
+            .Take(MaxDebugCandidates))
+        {
+            index++;
+            var position = candidate.Position.ToVector3();
+            pluginLog.Debug(
+                "FPG nearby candidate {Index}: pos=({X:F2},{Y:F2},{Z:F2}) dist={Distance:F1} rotation={Rotation:F3} score={Score:F3}",
+                index,
+                position.X,
+                position.Y,
+                position.Z,
+                HorizontalDistance(position, playerPosition),
+                candidate.Rotation,
+                candidate.Score);
+        }
+    }
+
+    private void LogDebugWaterSurfaces(
+        Vector3 playerPosition,
+        IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
+        WaterSurfaceSummary? summary)
+    {
+        if (summary is null)
+        {
+            pluginLog.Debug("FPG nearby water: none");
+            return;
+        }
+
+        pluginLog.Debug(
+            "FPG nearby water summary: triangles={TriangleCount} area={Area:F1} nearestDist={NearestDistance:F1} nearestY={NearestY:F2} y=[{MinY:F2},{MaxY:F2}] normalY=[{MinNormalY:F2},{MaxNormalY:F2}] nearestMaterial={NearestMaterial} nearestMesh={NearestMeshType}",
+            fishableTriangles.Count,
+            summary.TotalArea,
+            summary.NearestDistance,
+            summary.NearestY,
+            summary.MinY,
+            summary.MaxY,
+            summary.MinNormalY,
+            summary.MaxNormalY,
+            summary.NearestMaterial,
+            summary.NearestMeshType);
+
+        foreach (var group in fishableTriangles
+            .GroupBy(triangle => triangle.Material)
+            .Select(group => group.ToList())
+            .OrderByDescending(group => group.Count)
+            .ThenBy(group => group[0].Material)
+            .Take(MaxDebugWaterMaterials))
+        {
+            pluginLog.Debug(
+                "FPG nearby water material: material={Material} triangles={TriangleCount} area={Area:F1} y=[{MinY:F2},{MaxY:F2}] normalY=[{MinNormalY:F2},{MaxNormalY:F2}] meshTypes={MeshTypes}",
+                FormatMaterial(group[0].Material),
+                group.Count,
+                group.Sum(triangle => triangle.Area),
+                group.Min(TriangleMinY),
+                group.Max(TriangleMaxY),
+                group.Min(triangle => triangle.Normal.Y),
+                group.Max(triangle => triangle.Normal.Y),
+                string.Join(",", group.Select(triangle => triangle.MeshType).Distinct().OrderBy(type => type.ToString())));
+        }
+
+        var index = 0;
+        foreach (var item in fishableTriangles
+            .Select(triangle => new
+            {
+                Triangle = triangle,
+                Distance = HorizontalDistanceToTriangle(playerPosition, triangle),
+            })
+            .OrderBy(item => item.Distance)
+            .ThenBy(item => MathF.Abs(item.Triangle.Centroid.Y - playerPosition.Y))
+            .Take(MaxDebugWaterSamples))
+        {
+            index++;
+            var triangle = item.Triangle;
+            var centroid = triangle.Centroid;
+            pluginLog.Debug(
+                "FPG nearby water sample {Index}: centroid=({X:F2},{Y:F2},{Z:F2}) dist={Distance:F1} y=[{MinY:F2},{MaxY:F2}] normal=({NormalX:F2},{NormalY:F2},{NormalZ:F2}) material={Material} mesh={MeshType} area={Area:F2}",
+                index,
+                centroid.X,
+                centroid.Y,
+                centroid.Z,
+                item.Distance,
+                TriangleMinY(triangle),
+                TriangleMaxY(triangle),
+                triangle.Normal.X,
+                triangle.Normal.Y,
+                triangle.Normal.Z,
+                FormatMaterial(triangle.Material),
+                triangle.MeshType,
+                triangle.Area);
+        }
+    }
+
+    private static WaterSurfaceSummary? CreateWaterSurfaceSummary(
+        Vector3 playerPosition,
+        IReadOnlyList<ExtractedSceneTriangle> fishableTriangles)
+    {
+        if (fishableTriangles.Count == 0)
+            return null;
+
+        var nearest = fishableTriangles
+            .Select(triangle => new
+            {
+                Triangle = triangle,
+                Distance = HorizontalDistanceToTriangle(playerPosition, triangle),
+            })
+            .OrderBy(item => item.Distance)
+            .ThenBy(item => MathF.Abs(item.Triangle.Centroid.Y - playerPosition.Y))
+            .First();
+
+        return new WaterSurfaceSummary(
+            fishableTriangles.Sum(triangle => triangle.Area),
+            nearest.Distance,
+            nearest.Triangle.Centroid.Y,
+            fishableTriangles.Min(TriangleMinY),
+            fishableTriangles.Max(TriangleMaxY),
+            fishableTriangles.Min(triangle => triangle.Normal.Y),
+            fishableTriangles.Max(triangle => triangle.Normal.Y),
+            FormatMaterial(nearest.Triangle.Material),
+            nearest.Triangle.MeshType);
+    }
+
+    private static string FormatWaterSummary(WaterSurfaceSummary? summary)
+    {
+        return summary is null
+            ? "none"
+            : $"nearest={summary.NearestDistance:F1}m y={summary.NearestY:F2} rangeY=[{summary.MinY:F2},{summary.MaxY:F2}] material={summary.NearestMaterial} mesh={summary.NearestMeshType}";
+    }
+
+    private static float TriangleMinY(ExtractedSceneTriangle triangle)
+    {
+        return MathF.Min(triangle.A.Y, MathF.Min(triangle.B.Y, triangle.C.Y));
+    }
+
+    private static float TriangleMaxY(ExtractedSceneTriangle triangle)
+    {
+        return MathF.Max(triangle.A.Y, MathF.Max(triangle.B.Y, triangle.C.Y));
+    }
+
+    private static string FormatMaterial(ulong material)
+    {
+        return "0x" + material.ToString("X");
+    }
+
+    private static DebugCellCounts GetDebugCell(
+        Dictionary<GridCell, DebugCellCounts> cells,
+        Vector3 origin,
+        Vector3 position)
+    {
+        var cell = GridCell.From(position.X - origin.X, position.Z - origin.Z, DebugCellSize);
+        if (!cells.TryGetValue(cell, out var counts))
+        {
+            counts = new DebugCellCounts();
+            cells[cell] = counts;
+        }
+
+        return counts;
     }
 
     private sealed class BoundaryEdgeIndex
@@ -418,6 +779,24 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         public List<BoundaryEdge> FishableEdges { get; } = [];
         public List<BoundaryEdge> WalkableEdges { get; } = [];
     }
+
+    private sealed class DebugCellCounts
+    {
+        public int FishableTriangles { get; set; }
+        public int WalkableTriangles { get; set; }
+        public int Candidates { get; set; }
+    }
+
+    private sealed record WaterSurfaceSummary(
+        float TotalArea,
+        float NearestDistance,
+        float NearestY,
+        float MinY,
+        float MaxY,
+        float MinNormalY,
+        float MaxNormalY,
+        string NearestMaterial,
+        SceneMeshType NearestMeshType);
 
     private readonly record struct BoundaryEdge(Vector3 Start, Vector3 End, ExtractedSceneTriangle Triangle)
     {
