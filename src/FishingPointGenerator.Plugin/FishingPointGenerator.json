@@ -3,8 +3,8 @@
   "Name": "FishingPointGenerator",
   "InternalName": "FishingPointGenerator",
   "AssemblyVersion": "0.1.0.0",
-  "Description": "用于生成和标记钓鱼站位点的开发工具。",
-  "Punchline": "生成带标记的钓鱼站位点。",
+  "Description": "用于生成和标记钓鱼点位的开发工具。",
+  "Punchline": "生成带标记的钓鱼点位。",
   "ApplicableVersion": "any",
   "DalamudApiLevel": 15,
   "Tags": [

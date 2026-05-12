@@ -52,7 +52,7 @@ public sealed class SurveyJsonStore
     {
         ArgumentNullException.ThrowIfNull(document);
 
-        WriteJson(GetGeneratedSurveyPath(document.TerritoryId), document);
+        WriteJson(GetGeneratedSurveyPath(document.TerritoryId), document with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
     public TerritoryLabelsDocument LoadLabels(uint territoryId)

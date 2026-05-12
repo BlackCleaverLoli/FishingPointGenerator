@@ -121,15 +121,13 @@ public sealed class SurveyBlockBuilder
         if (leftHasRegion || rightHasRegion)
             return leftHasRegion && rightHasRegion && string.Equals(left.RegionId, right.RegionId, StringComparison.Ordinal);
 
-        return left.Position.HorizontalDistanceTo(right.Position) <= options.RegionLinkDistanceMeters
-            && left.TargetPoint.HorizontalDistanceTo(right.TargetPoint) <= options.RegionTargetLinkDistanceMeters;
+        return left.Position.HorizontalDistanceTo(right.Position) <= options.RegionLinkDistanceMeters;
     }
 
     private bool ShouldLinkBlock(ApproachCandidate left, ApproachCandidate right)
     {
         return MathF.Abs(left.Position.Y - right.Position.Y) <= options.BlockHeightToleranceMeters
             && left.Position.HorizontalDistanceTo(right.Position) <= options.BlockLinkDistanceMeters
-            && left.TargetPoint.HorizontalDistanceTo(right.TargetPoint) <= options.BlockTargetLinkDistanceMeters
             && AngleMath.AngularDistance(left.Rotation, right.Rotation) <= options.BlockRotationToleranceRadians;
     }
 

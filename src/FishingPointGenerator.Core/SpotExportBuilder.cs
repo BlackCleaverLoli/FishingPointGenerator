@@ -36,19 +36,17 @@ public sealed class SpotExportBuilder
                 var label = match.Label;
                 var candidate = match.Candidate;
                 var position = label.ConfirmedPosition ?? candidate.Position;
-                var target = label.ConfirmedTargetPoint ?? candidate.TargetPoint;
                 exported.Add((
                     analysis.Key,
                     new ExportedApproachPoint
                     {
-                        X = position.X,
-                        Y = position.Y,
-                        Z = position.Z,
+                        FishingSpot = analysis.Key.FishingSpotId,
+                        PositionX = position.X,
+                        PositionY = position.Y,
+                        PositionZ = position.Z,
                         Rotation = label.ConfirmedRotation ?? candidate.Rotation,
-                        TargetX = target.X,
-                        TargetY = target.Y,
-                        TargetZ = target.Z,
                         Score = candidate.Score,
+                        SourceBlockId = candidate.BlockId,
                         SourceCandidateId = candidate.SourceCandidateId,
                         SourceCandidateFingerprint = candidate.CandidateFingerprint,
                         SourceLabelId = label.EventId,

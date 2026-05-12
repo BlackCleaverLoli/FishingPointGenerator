@@ -62,7 +62,7 @@ public sealed class SpotCandidateMatcher
         IEnumerable<SpotCandidate> candidates,
         HashSet<string> matchedCandidates)
     {
-        if (label.ConfirmedPosition is null && label.ConfirmedTargetPoint is null)
+        if (label.ConfirmedPosition is not { } confirmedPosition)
             return null;
 
         return candidates
@@ -70,21 +70,14 @@ public sealed class SpotCandidateMatcher
             .Select(candidate => new
             {
                 Candidate = candidate,
-                PositionDistance = label.ConfirmedPosition is { } position
-                    ? candidate.Position.HorizontalDistanceTo(position)
-                    : 0f,
-                TargetDistance = label.ConfirmedTargetPoint is { } targetPoint
-                    ? candidate.TargetPoint.HorizontalDistanceTo(targetPoint)
-                    : 0f,
+                PositionDistance = candidate.Position.HorizontalDistanceTo(confirmedPosition),
                 RotationDistance = label.ConfirmedRotation is { } rotation
                     ? AngleMath.AngularDistance(candidate.Rotation, rotation)
                     : 0f,
             })
-            .Where(match => label.ConfirmedPosition is null || match.PositionDistance <= options.ConfirmedPositionToleranceMeters)
-            .Where(match => label.ConfirmedTargetPoint is null || match.TargetDistance <= options.ConfirmedTargetPointToleranceMeters)
+            .Where(match => match.PositionDistance <= options.ConfirmedPositionToleranceMeters)
             .Where(match => label.ConfirmedRotation is null || match.RotationDistance <= options.RotationToleranceRadians)
             .OrderBy(match => match.PositionDistance)
-            .ThenBy(match => match.TargetDistance)
             .ThenBy(match => match.RotationDistance)
             .ThenBy(match => match.Candidate.CandidateFingerprint, StringComparer.Ordinal)
             .Select(match => match.Candidate)
@@ -95,7 +88,6 @@ public sealed class SpotCandidateMatcher
 public sealed record SpotCandidateMatcherOptions
 {
     public float ConfirmedPositionToleranceMeters { get; init; } = 4f;
-    public float ConfirmedTargetPointToleranceMeters { get; init; } = 10f;
     public float RotationToleranceRadians { get; init; } = 0.65f;
 }
 

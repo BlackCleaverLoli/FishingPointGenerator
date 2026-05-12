@@ -22,13 +22,11 @@ public sealed class ExportBuilder
                         FishingSpotId = fishingSpotId,
                         Point = new ExportedApproachPoint
                         {
-                            X = candidate.Position.X,
-                            Y = candidate.Position.Y,
-                            Z = candidate.Position.Z,
+                            FishingSpot = fishingSpotId,
+                            PositionX = candidate.Position.X,
+                            PositionY = candidate.Position.Y,
+                            PositionZ = candidate.Position.Z,
                             Rotation = candidate.Rotation,
-                            TargetX = candidate.TargetPoint.X,
-                            TargetY = candidate.TargetPoint.Y,
-                            TargetZ = candidate.TargetPoint.Z,
                             Score = candidate.Score,
                             SourceBlockId = state.Block.BlockId,
                             SourceCandidateId = candidate.CandidateId,

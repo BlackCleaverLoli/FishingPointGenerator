@@ -26,15 +26,15 @@ SpotKey = (territoryId, fishingSpotId)
 data/scans/territory_{territoryId}/spot_{fishingSpotId}.scan.json
 ```
 
-用途：保存某个 `SpotKey` 的候选站位。底层扫描器仍可读取当前 territory 的 active layout 几何，但保存结果必须收敛到当前钓场。
+用途：保存某个 `SpotKey` 的候选点缓存。底层扫描器扫描当前 territory 的 active layout 几何；spot 级 scan 从全图缓存派生，不按 `FishingSpot` 半径硬裁剪。实际归属由抛竿日志中的 `FishingSpot.RowId` 确认。
 
 候选点使用稳定 fingerprint：
 
 ```text
-hash(territoryId, fishingSpotId, quantized standing position, quantized target point)
+hash(territoryId, fishingSpotId, quantized position, quantized rotation)
 ```
 
-其中 standing position 按 0.5m 量化，target point 按 1m 量化；rotation 不进入主 fingerprint。
+其中 position 按 0.5m 量化，rotation 按 0.05 rad 量化。`Position + Rotation` 是下游消费形态。
 
 ## Label Ledger
 
@@ -46,7 +46,7 @@ data/labels/territory_{territoryId}/spot_{fishingSpotId}.ledger.json
 
 用途：保存人工事件日志，不因重扫删除。事件类型包括 `confirm`、`reject`、`mismatch`、`ignoreTarget`、`override`。
 
-确认事件记录实际站位、目标点、面向、sourceScanId、sourceScannerVersion 和 candidateFingerprint。重扫后先按 fingerprint 精确重绑，再按空间近邻重绑；仍无法匹配的确认事件进入 orphaned label 报告。
+确认事件记录实际点位、面向、sourceScanId、sourceScannerVersion 和 candidateFingerprint。重扫后先按 fingerprint 精确重绑，再按点位和面向做空间近邻重绑；仍无法匹配的确认事件进入 orphaned label 报告。
 
 ## Review And Reports
 
@@ -71,4 +71,5 @@ data/exports/FishingSpotApproachPoints.json
 
 - 只导出 `confirmed` 的 `SpotKey`。
 - `weakCoverage`、`mixedRisk`、`noCandidate`、`ignored`、`orphanedLabels` 默认不导出。
+- 每个点包含 `FishingSpot`、`PositionX`、`PositionY`、`PositionZ`、`Rotation`，对齐 MissFisher `FishRecordSpotIndex` 的消费字段。
 - 每个点保留 `sourceLabelId`、`sourceCandidateFingerprint`、`sourceScanId`，便于回溯。

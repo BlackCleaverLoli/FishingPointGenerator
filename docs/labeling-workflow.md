@@ -8,15 +8,16 @@
 2. 运行 `/fpg catalog` 生成或刷新 Lumina `FishingSpot` 目录。
 3. 运行 `/fpg refresh` 读取当前 territory 的钓场目标。
 4. 运行 `/fpg next` 选择下一个需要维护的钓场，或在 UI 列表中选择目标。
-5. 运行 `/fpg scan` 重扫当前钓场。扫描器会读取当前地图几何，但只保存当前 `SpotKey` 的候选点。
-6. UI 显示推荐站位、目标点、面向和当前状态。
-7. 人工移动到推荐站位抛竿。
-8. 如果推荐点命中当前钓场，运行 `/fpg confirm` 或点击确认。
-9. 如果抛竿结果不匹配当前目标，运行 `/fpg mismatch`，保留复核证据。
-10. 如果只有弱覆盖但人工确认足够可靠，运行 `/fpg allowweak` 允许该钓场导出。
-11. 如果该钓场暂不维护，运行 `/fpg ignore`。
-12. 运行 `/fpg report` 生成当前钓场验证报告。
-13. 运行 `/fpg export` 导出所有 confirmed 钓场。
+5. 运行 `/fpg scan` 重扫当前 Territory 全图候选点。
+6. 运行 `/fpg scantarget`，或在 UI 列表中为已选 `SpotKey` 生成点缓存。
+7. UI 显示推荐点位、朝向和当前状态；overlay 的短线表示该点位记录的 `Rotation`。
+8. 人工移动到候选点附近并朝可钓碰撞面抛竿。
+9. 如果抛竿日志命中当前目标钓场，自动记录同块的局部范围；也可运行 `/fpg confirm` 或点击确认手动记录当前推荐。
+10. 如果抛竿结果不匹配当前目标，运行 `/fpg mismatch`，保留复核证据。
+11. 如果只有弱覆盖但人工确认足够可靠，运行 `/fpg allowweak` 允许该钓场导出。
+12. 如果该钓场暂不维护，运行 `/fpg ignore`。
+13. 运行 `/fpg report` 生成当前钓场验证报告。
+14. 运行 `/fpg export` 导出所有 confirmed 钓场。
 
 `/fpg label <fishingSpotId>` 作为兼容快捷命令保留：它会先选择当前 territory 中对应钓场，再确认当前推荐点。
 
@@ -33,4 +34,4 @@
 
 ## 扫描器状态
 
-当前插件默认接入 `VnavmeshSceneScanner`。它会从当前 active layout 的 fishable 材质碰撞面生成候选站位；`SpotScanService` 再按当前 `FishingSpot` 目标中心和半径过滤为 spot 级 scan。`PlaceholderScanner` 仅作为开发回退实现保留，默认不会使用。
+当前插件默认接入 `VnavmeshSceneScanner`。它会从当前 active layout 中找出 fishable 材质面与纯 walkable 面的边界线，沿边界生成 Territory 级候选点；候选 `Rotation` 垂直于边界线并朝向纯 walkable 面。`SpotScanService` 再为当前 `FishingSpot` 派生 spot 级点缓存，但钓场归属以抛竿日志确认。`PlaceholderScanner` 仅作为开发回退实现保留，默认不会使用。

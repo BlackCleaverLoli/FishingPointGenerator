@@ -1,16 +1,16 @@
 # FishingPointGenerator
 
-FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场站位数据的 Dalamud 工具。
+FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点位数据的 Dalamud 工具。
 
-工具会生成钓场目录，扫描当前地图中目标钓场的候选站位，记录人工验证结果，并将已确认的站位导出为 JSON。
+工具会生成钓场目录，扫描当前地图的全图候选点，记录抛竿验证结果，并将已确认的点位导出为 JSON。
 
 ## 功能
 
 - 从游戏数据生成钓场目录。
-- 针对当前目标钓场扫描候选站位。
+- 扫描当前 Territory 的全图候选点，并为已选钓场生成点缓存。
 - 以 `territoryId` 和 `fishingSpotId` 维护钓场级数据。
-- 支持人工确认、不匹配记录、忽略/复核状态和验证报告。
-- 只导出已确认站位，并保留来源信息便于回溯。
+- 支持抛竿自动点亮、人工确认、不匹配记录、忽略/复核状态和验证报告。
+- 只导出已确认点位，并保留来源信息便于回溯。
 
 ## 使用流程
 
@@ -18,11 +18,11 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场站
 2. 运行 `/fpg catalog` 生成钓场目录。
 3. 运行 `/fpg refresh` 读取当前地图的目标钓场。
 4. 运行 `/fpg next`，或在界面中选择一个目标钓场。
-5. 运行 `/fpg scan` 扫描当前目标钓场的候选站位。
-6. 移动到推荐站位并抛竿。
-7. 如果推荐点命中当前目标钓场，运行 `/fpg confirm`。
-8. 如果推荐点不匹配当前目标钓场，运行 `/fpg mismatch`。
-9. 运行 `/fpg export` 导出已确认站位。
+5. 运行 `/fpg scan` 扫描当前 Territory 全图候选点。
+6. 运行 `/fpg scantarget`，或在界面列表中为已选钓场生成点缓存。
+7. 移动到候选点附近并朝可钓碰撞面抛竿；抛竿日志命中当前钓场时会自动点亮同块的局部范围。
+8. 如果需要手动记录，运行 `/fpg confirm`；如果推荐点不匹配当前目标钓场，运行 `/fpg mismatch`。
+9. 运行 `/fpg export` 导出已确认点位。
 
 ## 命令
 
@@ -33,6 +33,9 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场站
 /fpg next
 /fpg target <fishingSpotId>
 /fpg scan
+/fpg scantarget
+/fpg flag
+/fpg flagstand
 /fpg confirm
 /fpg mismatch
 /fpg allowweak
@@ -61,7 +64,7 @@ FishingPointGenerator 默认只导出经过验证的数据。
 - `confirmed` 钓场会被导出。
 - `weakCoverage`、`mixedRisk`、`noCandidate`、`ignored`、`orphanedLabels` 默认不会导出。
 - 弱覆盖数据可通过 `/fpg allowweak` 显式允许导出。
-- 导出点包含来源 label、candidate fingerprint 和 scan id，便于追踪。
+- 导出点使用 MissFisher 消费侧的 `FishingSpot`、`PositionX/Y/Z`、`Rotation` 形态，并附带来源 label、candidate fingerprint 和 scan id 便于追踪。
 
 ## 文档
 

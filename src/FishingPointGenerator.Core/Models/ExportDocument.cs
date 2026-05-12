@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace FishingPointGenerator.Core.Models;
 
 public sealed record ExportDocument
@@ -16,13 +18,21 @@ public sealed record ExportFishingSpot
 
 public sealed record ExportedApproachPoint
 {
-    public float X { get; init; }
-    public float Y { get; init; }
-    public float Z { get; init; }
+    [JsonPropertyName("FishingSpot")]
+    public uint FishingSpot { get; init; }
+
+    [JsonPropertyName("PositionX")]
+    public float PositionX { get; init; }
+
+    [JsonPropertyName("PositionY")]
+    public float PositionY { get; init; }
+
+    [JsonPropertyName("PositionZ")]
+    public float PositionZ { get; init; }
+
+    [JsonPropertyName("Rotation")]
     public float Rotation { get; init; }
-    public float TargetX { get; init; }
-    public float TargetY { get; init; }
-    public float TargetZ { get; init; }
+
     public float Score { get; init; }
     public string SourceBlockId { get; init; } = string.Empty;
     public string SourceCandidateId { get; init; } = string.Empty;

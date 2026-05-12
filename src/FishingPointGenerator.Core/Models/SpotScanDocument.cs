@@ -16,9 +16,10 @@ public sealed record SpotCandidate
 {
     public SpotKey Key { get; init; }
     public string CandidateFingerprint { get; init; } = string.Empty;
+    public string RegionId { get; init; } = string.Empty;
+    public string BlockId { get; init; } = string.Empty;
     public Point3 Position { get; init; }
     public float Rotation { get; init; }
-    public Point3 TargetPoint { get; init; }
     public float Score { get; init; }
     public CandidateStatus Status { get; init; }
     public string SourceCandidateId { get; init; } = string.Empty;

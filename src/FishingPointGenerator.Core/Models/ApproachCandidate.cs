@@ -8,7 +8,6 @@ public sealed record ApproachCandidate
     public string BlockId { get; init; } = string.Empty;
     public Point3 Position { get; init; }
     public float Rotation { get; init; }
-    public Point3 TargetPoint { get; init; }
     public float Score { get; init; }
     public CandidateStatus Status { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;

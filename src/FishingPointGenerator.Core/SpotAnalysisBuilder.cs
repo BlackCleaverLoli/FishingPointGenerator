@@ -116,7 +116,7 @@ public sealed class SpotAnalysisBuilder
             CandidateCount = scan.Candidates.Count,
             RecommendedCandidate = recommendedCandidate,
             RecommendationReason = SpotRecommendationReason.NeedsVisit,
-            Messages = ["已有候选点，但尚未记录已确认站位。"],
+            Messages = ["已有候选点，但尚未记录已确认点位。"],
         };
     }
 

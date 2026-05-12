@@ -56,14 +56,12 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
         {
             var offset = offsets[index];
             var standingPosition = position + (right * offset.X) + (forward * offset.Y);
-            var targetPosition = standingPosition + (forward * 8f);
             candidates.Add(new ApproachCandidate
             {
                 CandidateId = $"placeholder_{territoryId}_{DateTimeOffset.UtcNow:yyyyMMddHHmmss}_{index:D2}",
                 TerritoryId = territoryId,
                 Position = Point3.From(standingPosition),
                 Rotation = rotation,
-                TargetPoint = Point3.From(targetPosition),
                 Score = 1f - (index * 0.05f),
                 Status = CandidateStatus.Unlabeled,
             });

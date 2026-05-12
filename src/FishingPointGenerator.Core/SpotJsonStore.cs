@@ -93,6 +93,11 @@ public sealed class SpotJsonStore
         WriteJson(GetScanPath(document.Key), document with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
+    public bool DeleteScan(SpotKey key)
+    {
+        return DeleteFile(GetScanPath(key));
+    }
+
     public SpotLabelLedger LoadLedger(SpotKey key)
     {
         var path = GetLedgerPath(key);
@@ -109,6 +114,11 @@ public sealed class SpotJsonStore
         ValidateKey(ledger.Key);
 
         WriteJson(GetLedgerPath(ledger.Key), ledger with { UpdatedAt = DateTimeOffset.UtcNow });
+    }
+
+    public bool DeleteLedger(SpotKey key)
+    {
+        return DeleteFile(GetLedgerPath(key));
     }
 
     public SpotReviewDocument LoadReview(SpotKey key)
@@ -161,6 +171,15 @@ public sealed class SpotJsonStore
             Directory.CreateDirectory(directory);
 
         File.WriteAllText(path, JsonSerializer.Serialize(value, jsonOptions) + "\n");
+    }
+
+    private static bool DeleteFile(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        File.Delete(path);
+        return true;
     }
 
     private static void ValidateKey(SpotKey key)

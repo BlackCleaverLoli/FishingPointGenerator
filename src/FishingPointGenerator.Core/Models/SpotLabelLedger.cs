@@ -27,7 +27,6 @@ public sealed record SpotLabelEvent
     public uint FishingSpotId { get; init; }
     public string CandidateFingerprint { get; init; } = string.Empty;
     public Point3? ConfirmedPosition { get; init; }
-    public Point3? ConfirmedTargetPoint { get; init; }
     public float? ConfirmedRotation { get; init; }
     public string SourceScanId { get; init; } = string.Empty;
     public string SourceScannerVersion { get; init; } = string.Empty;
