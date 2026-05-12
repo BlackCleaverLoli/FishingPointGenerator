@@ -27,7 +27,7 @@ public sealed class SpotAnalysisBuilder
             {
                 Key = target.Key,
                 Status = SpotAnalysisStatus.Ignored,
-                Messages = ["Target is explicitly ignored by review."],
+                Messages = ["该目标已在 review 中明确忽略。"],
             };
         }
 
@@ -37,7 +37,7 @@ public sealed class SpotAnalysisBuilder
             {
                 Key = target.Key,
                 Status = SpotAnalysisStatus.NeedsScan,
-                Messages = ["No scan document exists for this fishing spot."],
+                Messages = ["此 FishingSpot 没有扫描文档。"],
             };
         }
 
@@ -47,7 +47,7 @@ public sealed class SpotAnalysisBuilder
             {
                 Key = target.Key,
                 Status = SpotAnalysisStatus.NoCandidate,
-                Messages = ["Scan completed but produced no candidates for this fishing spot."],
+                Messages = ["扫描已完成，但没有为此 FishingSpot 生成候选点。"],
             };
         }
 
@@ -72,7 +72,7 @@ public sealed class SpotAnalysisBuilder
                 HasMixedRisk = hasMixedRisk,
                 RecommendedCandidate = recommendedCandidate,
                 RecommendationReason = SpotRecommendationReason.OrphanedLabelReview,
-                Messages = [$"{rebind.OrphanedLabels.Count} confirmed label(s) could not be rebound after the latest scan."],
+                Messages = [$"最新扫描后有 {rebind.OrphanedLabels.Count} 个已确认标记无法重新绑定。"],
             };
         }
 
@@ -87,7 +87,7 @@ public sealed class SpotAnalysisBuilder
                 HasMixedRisk = true,
                 RecommendedCandidate = recommendedCandidate,
                 RecommendationReason = SpotRecommendationReason.MixedRiskReview,
-                Messages = ["One or more candidates are close to another FishingSpot target."],
+                Messages = ["一个或多个候选点接近其他 FishingSpot 目标。"],
             };
         }
 
@@ -116,7 +116,7 @@ public sealed class SpotAnalysisBuilder
             CandidateCount = scan.Candidates.Count,
             RecommendedCandidate = recommendedCandidate,
             RecommendationReason = SpotRecommendationReason.NeedsVisit,
-            Messages = ["Candidates exist, but no confirmed standing position has been recorded."],
+            Messages = ["已有候选点，但尚未记录已确认站位。"],
         };
     }
 

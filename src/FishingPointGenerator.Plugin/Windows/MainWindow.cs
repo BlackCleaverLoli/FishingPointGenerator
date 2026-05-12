@@ -52,8 +52,8 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.SameLine();
         DrawStatusBadge();
 
-        DrawKeyValueInline("Territory", session.CurrentTerritoryId.ToString());
-        DrawKeyValueInline("Scanner", session.ScannerName);
+        DrawKeyValueInline("当前区域", session.CurrentTerritoryId.ToString());
+        DrawKeyValueInline("扫描器", session.ScannerName);
 
         ImGui.PushTextWrapPos();
         ImGui.TextColored(GetMessageColor(), session.LastMessage);
@@ -62,51 +62,51 @@ internal sealed class MainWindow : Window, IDisposable
 
     private void DrawActions()
     {
-        DrawSectionTitle("Actions");
+        DrawSectionTitle("操作");
 
-        if (ImGui.Button("Refresh catalog"))
+        if (ImGui.Button("刷新目录"))
             session.RefreshCatalog();
 
         ImGui.SameLine();
-        if (ImGui.Button("Refresh territory"))
+        if (ImGui.Button("刷新当前区域"))
             session.RefreshCurrentTerritory(selectNext: false);
 
         ImGui.SameLine();
-        if (ImGui.Button("Next target"))
+        if (ImGui.Button("下一个目标"))
             session.SelectNextTarget();
 
         ImGui.SameLine();
-        if (ImGui.Button("Scan target"))
+        if (ImGui.Button("扫描目标"))
             session.ScanCurrentTarget();
 
-        if (ImGui.Button("Confirm recommendation"))
+        if (ImGui.Button("确认推荐"))
             session.ConfirmRecommendation();
 
         ImGui.SameLine();
-        if (ImGui.Button("Record mismatch"))
+        if (ImGui.Button("记录不匹配"))
             session.RecordMismatch();
 
         ImGui.SameLine();
-        if (ImGui.Button("Allow weak export"))
+        if (ImGui.Button("允许弱覆盖导出"))
             session.AllowWeakCoverageExport();
 
         ImGui.SameLine();
-        if (ImGui.Button("Ignore target"))
+        if (ImGui.Button("忽略目标"))
             session.IgnoreCurrentTarget();
 
         ImGui.SameLine();
-        if (ImGui.Button("Generate report"))
+        if (ImGui.Button("生成报告"))
             session.GenerateCurrentReport();
 
         ImGui.SameLine();
-        if (ImGui.Button("Export confirmed"))
+        if (ImGui.Button("导出已确认"))
             session.ExportConfirmed();
 
         ImGui.Spacing();
         ImGui.SetNextItemWidth(150f);
-        ImGui.InputText("FishingSpot.RowId override", ref targetIdText, 16);
+        ImGui.InputText("指定 FishingSpot.RowId", ref targetIdText, 16);
         ImGui.SameLine();
-        if (ImGui.Button("Select"))
+        if (ImGui.Button("选择"))
         {
             if (uint.TryParse(targetIdText.Trim(), out var targetId))
                 session.SelectTarget(targetId);
@@ -115,31 +115,31 @@ internal sealed class MainWindow : Window, IDisposable
 
     private void DrawTerritoryOverview()
     {
-        DrawSectionTitle("Current Territory");
+        DrawSectionTitle("当前区域");
 
         if (!ImGui.BeginTable("##fpg_territory_overview", 2, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
             return;
 
-        DrawSummaryRow("Targets", session.TargetCount.ToString());
-        DrawSummaryRow("Confirmed", session.ConfirmedCount.ToString(), session.ConfirmedCount > 0 ? GoodText : MutedText);
-        DrawSummaryRow("Needs visit", session.NeedsVisitCount.ToString(), session.NeedsVisitCount > 0 ? WarnText : MutedText);
-        DrawSummaryRow("Weak coverage", session.WeakCoverageCount.ToString(), session.WeakCoverageCount > 0 ? WarnText : MutedText);
-        DrawSummaryRow("No candidate", session.NoCandidateCount.ToString(), session.NoCandidateCount > 0 ? ErrorText : MutedText);
-        DrawSummaryRow("Mixed risk", session.MixedRiskCount.ToString(), session.MixedRiskCount > 0 ? WarnText : MutedText);
-        DrawSummaryRow("Orphaned labels", session.OrphanedLabelCount.ToString(), session.OrphanedLabelCount > 0 ? ErrorText : MutedText);
-        DrawSummaryRow("Ignored", session.IgnoredCount.ToString(), session.IgnoredCount > 0 ? MutedText : MutedText);
+        DrawSummaryRow("目标数", session.TargetCount.ToString());
+        DrawSummaryRow("已确认", session.ConfirmedCount.ToString(), session.ConfirmedCount > 0 ? GoodText : MutedText);
+        DrawSummaryRow("需到访", session.NeedsVisitCount.ToString(), session.NeedsVisitCount > 0 ? WarnText : MutedText);
+        DrawSummaryRow("弱覆盖", session.WeakCoverageCount.ToString(), session.WeakCoverageCount > 0 ? WarnText : MutedText);
+        DrawSummaryRow("无候选点", session.NoCandidateCount.ToString(), session.NoCandidateCount > 0 ? ErrorText : MutedText);
+        DrawSummaryRow("混合风险", session.MixedRiskCount.ToString(), session.MixedRiskCount > 0 ? WarnText : MutedText);
+        DrawSummaryRow("孤立标记", session.OrphanedLabelCount.ToString(), session.OrphanedLabelCount > 0 ? ErrorText : MutedText);
+        DrawSummaryRow("已忽略", session.IgnoredCount.ToString(), session.IgnoredCount > 0 ? MutedText : MutedText);
 
         ImGui.EndTable();
     }
 
     private void DrawTargetDetails()
     {
-        DrawSectionTitle("Selected Target");
+        DrawSectionTitle("已选目标");
 
         var target = session.CurrentTarget;
         if (target is null)
         {
-            ImGui.TextColored(MutedText, "No FishingSpot target is selected.");
+            ImGui.TextColored(MutedText, "未选择 FishingSpot 目标。");
             return;
         }
 
@@ -148,22 +148,22 @@ internal sealed class MainWindow : Window, IDisposable
             return;
 
         DrawSummaryRow("RowId", target.FishingSpotId.ToString());
-        DrawSummaryRow("Name", target.Name);
-        DrawSummaryRow("Status", analysis?.Status.ToString() ?? "NotStarted", GetStatusColor(analysis?.Status));
-        DrawSummaryRow("Map", $"{target.MapX:F2}, {target.MapY:F2}");
-        DrawSummaryRow("World", $"{target.WorldX:F2}, {target.WorldZ:F2}");
-        DrawSummaryRow("Radius", target.Radius.ToString("F1"));
-        DrawSummaryRow("Fish items", target.ItemIds.Count == 0 ? "-" : string.Join(", ", target.ItemIds));
-        DrawSummaryRow("Candidates", (analysis?.CandidateCount ?? 0).ToString());
-        DrawSummaryRow("Confirmed labels", (analysis?.ConfirmedLabelCount ?? 0).ToString());
+        DrawSummaryRow("名称", target.Name);
+        DrawSummaryRow("状态", FormatStatus(analysis?.Status), GetStatusColor(analysis?.Status));
+        DrawSummaryRow("地图坐标", $"{target.MapX:F2}, {target.MapY:F2}");
+        DrawSummaryRow("世界坐标", $"{target.WorldX:F2}, {target.WorldZ:F2}");
+        DrawSummaryRow("半径", target.Radius.ToString("F1"));
+        DrawSummaryRow("鱼类物品", target.ItemIds.Count == 0 ? "-" : string.Join(", ", target.ItemIds));
+        DrawSummaryRow("候选点", (analysis?.CandidateCount ?? 0).ToString());
+        DrawSummaryRow("已确认标记", (analysis?.ConfirmedLabelCount ?? 0).ToString());
 
         var candidate = analysis?.RecommendedCandidate;
         if (candidate is not null)
         {
-            DrawSummaryRow("Recommendation", analysis?.RecommendationReason?.ToString() ?? "-");
-            DrawSummaryRow("Standing", FormatPoint(candidate.Position));
-            DrawSummaryRow("Rotation", candidate.Rotation.ToString("F3"));
-            DrawSummaryRow("Target point", FormatPoint(candidate.TargetPoint));
+            DrawSummaryRow("推荐原因", FormatRecommendationReason(analysis?.RecommendationReason));
+            DrawSummaryRow("站位", FormatPoint(candidate.Position));
+            DrawSummaryRow("朝向", candidate.Rotation.ToString("F3"));
+            DrawSummaryRow("目标点", FormatPoint(candidate.TargetPoint));
             DrawSummaryRow("Fingerprint", candidate.CandidateFingerprint);
         }
 
@@ -172,24 +172,24 @@ internal sealed class MainWindow : Window, IDisposable
 
     private void DrawTargetList()
     {
-        DrawSectionTitle("Fishing Spots");
+        DrawSectionTitle("FishingSpot 列表");
 
         if (session.CurrentTerritoryTargets.Count == 0)
         {
-            ImGui.TextColored(MutedText, "No catalog targets are loaded for this territory.");
+            ImGui.TextColored(MutedText, "当前区域未加载目录目标。");
             return;
         }
 
         if (!ImGui.BeginTable("##fpg_spot_list", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY))
             return;
 
-        ImGui.TableSetupColumn("Pick");
-        ImGui.TableSetupColumn("Status");
+        ImGui.TableSetupColumn("选择");
+        ImGui.TableSetupColumn("状态");
         ImGui.TableSetupColumn("RowId");
-        ImGui.TableSetupColumn("Name");
-        ImGui.TableSetupColumn("Map");
-        ImGui.TableSetupColumn("Candidates");
-        ImGui.TableSetupColumn("Labels");
+        ImGui.TableSetupColumn("名称");
+        ImGui.TableSetupColumn("地图坐标");
+        ImGui.TableSetupColumn("候选点");
+        ImGui.TableSetupColumn("标记");
         ImGui.TableHeadersRow();
 
         foreach (var target in session.CurrentTerritoryTargets.Take(120))
@@ -197,11 +197,11 @@ internal sealed class MainWindow : Window, IDisposable
             var analysis = session.Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
             ImGui.TableNextRow();
             ImGui.TableNextColumn();
-            if (ImGui.SmallButton($"Select##spot_{target.FishingSpotId}"))
+            if (ImGui.SmallButton($"选择##spot_{target.FishingSpotId}"))
                 session.SelectTarget(target.FishingSpotId);
 
             ImGui.TableNextColumn();
-            ImGui.TextColored(GetStatusColor(analysis?.Status), analysis?.Status.ToString() ?? "NotStarted");
+            ImGui.TextColored(GetStatusColor(analysis?.Status), FormatStatus(analysis?.Status));
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(target.FishingSpotId.ToString());
             ImGui.TableNextColumn();
@@ -217,19 +217,19 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.EndTable();
 
         if (session.CurrentTerritoryTargets.Count > 120)
-            ImGui.TextColored(MutedText, $"Showing first 120 of {session.CurrentTerritoryTargets.Count} targets.");
+            ImGui.TextColored(MutedText, $"仅显示前 120 / {session.CurrentTerritoryTargets.Count} 个目标。");
     }
 
     private void DrawPaths()
     {
-        DrawSectionTitle("Files");
+        DrawSectionTitle("文件");
 
         if (!ImGui.BeginTable("##fpg_paths", 2, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg))
             return;
 
-        DrawSummaryRow("Data", session.DataRoot);
-        DrawSummaryRow("Catalog", session.CatalogPath);
-        DrawSummaryRow("Export", session.ExportPath);
+        DrawSummaryRow("数据", session.DataRoot);
+        DrawSummaryRow("目录", session.CatalogPath);
+        DrawSummaryRow("导出", session.ExportPath);
 
         ImGui.EndTable();
     }
@@ -242,28 +242,42 @@ internal sealed class MainWindow : Window, IDisposable
 
     private (string Text, Vector4 Color) GetStatus()
     {
-        if (session.LastMessage.Contains("failed", StringComparison.OrdinalIgnoreCase))
-            return ("Error", ErrorText);
+        if (IsErrorMessage(session.LastMessage))
+            return ("错误", ErrorText);
 
         if (session.TargetCount == 0)
-            return ("No catalog", MutedText);
+            return ("无目录", MutedText);
 
         if (session.CurrentAnalysis?.RecommendedCandidate is not null)
-            return ("Ready", GoodText);
+            return ("就绪", GoodText);
 
-        return ("Loaded", GoodText);
+        return ("已加载", GoodText);
     }
 
     private Vector4 GetMessageColor()
     {
-        if (session.LastMessage.Contains("failed", StringComparison.OrdinalIgnoreCase))
+        if (IsErrorMessage(session.LastMessage))
             return ErrorText;
 
         if (session.LastMessage.Contains("empty", StringComparison.OrdinalIgnoreCase)
             || session.LastMessage.Contains("No ", StringComparison.Ordinal))
             return WarnText;
+        if (session.LastMessage.Contains("为空", StringComparison.Ordinal)
+            || session.LastMessage.Contains("没有", StringComparison.Ordinal)
+            || session.LastMessage.Contains("未", StringComparison.Ordinal)
+            || session.LastMessage.Contains("无", StringComparison.Ordinal)
+            || session.LastMessage.Contains("不在", StringComparison.Ordinal)
+            || session.LastMessage.Contains("不可用", StringComparison.Ordinal))
+            return WarnText;
 
         return MutedText;
+    }
+
+    private static bool IsErrorMessage(string message)
+    {
+        return message.Contains("failed", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("失败", StringComparison.Ordinal)
+            || message.Contains("错误", StringComparison.Ordinal);
     }
 
     private static Vector4 GetStatusColor(SpotAnalysisStatus? status)
@@ -279,6 +293,36 @@ internal sealed class MainWindow : Window, IDisposable
             SpotAnalysisStatus.NeedsVisit => WarnText,
             SpotAnalysisStatus.NeedsScan => WarnText,
             _ => MutedText,
+        };
+    }
+
+    private static string FormatStatus(SpotAnalysisStatus? status)
+    {
+        return status switch
+        {
+            SpotAnalysisStatus.NotStarted => "未开始",
+            SpotAnalysisStatus.NeedsScan => "需扫描",
+            SpotAnalysisStatus.NeedsVisit => "需到访",
+            SpotAnalysisStatus.Confirmed => "已确认",
+            SpotAnalysisStatus.WeakCoverage => "弱覆盖",
+            SpotAnalysisStatus.MixedRisk => "混合风险",
+            SpotAnalysisStatus.NoCandidate => "无候选点",
+            SpotAnalysisStatus.Ignored => "已忽略",
+            SpotAnalysisStatus.Stale => "已过期",
+            SpotAnalysisStatus.OrphanedLabels => "孤立标记",
+            _ => "未开始",
+        };
+    }
+
+    private static string FormatRecommendationReason(SpotRecommendationReason? reason)
+    {
+        return reason switch
+        {
+            SpotRecommendationReason.NeedsVisit => "需到访",
+            SpotRecommendationReason.WeakCoverage => "弱覆盖",
+            SpotRecommendationReason.OrphanedLabelReview => "检查孤立标记",
+            SpotRecommendationReason.MixedRiskReview => "检查混合风险",
+            _ => "-",
         };
     }
 

@@ -27,7 +27,7 @@ internal sealed class SurveySession
     public IReadOnlyList<SurveyBlock> Blocks { get; private set; } = [];
     public IReadOnlyList<SurveyBlockState> States { get; private set; } = [];
     public SurveyRecommendation? Recommendation { get; private set; }
-    public string LastMessage { get; private set; } = "Ready.";
+    public string LastMessage { get; private set; } = "就绪。";
 
     public uint CurrentTerritoryId => DService.Instance().ClientState.TerritoryType;
     public int CandidateCount => CurrentSurvey?.Candidates.Count ?? 0;
@@ -44,7 +44,7 @@ internal sealed class SurveySession
         CurrentSurvey = store.LoadGeneratedSurvey(territoryId);
         CurrentLabels = store.LoadLabels(territoryId);
         RebuildState();
-        LastMessage = $"Loaded territory {territoryId}.";
+        LastMessage = $"已加载区域 {territoryId}。";
     }
 
     public void ScanCurrentTerritory()
@@ -61,7 +61,7 @@ internal sealed class SurveySession
             Blocks = [];
             States = [];
             Recommendation = null;
-            LastMessage = $"Scan failed: {ex.Message}";
+            LastMessage = $"扫描失败：{ex.Message}";
             return;
         }
 
@@ -72,7 +72,7 @@ internal sealed class SurveySession
             Blocks = [];
             States = [];
             Recommendation = null;
-            LastMessage = "Scanner returned no candidates.";
+            LastMessage = "扫描器未返回候选点。";
             return;
         }
 
@@ -86,21 +86,21 @@ internal sealed class SurveySession
 
         CurrentLabels = store.LoadLabels(CurrentSurvey.TerritoryId);
         RebuildStateFromBlocks(blocks);
-        LastMessage = $"Scanned territory {CurrentSurvey.TerritoryId}: {CandidateCount} candidates, {BlockCount} blocks.";
+        LastMessage = $"已扫描区域 {CurrentSurvey.TerritoryId}：{CandidateCount} 个候选点，{BlockCount} 个区块。";
     }
 
     public void LabelRecommendation(uint fishingSpotId)
     {
         if (fishingSpotId == 0)
         {
-            LastMessage = "FishingSpot.RowId must be greater than zero.";
+            LastMessage = "FishingSpot.RowId 必须大于 0。";
             return;
         }
 
         var recommendation = Recommendation;
         if (CurrentSurvey is null || recommendation?.Candidate is null)
         {
-            LastMessage = "No recommended block is available to label.";
+            LastMessage = "没有可用于标记的推荐区块。";
             return;
         }
 
@@ -118,7 +118,7 @@ internal sealed class SurveySession
         };
 
         AppendLabel(label);
-        LastMessage = $"Labeled {recommendation.BlockId} as FishingSpot {fishingSpotId}.";
+        LastMessage = $"已将 {recommendation.BlockId} 标记为 FishingSpot {fishingSpotId}。";
     }
 
     public void IgnoreRecommendation()
@@ -126,7 +126,7 @@ internal sealed class SurveySession
         var recommendation = Recommendation;
         if (CurrentSurvey is null || recommendation?.Candidate is null)
         {
-            LastMessage = "No recommended block is available to ignore.";
+            LastMessage = "没有可用于忽略的推荐区块。";
             return;
         }
 
@@ -143,20 +143,20 @@ internal sealed class SurveySession
             ConfirmedRotation = playerSnapshot?.Rotation ?? candidate.Rotation,
         });
 
-        LastMessage = $"Ignored {recommendation.BlockId}.";
+        LastMessage = $"已忽略 {recommendation.BlockId}。";
     }
 
     public void Export()
     {
         if (States.Count == 0)
         {
-            LastMessage = "No analyzed blocks are available to export.";
+            LastMessage = "没有可导出的已分析区块。";
             return;
         }
 
         var export = exportBuilder.Build(States);
         store.SaveExport(export);
-        LastMessage = $"Exported {export.FishingSpots.Sum(spot => spot.Points.Count)} points to {ExportPath}.";
+        LastMessage = $"已导出 {export.FishingSpots.Sum(spot => spot.Points.Count)} 个点到 {ExportPath}。";
     }
 
     private void AppendLabel(FishingSpotLabel label)

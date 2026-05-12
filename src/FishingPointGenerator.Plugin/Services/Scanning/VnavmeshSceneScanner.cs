@@ -29,7 +29,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         this.pluginLog = pluginLog;
     }
 
-    public string Name => "Active layout fishable-material scanner";
+    public string Name => "当前布局可钓鱼材质扫描器";
     public bool IsPlaceholder => false;
 
     public TerritorySurveyDocument ScanCurrentTerritory()
@@ -56,7 +56,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         if (fishableTriangles.Count == 0 || walkableTriangles.Count == 0)
         {
             pluginLog.Warning(
-                "FPG scene scan found no usable geometry. Territory={TerritoryId}, fishable={FishableCount}, walkable={WalkableCount}",
+                "FPG 场景扫描未找到可用几何体。Territory={TerritoryId}, fishable={FishableCount}, walkable={WalkableCount}",
                 territoryId,
                 fishableTriangles.Count,
                 walkableTriangles.Count);
@@ -66,7 +66,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var player = service.ObjectTable.LocalPlayer;
         var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, player?.Position);
         pluginLog.Information(
-            "FPG scene scan finished. Territory={TerritoryId}, fishableTriangles={FishableCount}, walkableTriangles={WalkableCount}, candidates={CandidateCount}",
+            "FPG 场景扫描完成。Territory={TerritoryId}, fishableTriangles={FishableCount}, walkableTriangles={WalkableCount}, candidates={CandidateCount}",
             territoryId,
             fishableTriangles.Count,
             walkableTriangles.Count,

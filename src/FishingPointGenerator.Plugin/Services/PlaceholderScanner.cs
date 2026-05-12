@@ -15,7 +15,7 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
         this.pluginLog = pluginLog;
     }
 
-    public string Name => "Placeholder scanner";
+    public string Name => "占位扫描器";
     public bool IsPlaceholder => true;
 
     public TerritorySurveyDocument ScanCurrentTerritory()
@@ -25,7 +25,7 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
         var player = service.ObjectTable.LocalPlayer;
         if (territoryId == 0 || player is null)
         {
-            pluginLog.Warning("Placeholder scan skipped because no territory or local player is available.");
+            pluginLog.Warning("占位扫描已跳过：没有可用区域或本地玩家。");
             return new TerritorySurveyDocument
             {
                 TerritoryId = territoryId,

@@ -28,7 +28,7 @@ internal sealed class SpotScanService
         var survey = geometryCache.ScanCurrentTerritory(forceTerritoryRescan);
         if (survey.TerritoryId != target.TerritoryId)
         {
-            warnings.Add($"Current territory {survey.TerritoryId} does not match target territory {target.TerritoryId}.");
+            warnings.Add($"当前区域 {survey.TerritoryId} 与目标区域 {target.TerritoryId} 不一致。");
             return CreateDocument(target.Key, [], warnings);
         }
 
@@ -47,7 +47,7 @@ internal sealed class SpotScanService
             .ToList();
 
         if (candidates.Count == 0)
-            warnings.Add("Territory scan completed, but no candidates landed inside this FishingSpot search radius.");
+            warnings.Add("区域扫描已完成，但没有候选点落在此 FishingSpot 搜索半径内。");
 
         return CreateDocument(target.Key, candidates, warnings);
     }

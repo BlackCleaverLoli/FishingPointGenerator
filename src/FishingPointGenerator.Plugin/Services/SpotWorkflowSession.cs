@@ -31,7 +31,7 @@ internal sealed class SpotWorkflowSession
     public IReadOnlyList<SpotAnalysis> Analyses { get; private set; } = [];
     public FishingSpotTarget? CurrentTarget { get; private set; }
     public SpotAnalysis? CurrentAnalysis { get; private set; }
-    public string LastMessage { get; private set; } = "Ready.";
+    public string LastMessage { get; private set; } = "就绪。";
 
     public uint CurrentTerritoryId => DService.Instance().ClientState.TerritoryType;
     public string CatalogPath => store.GetCatalogPath();
@@ -50,7 +50,7 @@ internal sealed class SpotWorkflowSession
         Catalog = catalogBuilder.Build();
         store.SaveCatalog(Catalog);
         RefreshCurrentTerritory(selectNext: true);
-        LastMessage = $"Catalog refreshed: {Catalog.Spots.Count} fishing spots.";
+        LastMessage = $"目录已刷新：{Catalog.Spots.Count} 个 FishingSpot。";
     }
 
     public void RefreshCurrentTerritory(bool selectNext = false)
@@ -58,7 +58,7 @@ internal sealed class SpotWorkflowSession
         Catalog = store.LoadCatalog();
         if (Catalog.Spots.Count == 0)
         {
-            LastMessage = "FishingSpot catalog is empty. Refresh catalog first.";
+            LastMessage = "FishingSpot 目录为空。请先刷新目录。";
             CurrentTerritoryTargets = [];
             Analyses = [];
             CurrentTarget = null;
@@ -78,7 +78,7 @@ internal sealed class SpotWorkflowSession
         else
             SyncCurrentAnalysis();
 
-        LastMessage = $"Loaded territory {territoryId}: {CurrentTerritoryTargets.Count} catalog targets.";
+        LastMessage = $"已加载区域 {territoryId}：{CurrentTerritoryTargets.Count} 个目录目标。";
     }
 
     public bool SelectTarget(uint fishingSpotId)
@@ -86,13 +86,13 @@ internal sealed class SpotWorkflowSession
         var target = CurrentTerritoryTargets.FirstOrDefault(target => target.FishingSpotId == fishingSpotId);
         if (target is null)
         {
-            LastMessage = $"FishingSpot {fishingSpotId} is not in current territory {CurrentTerritoryId}.";
+            LastMessage = $"FishingSpot {fishingSpotId} 不在当前区域 {CurrentTerritoryId}。";
             return false;
         }
 
         CurrentTarget = target;
         SyncCurrentAnalysis();
-        LastMessage = $"Selected FishingSpot {target.FishingSpotId}: {target.Name}.";
+        LastMessage = $"已选择 FishingSpot {target.FishingSpotId}：{target.Name}。";
         return true;
     }
 
@@ -104,14 +104,14 @@ internal sealed class SpotWorkflowSession
             CurrentTarget = CurrentTerritoryTargets.FirstOrDefault();
             SyncCurrentAnalysis();
             if (setMessage)
-                LastMessage = CurrentTarget is null ? "No target is available in this territory." : "No pending target; selected first catalog row.";
+                LastMessage = CurrentTarget is null ? "当前区域没有可用目标。" : "没有待处理目标；已选择目录第一行。";
             return;
         }
 
         CurrentTarget = CurrentTerritoryTargets.FirstOrDefault(target => target.Key == next.Key);
         CurrentAnalysis = next;
         if (setMessage && CurrentTarget is not null)
-            LastMessage = $"Selected next target {CurrentTarget.FishingSpotId}: {CurrentTarget.Name}.";
+            LastMessage = $"已选择下一个目标 {CurrentTarget.FishingSpotId}：{CurrentTarget.Name}。";
     }
 
     public void ScanCurrentTarget()
@@ -123,7 +123,7 @@ internal sealed class SpotWorkflowSession
         store.SaveScan(scan);
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"Scanned FishingSpot {CurrentTarget!.FishingSpotId}: {scan.Candidates.Count} candidates.";
+        LastMessage = $"已扫描 FishingSpot {CurrentTarget!.FishingSpotId}：{scan.Candidates.Count} 个候选点。";
     }
 
     public void ConfirmRecommendation()
@@ -145,7 +145,7 @@ internal sealed class SpotWorkflowSession
             SourceScannerVersion = scan.ScannerVersion,
         });
 
-        LastMessage = $"Confirmed recommendation for FishingSpot {CurrentTarget.FishingSpotId}.";
+        LastMessage = $"已确认 FishingSpot {CurrentTarget.FishingSpotId} 的推荐。";
     }
 
     public void RecordMismatch()
@@ -167,7 +167,7 @@ internal sealed class SpotWorkflowSession
             SourceScannerVersion = scan.ScannerVersion,
         });
 
-        LastMessage = $"Recorded mismatch for FishingSpot {CurrentTarget.FishingSpotId}.";
+        LastMessage = $"已记录 FishingSpot {CurrentTarget.FishingSpotId} 的不匹配。";
     }
 
     public void IgnoreCurrentTarget()
@@ -182,7 +182,7 @@ internal sealed class SpotWorkflowSession
         });
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"Ignored FishingSpot {CurrentTarget.FishingSpotId}.";
+        LastMessage = $"已忽略 FishingSpot {CurrentTarget.FishingSpotId}。";
     }
 
     public void AllowWeakCoverageExport()
@@ -197,7 +197,7 @@ internal sealed class SpotWorkflowSession
         });
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"Allowed weak coverage export for FishingSpot {CurrentTarget.FishingSpotId}.";
+        LastMessage = $"已允许 FishingSpot {CurrentTarget.FishingSpotId} 以弱覆盖状态导出。";
     }
 
     public void GenerateCurrentReport()
@@ -209,7 +209,7 @@ internal sealed class SpotWorkflowSession
         var ledger = TryLoadLedger(CurrentTarget.Key);
         var report = analysisBuilder.BuildValidationReport(CurrentAnalysis ?? BuildAnalysis(CurrentTarget!), ledger, scan);
         store.SaveReport(report);
-        LastMessage = $"Generated validation report for FishingSpot {CurrentTarget.FishingSpotId}.";
+        LastMessage = $"已生成 FishingSpot {CurrentTarget.FishingSpotId} 的验证报告。";
     }
 
     public void ExportConfirmed()
@@ -235,7 +235,7 @@ internal sealed class SpotWorkflowSession
 
         var export = exportBuilder.Build(analyses, scans, ledgers);
         store.SaveExport(export);
-        LastMessage = $"Exported {export.FishingSpots.Sum(spot => spot.Points.Count)} confirmed approach points.";
+        LastMessage = $"已导出 {export.FishingSpots.Sum(spot => spot.Points.Count)} 个已确认站位点。";
     }
 
     private void AppendLedgerEvent(SpotLabelEvent labelEvent)
@@ -260,7 +260,7 @@ internal sealed class SpotWorkflowSession
         var selectedCandidate = CurrentAnalysis?.RecommendedCandidate ?? scan.Candidates.FirstOrDefault();
         if (selectedCandidate is null || string.IsNullOrWhiteSpace(selectedCandidate.CandidateFingerprint))
         {
-            LastMessage = "No recommendation is available for the selected target.";
+            LastMessage = "已选目标没有可用推荐。";
             return false;
         }
 
@@ -277,7 +277,7 @@ internal sealed class SpotWorkflowSession
         if (CurrentTarget is not null)
             return true;
 
-        LastMessage = "No FishingSpot target is selected.";
+        LastMessage = "未选择 FishingSpot 目标。";
         return false;
     }
 

@@ -12,7 +12,7 @@ public static class SpotFingerprint
     public static string CreateCandidateFingerprint(SpotKey key, Point3 position, Point3 targetPoint)
     {
         if (!key.IsValid)
-            throw new ArgumentException("SpotKey must include a territory and fishing spot id.", nameof(key));
+            throw new ArgumentException("SpotKey 必须包含 TerritoryId 和 FishingSpotId。", nameof(key));
 
         var payload = string.Join(
             "|",

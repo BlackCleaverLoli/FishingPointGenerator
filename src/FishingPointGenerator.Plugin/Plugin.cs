@@ -13,18 +13,18 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/fpg";
     private const string CommandHelp =
-        "/fpg - toggle window\n"
-        + "/fpg catalog - rebuild the FishingSpot catalog\n"
-        + "/fpg refresh - reload current territory targets\n"
-        + "/fpg next - select the next target needing work\n"
-        + "/fpg target <fishingSpotId> - select a target in the current territory\n"
-        + "/fpg scan - rescan the selected target\n"
-        + "/fpg confirm - confirm the selected target recommendation\n"
-        + "/fpg mismatch - record that the recommendation did not match this target\n"
-        + "/fpg allowweak - allow weak coverage export for selected target\n"
-        + "/fpg ignore - ignore the selected target\n"
-        + "/fpg report - generate validation report for selected target\n"
-        + "/fpg export - export confirmed FishingSpot approach points";
+        "/fpg - 打开/关闭窗口\n"
+        + "/fpg catalog - 重建 FishingSpot 目录\n"
+        + "/fpg refresh - 重新加载当前区域目标\n"
+        + "/fpg next - 选择下一个需要处理的目标\n"
+        + "/fpg target <fishingSpotId> - 选择当前区域内的目标\n"
+        + "/fpg scan - 重新扫描已选目标\n"
+        + "/fpg confirm - 确认已选目标的推荐\n"
+        + "/fpg mismatch - 记录此目标与推荐不匹配\n"
+        + "/fpg allowweak - 允许已选目标以弱覆盖状态导出\n"
+        + "/fpg ignore - 忽略已选目标\n"
+        + "/fpg report - 为已选目标生成验证报告\n"
+        + "/fpg export - 导出已确认的 FishingSpot 站位点";
 
     private readonly IDalamudPluginInterface pluginInterface;
     private readonly IPluginLog pluginLog;
@@ -95,8 +95,8 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch (Exception ex)
         {
-            pluginLog.Error(ex, "FishingPointGenerator command failed");
-            Print($"Command failed: {ex.Message}");
+            pluginLog.Error(ex, "FishingPointGenerator 命令执行失败");
+            Print($"命令执行失败：{ex.Message}");
         }
     }
 
@@ -133,7 +133,7 @@ public sealed class Plugin : IDalamudPlugin
             case "target":
                 if (parts.Length < 2 || !uint.TryParse(parts[1], out var targetSpotId) || targetSpotId == 0)
                 {
-                    Print("Usage: /fpg target <fishingSpotId>");
+                    Print("用法：/fpg target <fishingSpotId>");
                     return;
                 }
 
@@ -145,7 +145,7 @@ public sealed class Plugin : IDalamudPlugin
             case "label":
                 if (parts.Length < 2 || !uint.TryParse(parts[1], out var fishingSpotId) || fishingSpotId == 0)
                 {
-                    Print("Usage: /fpg label <fishingSpotId>");
+                    Print("用法：/fpg label <fishingSpotId>");
                     return;
                 }
 
@@ -202,7 +202,7 @@ public sealed class Plugin : IDalamudPlugin
                 break;
 
             default:
-                Print("Unknown command. Use /fpg help.");
+                Print("未知命令。使用 /fpg help 查看帮助。");
                 break;
         }
     }

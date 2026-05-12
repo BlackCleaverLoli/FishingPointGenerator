@@ -166,6 +166,6 @@ public sealed class SpotJsonStore
     private static void ValidateKey(SpotKey key)
     {
         if (!key.IsValid)
-            throw new ArgumentException("SpotKey must include a territory and fishing spot id.", nameof(key));
+            throw new ArgumentException("SpotKey 必须包含 TerritoryId 和 FishingSpotId。", nameof(key));
     }
 }
