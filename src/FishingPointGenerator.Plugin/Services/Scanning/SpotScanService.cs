@@ -56,7 +56,7 @@ internal sealed class SpotScanService
             .ToList();
 
         if (candidates.Count == 0)
-            warnings.Add("区域扫描已完成，但当前 Territory 全图缓存没有候选点。");
+            warnings.Add("区域扫描已完成，但当前 Territory 内存候选为空。");
         else
             warnings.Add("点缓存未按 FishingSpot 半径裁剪；实际钓场归属以抛竿日志确认为准。");
 
@@ -93,6 +93,8 @@ internal sealed class SpotScanService
             Position = candidate.Position,
             Rotation = candidate.Rotation,
             Status = candidate.Status,
+            Reachability = candidate.Reachability,
+            PathLengthMeters = candidate.PathLengthMeters,
             SourceCandidateId = candidate.CandidateId,
             DistanceToTargetCenterMeters = targetDistance,
             IsWithinTargetSearchRadius = targetDistance <= searchRadius,

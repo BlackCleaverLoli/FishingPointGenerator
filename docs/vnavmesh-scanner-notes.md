@@ -22,7 +22,7 @@ public interface ICurrentTerritoryScanner
 
 Core 只接收 `ApproachCandidate`，不依赖 Dalamud、OmenTools 或 vnavmesh 类型。
 
-维护主流程在插件层用 `SpotScanService` 包装该接口：底层扫描当前 territory 几何并写入 `data/generated/territory_{territoryId}.json` 全图缓存，再为当前 `FishingSpotTarget` 在内存中派生候选。派生时不按钓场半径硬裁剪，钓场归属由抛竿日志和人工复核确认。
+维护主流程在插件层用 `SpotScanService` 包装该接口：底层扫描当前 territory 几何并生成内存候选，再为当前 `FishingSpotTarget` 在内存中派生候选。候选不写入文件；只有人工确认或抛竿点亮后的维护记录会保存到领地维护文件。派生时不按钓场半径硬裁剪，钓场归属由抛竿日志和人工复核确认。
 
 ## 目标能力
 

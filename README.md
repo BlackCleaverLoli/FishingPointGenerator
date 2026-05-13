@@ -46,7 +46,7 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点
 /fpg rejectcandidate
 /fpg clearspotmaintenance
 /fpg clearterritorymaintenance
-/fpg clearterritorysurvey
+/fpg clearterritorycandidates
 /fpg allowweak
 /fpg allowrisk
 /fpg ignore
@@ -61,7 +61,6 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点
 ```text
 data/catalog/fishing_spots.json
 data/maintenance/territory_{territoryId}.json
-data/generated/territory_{territoryId}.json
 data/scans/territory_{territoryId}/spot_{fishingSpotId}.scan.json   # 旧版兼容回退
 data/labels/territory_{territoryId}/spot_{fishingSpotId}.ledger.json       # 旧版兼容证据
 data/review/territory_{territoryId}/spot_{fishingSpotId}.review.json

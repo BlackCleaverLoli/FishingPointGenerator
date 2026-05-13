@@ -166,7 +166,7 @@ internal sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        if (!ImGui.BeginTable("##fpg_spot_list", 7, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Borders, new Vector2(0f, 440f)))
+        if (!ImGui.BeginTable("##fpg_spot_list", 6, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Borders, new Vector2(0f, 440f)))
             return;
 
         ImGui.TableSetupScrollFreeze(0, 1);
@@ -176,10 +176,8 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("点");
         ImGui.TableSetupColumn("候选");
         ImGui.TableSetupColumn("地图");
-        ImGui.TableSetupColumn("旧缓存");
         ImGui.TableHeadersRow();
 
-        var ctrlDown = ImGui.GetIO().KeyCtrl;
         foreach (var target in GetVisibleTargets().Take(300))
         {
             var analysis = session.Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
@@ -200,9 +198,6 @@ internal sealed class MainWindow : Window, IDisposable
             ImGui.TextUnformatted((analysis?.CandidateCount ?? 0).ToString());
             ImGui.TableNextColumn();
             ImGui.TextUnformatted($"{target.MapX:F1}, {target.MapY:F1}");
-            ImGui.TableNextColumn();
-            if (SmallActionButton($"清除##clear_spot_{target.FishingSpotId}", !ctrlDown))
-                session.ClearSpotPointCache(target.FishingSpotId);
         }
 
         ImGui.EndTable();
@@ -405,7 +400,7 @@ internal sealed class MainWindow : Window, IDisposable
 
         ImGui.SameLine();
         var showTerritoryCache = session.OverlayShowTerritoryCache;
-        if (ImGui.Checkbox("显示全图缓存", ref showTerritoryCache))
+        if (ImGui.Checkbox("显示领地内存候选", ref showTerritoryCache))
             session.OverlayShowTerritoryCache = showTerritoryCache;
 
         var showRadius = session.OverlayShowTargetRadius;
@@ -449,8 +444,8 @@ internal sealed class MainWindow : Window, IDisposable
             session.ClearCurrentTerritoryMaintenance();
 
         ImGui.SameLine();
-        if (ActionButton("清当前领地候选缓存", !ctrlDown || !hasTerritory))
-            session.ClearCurrentTerritorySurvey();
+        if (ActionButton("清当前领地内存候选", !ctrlDown || !hasTerritory))
+            session.ClearCurrentTerritoryCandidates();
     }
 
     private void DrawPaths()
@@ -464,7 +459,7 @@ internal sealed class MainWindow : Window, IDisposable
         DrawSummaryRow("数据", session.DataRoot);
         DrawSummaryRow("目录", session.CatalogPath);
         DrawSummaryRow("维护", string.IsNullOrWhiteSpace(session.MaintenancePath) ? "-" : session.MaintenancePath);
-        DrawSummaryRow("全图缓存", session.GeneratedSurveyPath);
+        DrawSummaryRow("内存候选", session.TerritoryCandidateCount.ToString());
         DrawSummaryRow("导出", session.ExportPath);
 
         ImGui.EndTable();
@@ -658,14 +653,6 @@ internal sealed class MainWindow : Window, IDisposable
     {
         ImGui.BeginDisabled(disabled);
         var clicked = ImGui.Button(label);
-        ImGui.EndDisabled();
-        return clicked && !disabled;
-    }
-
-    private static bool SmallActionButton(string label, bool disabled = false)
-    {
-        ImGui.BeginDisabled(disabled);
-        var clicked = ImGui.SmallButton(label);
         ImGui.EndDisabled();
         return clicked && !disabled;
     }

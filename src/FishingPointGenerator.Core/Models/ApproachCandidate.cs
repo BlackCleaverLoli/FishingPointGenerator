@@ -10,5 +10,14 @@ public sealed record ApproachCandidate
     public Point3 Position { get; init; }
     public float Rotation { get; init; }
     public CandidateStatus Status { get; init; }
+    public CandidateReachability Reachability { get; init; } = CandidateReachability.Unknown;
+    public float? PathLengthMeters { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
+public enum CandidateReachability
+{
+    Unknown,
+    Flyable,
+    WalkReachable,
 }

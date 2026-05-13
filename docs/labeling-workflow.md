@@ -29,7 +29,7 @@ UI 的“数据清理”折叠区需要按住 Ctrl 才能点击清理按钮。
 
 - `/fpg clearspotmaintenance`：清除当前钓场维护数据，重置真实点、证据和复核状态，并删除同一 `SpotKey` 的旧版 ledger/review。
 - `/fpg clearterritorymaintenance`：清除当前领地下所有目录钓场的维护数据，并删除对应旧版 ledger/review。
-- `/fpg clearterritorysurvey`：删除当前领地全图候选缓存；维护数据不受影响，之后需要重新 `/fpg scan`。
+- `/fpg clearterritorycandidates`：清除当前领地内存候选；维护数据不受影响，之后需要重新 `/fpg scan`。
 
 ## 状态规则
 

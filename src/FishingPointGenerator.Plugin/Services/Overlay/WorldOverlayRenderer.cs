@@ -160,7 +160,7 @@ internal sealed unsafe class WorldOverlayRenderer
                 DrawWorldText(
                     drawList,
                     standing + new Vector3(0f, 1.6f, 0f),
-                    BuildCandidateLabel(candidate, item.Distance, isSelectedCandidate, isConfirmed, selection),
+                    BuildCandidateLabel(session, candidate, item.Distance, isSelectedCandidate, isConfirmed, selection),
                     isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor);
                 labelCount++;
             }
@@ -173,6 +173,7 @@ internal sealed unsafe class WorldOverlayRenderer
     }
 
     private static string BuildCandidateLabel(
+        SpotWorkflowSession session,
         SpotCandidate candidate,
         float distanceToPlayer,
         bool isSelectedCandidate,
@@ -184,12 +185,13 @@ internal sealed unsafe class WorldOverlayRenderer
             : isSelectedCandidate && selection is not null
                 ? $"当前/{selection.ModeText}"
                 : "未记录";
-        var range = candidate.IsWithinTargetSearchRadius ? "in" : "out";
         var path = isSelectedCandidate && selection?.PathLengthMeters is { } pathLength
             ? $" path={pathLength:F1}m"
             : string.Empty;
-        return $"{status} p={distanceToPlayer:F1}m c={candidate.DistanceToTargetCenterMeters:F1}m{path} {range} "
-            + $"s={ShortId(candidate.SurfaceGroupId)} b={ShortId(candidate.BlockId)} fp={ShortId(candidate.CandidateFingerprint)}";
+        var target = string.IsNullOrWhiteSpace(session.CurrentTargetDisplayName)
+            ? $"spot {candidate.Key.FishingSpotId}"
+            : session.CurrentTargetDisplayName;
+        return $"{target} {status} p={distanceToPlayer:F1}m c={candidate.DistanceToTargetCenterMeters:F1}m{path} b={ShortBlockId(candidate.BlockId)}";
     }
 
     private void DrawSurfaceDebug(

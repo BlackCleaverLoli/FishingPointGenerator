@@ -22,6 +22,8 @@ public sealed record SpotCandidate
     public Point3 Position { get; init; }
     public float Rotation { get; init; }
     public CandidateStatus Status { get; init; }
+    public CandidateReachability Reachability { get; init; } = CandidateReachability.Unknown;
+    public float? PathLengthMeters { get; init; }
     public string SourceCandidateId { get; init; } = string.Empty;
     public float DistanceToTargetCenterMeters { get; init; }
     public bool IsWithinTargetSearchRadius { get; init; }
