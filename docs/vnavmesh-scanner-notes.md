@@ -30,8 +30,8 @@ Core 只接收 `ApproachCandidate`，不依赖 Dalamud、OmenTools 或 vnavmesh 
 2. 提取 terrain、bgpart 和 collider 的碰撞 mesh/analytic primitive。
 3. 抽取 material/primitive flags。
 4. 识别 fishable 或等价可钓材质。
-5. 找出 fishable 面与纯 walkable 面的共享边界；如果没有精确共享边，则使用近邻平行边作为回退。
-6. 沿边界线采样候选点，点位向 walkable 侧偏移 0.5m；`Rotation` 垂直于边界线并朝向 walkable 面。
+5. 找出 fishable 面与纯 walkable 面的水平邻近关系；优先沿 fishable 外边界采样，也会从 walkable 面的水平投影补充候选，不用水面与站立面的高度差排除候选。
+6. 边界候选点位向 walkable 侧偏移 0.5m；投影候选保留 walkable 面上的采样点；`Rotation` 朝向对应 fishable 水面。
 7. 为候选点记录 `surfaceGroupId`，表示其面对的 fishable 水面连通组件；后续抛竿连锁点亮以该值作为几何边界。
 8. 清洗重复点，先形成 territory 级候选，再由 `SpotScanService` 收敛到当前 `SpotKey`。
 

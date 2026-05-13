@@ -17,18 +17,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float SurfaceIndexCellSize = 8f;
     private const float CandidateDedupeCellSize = 1.25f;
     private const float CandidateRotationDedupeRadians = 0.15f;
-    private const float CandidateOverheadWalkableRadiusMeters = 1f;
-    private const float CandidateOverheadWalkableClearanceMeters = 5f;
-    private const float CandidateOverheadWalkableMinimumDeltaY = 0.25f;
     private const float FishableCenterProbeStep = 0.5f;
     private const float FishableCenterProbeMaxDistance = 96f;
     private const int FishableCenterBoundaryRefineSteps = 6;
-    private const float WalkableOcclusionProbeStep = 0.5f;
-    private const float WalkableOcclusionProbePastTargetDistance = 2f;
-    private const float WalkableOcclusionMaxProbeDistance = 24f;
-    private const float WalkableOcclusionSameDeckHeightTolerance = 2f;
-    private const float WalkableOcclusionMinimumClearanceAboveFishable = 0.75f;
-    private const float WalkableOcclusionMinimumCoveredLength = 1f;
     private const float DebugCellSize = 10f;
     private const int MaxSamplesPerEdge = 40;
     private const int MaxCandidates = 10000;
@@ -292,7 +283,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var walkableSurfaces = walkableTriangles
             .Where(triangle => triangle.Area >= MinimumWalkableSurfaceArea)
             .ToList();
-        if (fishableEdges.Count == 0 || walkableSurfaces.Count == 0)
+        if (walkableSurfaces.Count == 0)
             return;
 
         var fishableBlocks = BuildFishableSurfaceBlocks(territoryId, fishableTriangles);
@@ -324,6 +315,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     candidates.Add(candidate);
             }
         }
+
+        AddProjectedWalkableSurfaceCandidates(
+            walkableSurfaces,
+            fishableIndex,
+            fishableBlockByTriangle,
+            candidateKeys,
+            candidates);
     }
 
     private static int CountNearbySurfaceMatches(
@@ -695,13 +693,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 continue;
 
             position.Y = y;
-            if (walkableIndex.HasContainingPointAboveWithinRadius(
-                    position,
-                    CandidateOverheadWalkableRadiusMeters,
-                    CandidateOverheadWalkableMinimumDeltaY,
-                    CandidateOverheadWalkableClearanceMeters))
-                continue;
-
             if (fishableIndex.ContainsPoint(position))
                 continue;
 
@@ -710,7 +701,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     MaximumCandidateDistanceFromFishableSurface,
                     out var nearestFishableTriangle,
                     out var nearestFishablePoint,
-                    out var fishableDistance))
+                    out _))
                 continue;
 
             var surfaceGroupId = string.Empty;
@@ -737,9 +728,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             if (facing.LengthSquared() <= 0.0001f)
                 continue;
 
-            if (HasWalkableSurfaceOcclusion(position, facingTarget, walkableIndex, fishableIndex))
-                continue;
-
             var rotation = AngleMath.NormalizeRotation(MathF.Atan2(facing.X, facing.Z));
             candidate = new CandidateScratch(position, rotation, surfaceGroupId);
             return true;
@@ -748,45 +736,82 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return false;
     }
 
-    private static bool HasWalkableSurfaceOcclusion(
-        Vector3 candidatePosition,
-        Vector3 facingTarget,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex)
+    private static void AddProjectedWalkableSurfaceCandidates(
+        IReadOnlyList<ExtractedSceneTriangle> walkableSurfaces,
+        TriangleIndex fishableIndex,
+        IReadOnlyDictionary<ExtractedSceneTriangle, FishableSurfaceBlock> fishableBlockByTriangle,
+        HashSet<CandidateKey> candidateKeys,
+        List<CandidateScratch> candidates)
     {
-        if (!TryGetHorizontalDirection(facingTarget - candidatePosition, out var direction))
+        foreach (var walkableSurface in walkableSurfaces)
+        {
+            foreach (var sample in EnumerateWalkableSurfaceSamples(walkableSurface))
+            {
+                if (!TryCreateProjectedWalkableSurfaceCandidate(
+                        sample,
+                        fishableIndex,
+                        fishableBlockByTriangle,
+                        out var candidate))
+                    continue;
+
+                var key = CandidateKey.From(candidate.Position, candidate.Rotation);
+                if (candidateKeys.Add(key))
+                    candidates.Add(candidate);
+            }
+        }
+    }
+
+    private static IEnumerable<Vector3> EnumerateWalkableSurfaceSamples(ExtractedSceneTriangle triangle)
+    {
+        yield return triangle.Centroid;
+        yield return (triangle.A + triangle.B) * 0.5f;
+        yield return (triangle.B + triangle.C) * 0.5f;
+        yield return (triangle.C + triangle.A) * 0.5f;
+    }
+
+    private static bool TryCreateProjectedWalkableSurfaceCandidate(
+        Vector3 position,
+        TriangleIndex fishableIndex,
+        IReadOnlyDictionary<ExtractedSceneTriangle, FishableSurfaceBlock> fishableBlockByTriangle,
+        out CandidateScratch candidate)
+    {
+        candidate = default;
+        if (!fishableIndex.TryFindNearest(
+                position,
+                MaximumCandidateDistanceFromFishableSurface,
+                out var nearestFishableTriangle,
+                out var nearestFishablePoint,
+                out _))
             return false;
 
-        var targetDistance = HorizontalDistance(candidatePosition, facingTarget);
-        var maxDistance = Math.Clamp(
-            targetDistance + WalkableOcclusionProbePastTargetDistance,
-            WalkableOcclusionProbeStep,
-            WalkableOcclusionMaxProbeDistance);
-        var coveredLength = 0f;
-        for (var offset = WalkableOcclusionProbeStep;
-             offset <= maxDistance;
-             offset += WalkableOcclusionProbeStep)
+        var surfaceGroupId = string.Empty;
+        var facingTarget = nearestFishablePoint;
+        if (fishableBlockByTriangle.TryGetValue(nearestFishableTriangle, out var fishableBlock))
         {
-            var probe = CreateProbePoint(candidatePosition, direction, offset);
-            if (!fishableIndex.TryFindContainingPoint(probe, candidatePosition.Y, out _, out var fishableY)
-                || !walkableIndex.TryFindContainingPointNearY(
-                    probe,
-                    candidatePosition.Y,
-                    WalkableOcclusionSameDeckHeightTolerance,
-                    out _,
-                    out var walkableY)
-                || walkableY - fishableY < WalkableOcclusionMinimumClearanceAboveFishable)
-            {
-                coveredLength = 0f;
-                continue;
-            }
-
-            coveredLength += WalkableOcclusionProbeStep;
-            if (coveredLength >= WalkableOcclusionMinimumCoveredLength)
-                return true;
+            surfaceGroupId = fishableBlock.SurfaceGroupId;
+            if (TryFindLocalFishableCenter(
+                    position,
+                    nearestFishableTriangle,
+                    nearestFishablePoint,
+                    fishableBlock,
+                    out var localFishableCenter))
+                facingTarget = localFishableCenter;
         }
 
-        return false;
+        var facing = facingTarget - position;
+        facing.Y = 0f;
+        if (facing.LengthSquared() <= 0.0001f)
+        {
+            facing = nearestFishableTriangle.Centroid - position;
+            facing.Y = 0f;
+        }
+
+        if (facing.LengthSquared() <= 0.0001f)
+            return false;
+
+        var rotation = AngleMath.NormalizeRotation(MathF.Atan2(facing.X, facing.Z));
+        candidate = new CandidateScratch(position, rotation, surfaceGroupId);
+        return true;
     }
 
     private static bool TryProjectYOnTriangleXz(ExtractedSceneTriangle triangle, float x, float z, out float y)
@@ -1133,89 +1158,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             }
 
             return false;
-        }
-
-        public bool TryFindContainingPointNearY(
-            Vector3 point,
-            float referenceY,
-            float maxDeltaY,
-            out ExtractedSceneTriangle triangle,
-            out float y)
-        {
-            if (!TryFindContainingPoint(point, referenceY, out triangle, out y))
-                return false;
-
-            return MathF.Abs(y - referenceY) <= maxDeltaY;
-        }
-
-        public bool HasContainingPointAboveWithinRadius(
-            Vector3 point,
-            float radius,
-            float minimumDeltaY,
-            float maximumDeltaY)
-        {
-            var center = GridCell.From(point.X, point.Z, cellSize);
-            var range = (int)MathF.Ceiling(radius / cellSize) + 1;
-            var radiusSquared = radius * radius;
-            for (var x = center.X - range; x <= center.X + range; x++)
-            {
-                for (var z = center.Z - range; z <= center.Z + range; z++)
-                {
-                    if (!cells.TryGetValue(new GridCell(x, z), out var triangles))
-                        continue;
-
-                    foreach (var candidate in triangles)
-                    {
-                        var candidatePoint = ClosestPointOnTriangleXz(point, candidate);
-                        var dx = candidatePoint.X - point.X;
-                        var dz = candidatePoint.Z - point.Z;
-                        if ((dx * dx) + (dz * dz) > radiusSquared)
-                            continue;
-
-                        var deltaY = candidatePoint.Y - point.Y;
-                        if (deltaY >= minimumDeltaY && deltaY <= maximumDeltaY)
-                            return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        public bool TryFindContainingPoint(
-            Vector3 point,
-            float referenceY,
-            out ExtractedSceneTriangle triangle,
-            out float y)
-        {
-            var cell = GridCell.From(point.X, point.Z, cellSize);
-            triangle = default;
-            y = 0f;
-            if (!cells.TryGetValue(cell, out var triangles))
-                return false;
-
-            var point2 = new Vector2(point.X, point.Z);
-            var bestDeltaY = float.MaxValue;
-            foreach (var candidate in triangles)
-            {
-                if (!PointInTriangle(
-                        point2,
-                        new Vector2(candidate.A.X, candidate.A.Z),
-                        new Vector2(candidate.B.X, candidate.B.Z),
-                        new Vector2(candidate.C.X, candidate.C.Z))
-                    || !TryProjectYOnTriangleXz(candidate, point.X, point.Z, out var candidateY))
-                    continue;
-
-                var deltaY = MathF.Abs(candidateY - referenceY);
-                if (deltaY >= bestDeltaY)
-                    continue;
-
-                bestDeltaY = deltaY;
-                y = candidateY;
-                triangle = candidate;
-            }
-
-            return bestDeltaY < float.MaxValue;
         }
 
         public bool TryFindNearest(
