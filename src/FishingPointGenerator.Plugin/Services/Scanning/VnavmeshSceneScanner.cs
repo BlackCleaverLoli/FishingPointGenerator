@@ -12,12 +12,23 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float BoundarySampleSpacing = 2f;
     private const float BoundaryPointOffsetTowardWalkableMeters = 0.5f;
     private const float MinimumBoundaryEdgeLength = 0.75f;
-    private const float NearbyEdgeIndexCellSize = 2f;
-    private const float NearbyEdgeMatchDistance = 0.75f;
-    private const float NearbyEdgeDirectionDot = 0.85f;
-    private const float NearbyEdgeHeightTolerance = 1.25f;
+    private const float MinimumWalkableSurfaceArea = 0.5f;
+    private const float MaximumCandidateDistanceFromFishableSurface = 1.5f;
+    private const float SurfaceIndexCellSize = 8f;
     private const float CandidateDedupeCellSize = 1.25f;
     private const float CandidateRotationDedupeRadians = 0.15f;
+    private const float CandidateOverheadWalkableRadiusMeters = 1f;
+    private const float CandidateOverheadWalkableClearanceMeters = 5f;
+    private const float CandidateOverheadWalkableMinimumDeltaY = 0.25f;
+    private const float FishableCenterProbeStep = 0.5f;
+    private const float FishableCenterProbeMaxDistance = 96f;
+    private const int FishableCenterBoundaryRefineSteps = 6;
+    private const float WalkableOcclusionProbeStep = 0.5f;
+    private const float WalkableOcclusionProbePastTargetDistance = 2f;
+    private const float WalkableOcclusionMaxProbeDistance = 24f;
+    private const float WalkableOcclusionSameDeckHeightTolerance = 2f;
+    private const float WalkableOcclusionMinimumClearanceAboveFishable = 0.75f;
+    private const float WalkableOcclusionMinimumCoveredLength = 1f;
     private const float DebugCellSize = 10f;
     private const int MaxSamplesPerEdge = 40;
     private const int MaxCandidates = 10000;
@@ -25,6 +36,26 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const int MaxDebugCandidates = 16;
     private const int MaxDebugWaterMaterials = 8;
     private const int MaxDebugWaterSamples = 8;
+    private static readonly float[] CandidateSurfaceOffsets =
+    [
+        BoundaryPointOffsetTowardWalkableMeters,
+        0.25f,
+        0.75f,
+        1f,
+        1.25f,
+        0f,
+        MaximumCandidateDistanceFromFishableSurface,
+    ];
+    private static readonly float[] FishableCenterEntryOffsets =
+    [
+        0.05f,
+        0.1f,
+        0.25f,
+        0.5f,
+        1f,
+        1.5f,
+        2f,
+    ];
 
     private readonly IPluginLog pluginLog;
 
@@ -56,7 +87,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var territoryId = scene.TerritoryId != 0 ? scene.TerritoryId : currentTerritoryId;
         var extractor = new CollisionSceneExtractor(scene);
         var allTriangles = extractor.ExtractTriangles();
-        var filterRadius = radius + NearbyEdgeMatchDistance + BoundaryPointOffsetTowardWalkableMeters;
+        var filterRadius = radius + MaximumCandidateDistanceFromFishableSurface + BoundaryPointOffsetTowardWalkableMeters;
         var nearbyTriangles = allTriangles
             .Where(triangle => HorizontalDistanceToTriangle(playerPosition, triangle) <= filterRadius)
             .ToList();
@@ -73,16 +104,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var walkableEdges = BuildEdges(walkableTriangles);
         var fishableOuterEdges = BuildOuterEdges(fishableTriangles);
         var walkableOuterEdges = BuildOuterEdges(walkableTriangles);
-        var nearbyMatches = CountNearbyEdgeMatches(
+        var nearbySurfaceMatches = CountNearbySurfaceMatches(
             fishableOuterEdges.Count > 0 ? fishableOuterEdges : fishableEdges,
-            walkableOuterEdges.Count > 0 ? walkableOuterEdges : walkableEdges);
+            walkableTriangles);
         var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles)
             .Where(candidate => HorizontalDistance(candidate.Position.ToVector3(), playerPosition) <= radius)
             .ToList();
         var waterSummary = CreateWaterSurfaceSummary(playerPosition, fishableTriangles);
 
         pluginLog.Information(
-            "FPG nearby scan: territory={TerritoryId} player=({PlayerX:F2},{PlayerY:F2},{PlayerZ:F2}) radius={Radius:F1} allTriangles={AllTriangles} nearbyTriangles={NearbyTriangles} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} fishableEdges={FishableEdges} walkableEdges={WalkableEdges} fishableOuterEdges={FishableOuterEdges} walkableOuterEdges={WalkableOuterEdges} sharedEdgeBuckets={SharedEdgeBuckets} nearbyEdgeMatches={NearbyEdgeMatches} candidates={Candidates} water={WaterSummary}",
+            "FPG nearby scan: territory={TerritoryId} player=({PlayerX:F2},{PlayerY:F2},{PlayerZ:F2}) radius={Radius:F1} allTriangles={AllTriangles} nearbyTriangles={NearbyTriangles} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} fishableEdges={FishableEdges} walkableEdges={WalkableEdges} fishableOuterEdges={FishableOuterEdges} walkableOuterEdges={WalkableOuterEdges} sharedEdgeBuckets={SharedEdgeBuckets} nearbySurfaceMatches={NearbySurfaceMatches} candidates={Candidates} water={WaterSummary}",
             territoryId,
             playerPosition.X,
             playerPosition.Y,
@@ -97,7 +128,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             fishableOuterEdges.Count,
             walkableOuterEdges.Count,
             sharedBuckets,
-            nearbyMatches,
+            nearbySurfaceMatches,
             candidates.Count,
             FormatWaterSummary(waterSummary));
         LogDebugWaterSurfaces(playerPosition, fishableTriangles, waterSummary);
@@ -106,7 +137,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         return new NearbyScanDebugResult
         {
-            Message = $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbyEdges={nearbyMatches} candidates={candidates.Count}。详情见 Dalamud log；Fishable/Walkable 面已送入 overlay 调试层。",
+            Message = $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbySurfaces={nearbySurfaceMatches} candidates={candidates.Count}。详情见 Dalamud log；Fishable/Walkable 面已送入 overlay 调试层。",
             TerritoryId = territoryId,
             PlayerPosition = playerPosition,
             RadiusMeters = radius,
@@ -178,16 +209,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles)
     {
-        var buckets = BuildEdgeBuckets(fishableTriangles, walkableTriangles);
         var candidateKeys = new HashSet<CandidateKey>();
         var candidates = new List<CandidateScratch>();
 
-        AddSharedEdgeCandidates(buckets, candidateKeys, candidates);
-        AddNearbyEdgeCandidates(fishableTriangles, walkableTriangles, candidateKeys, candidates);
+        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, candidateKeys, candidates);
 
         return candidates
-            .OrderByDescending(candidate => candidate.Score)
-            .ThenBy(candidate => candidate.Position.X)
+            .OrderBy(candidate => candidate.Position.X)
             .ThenBy(candidate => candidate.Position.Z)
             .ThenBy(candidate => candidate.Rotation)
             .Take(MaxCandidates)
@@ -198,9 +226,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             {
                 CandidateId = $"scene_{territoryId}_{index + 1:D5}",
                 TerritoryId = territoryId,
+                SurfaceGroupId = candidate.SurfaceGroupId,
                 Position = Point3.From(candidate.Position),
                 Rotation = candidate.Rotation,
-                Score = candidate.Score,
                 Status = CandidateStatus.Unlabeled,
             })
             .ToList();
@@ -250,27 +278,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             bucket.WalkableEdges.Add(edge);
     }
 
-    private static void AddSharedEdgeCandidates(
-        Dictionary<EdgeKey, BoundaryEdgeBucket> buckets,
-        HashSet<CandidateKey> candidateKeys,
-        List<CandidateScratch> candidates)
-    {
-        foreach (var bucket in buckets.Values)
-        {
-            if (bucket.FishableEdges.Count == 0 || bucket.WalkableEdges.Count == 0)
-                continue;
-
-            foreach (var fishableEdge in bucket.FishableEdges)
-            {
-                var walkableEdge = bucket.WalkableEdges
-                    .OrderBy(edge => HorizontalDistance(edge.Midpoint, fishableEdge.Midpoint))
-                    .First();
-                AddBoundaryEdgeSamples(fishableEdge, walkableEdge, candidateKeys, candidates, exactSharedEdge: true);
-            }
-        }
-    }
-
-    private static void AddNearbyEdgeCandidates(
+    private static void AddWalkableSurfaceCandidates(
+        uint territoryId,
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
         HashSet<CandidateKey> candidateKeys,
@@ -280,33 +289,63 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         if (fishableEdges.Count == 0)
             fishableEdges = BuildEdges(fishableTriangles);
 
-        var walkableEdges = BuildOuterEdges(walkableTriangles);
-        if (walkableEdges.Count == 0)
-            walkableEdges = BuildEdges(walkableTriangles);
+        var walkableSurfaces = walkableTriangles
+            .Where(triangle => triangle.Area >= MinimumWalkableSurfaceArea)
+            .ToList();
+        if (fishableEdges.Count == 0 || walkableSurfaces.Count == 0)
+            return;
 
-        var walkableIndex = new BoundaryEdgeIndex(walkableEdges, NearbyEdgeIndexCellSize);
+        var fishableBlocks = BuildFishableSurfaceBlocks(territoryId, fishableTriangles);
+        var fishableBlockByTriangle = BuildFishableBlockLookup(fishableBlocks);
+        var walkableIndex = new TriangleIndex(walkableSurfaces, SurfaceIndexCellSize);
+        var fishableIndex = new TriangleIndex(fishableTriangles, SurfaceIndexCellSize);
         foreach (var fishableEdge in fishableEdges)
         {
-            var nearestWalkableEdge = walkableIndex.FindNearest(fishableEdge);
-            if (nearestWalkableEdge is null)
-                continue;
+            var sampleCount = Math.Clamp(
+                (int)MathF.Ceiling(fishableEdge.HorizontalLength / BoundarySampleSpacing),
+                1,
+                MaxSamplesPerEdge);
 
-            AddBoundaryEdgeSamples(fishableEdge, nearestWalkableEdge.Value, candidateKeys, candidates, exactSharedEdge: false);
+            for (var sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+            {
+                var t = (sampleIndex + 0.5f) / sampleCount;
+                var edgePoint = Vector3.Lerp(fishableEdge.Start, fishableEdge.End, t);
+                if (!TryCreateSurfaceCandidate(
+                        edgePoint,
+                        fishableEdge,
+                        walkableIndex,
+                        fishableIndex,
+                        fishableBlockByTriangle,
+                        out var candidate))
+                    continue;
+
+                var key = CandidateKey.From(candidate.Position, candidate.Rotation);
+                if (candidateKeys.Add(key))
+                    candidates.Add(candidate);
+            }
         }
     }
 
-    private static int CountNearbyEdgeMatches(
+    private static int CountNearbySurfaceMatches(
         IReadOnlyList<BoundaryEdge> fishableEdges,
-        IReadOnlyList<BoundaryEdge> walkableEdges)
+        IReadOnlyList<ExtractedSceneTriangle> walkableTriangles)
     {
-        if (fishableEdges.Count == 0 || walkableEdges.Count == 0)
+        var walkableSurfaces = walkableTriangles
+            .Where(triangle => triangle.Area >= MinimumWalkableSurfaceArea)
+            .ToList();
+        if (fishableEdges.Count == 0 || walkableSurfaces.Count == 0)
             return 0;
 
-        var walkableIndex = new BoundaryEdgeIndex(walkableEdges, NearbyEdgeIndexCellSize);
+        var walkableIndex = new TriangleIndex(walkableSurfaces, SurfaceIndexCellSize);
         var count = 0;
         foreach (var fishableEdge in fishableEdges)
         {
-            if (walkableIndex.FindNearest(fishableEdge) is not null)
+            if (walkableIndex.TryFindNearest(
+                    fishableEdge.Midpoint,
+                    MaximumCandidateDistanceFromFishableSurface,
+                    out _,
+                    out _,
+                    out _))
                 count++;
         }
 
@@ -342,6 +381,260 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             .ToList();
     }
 
+    private static IReadOnlyList<FishableSurfaceBlock> BuildFishableSurfaceBlocks(
+        uint territoryId,
+        IReadOnlyList<ExtractedSceneTriangle> triangles)
+    {
+        if (triangles.Count == 0)
+            return [];
+
+        var edgeBuckets = new Dictionary<EdgeKey, List<int>>();
+        for (var index = 0; index < triangles.Count; index++)
+        {
+            var triangle = triangles[index];
+            AddTriangleIndexEdge(edgeBuckets, triangle.A, triangle.B, index);
+            AddTriangleIndexEdge(edgeBuckets, triangle.B, triangle.C, index);
+            AddTriangleIndexEdge(edgeBuckets, triangle.C, triangle.A, index);
+        }
+
+        var adjacency = new List<int>[triangles.Count];
+        for (var index = 0; index < adjacency.Length; index++)
+            adjacency[index] = [];
+
+        foreach (var connected in edgeBuckets.Values.Where(bucket => bucket.Count > 1))
+        {
+            for (var leftIndex = 0; leftIndex < connected.Count; leftIndex++)
+            {
+                for (var rightIndex = leftIndex + 1; rightIndex < connected.Count; rightIndex++)
+                {
+                    adjacency[connected[leftIndex]].Add(connected[rightIndex]);
+                    adjacency[connected[rightIndex]].Add(connected[leftIndex]);
+                }
+            }
+        }
+
+        var visited = new bool[triangles.Count];
+        var blocks = new List<FishableSurfaceBlock>();
+        for (var start = 0; start < triangles.Count; start++)
+        {
+            if (visited[start])
+                continue;
+
+            var component = new List<ExtractedSceneTriangle>();
+            var queue = new Queue<int>();
+            visited[start] = true;
+            queue.Enqueue(start);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                component.Add(triangles[current]);
+                foreach (var next in adjacency[current])
+                {
+                    if (visited[next])
+                        continue;
+
+                    visited[next] = true;
+                    queue.Enqueue(next);
+                }
+            }
+
+            blocks.Add(CreateFishableSurfaceBlock(component));
+        }
+
+        return blocks
+            .OrderBy(block => block.Center.X)
+            .ThenBy(block => block.Center.Z)
+            .ThenByDescending(block => block.Area)
+            .Select((block, index) => block with
+            {
+                SurfaceGroupId = $"t{territoryId}_surface_{index + 1:D4}",
+            })
+            .ToList();
+    }
+
+    private static void AddTriangleIndexEdge(
+        Dictionary<EdgeKey, List<int>> edgeBuckets,
+        Vector3 start,
+        Vector3 end,
+        int triangleIndex)
+    {
+        var key = EdgeKey.From(start, end);
+        if (!edgeBuckets.TryGetValue(key, out var list))
+        {
+            list = [];
+            edgeBuckets[key] = list;
+        }
+
+        list.Add(triangleIndex);
+    }
+
+    private static FishableSurfaceBlock CreateFishableSurfaceBlock(IReadOnlyList<ExtractedSceneTriangle> triangles)
+    {
+        var weightedCenter = Vector3.Zero;
+        var totalArea = 0f;
+        foreach (var triangle in triangles)
+        {
+            weightedCenter += triangle.Centroid * triangle.Area;
+            totalArea += triangle.Area;
+        }
+
+        var center = totalArea > 0.0001f
+            ? weightedCenter / totalArea
+            : triangles.Aggregate(Vector3.Zero, (current, triangle) => current + triangle.Centroid) / triangles.Count;
+        return new FishableSurfaceBlock(
+            string.Empty,
+            triangles.ToList(),
+            center,
+            totalArea,
+            new TriangleIndex(triangles, SurfaceIndexCellSize));
+    }
+
+    private static IReadOnlyDictionary<ExtractedSceneTriangle, FishableSurfaceBlock> BuildFishableBlockLookup(
+        IReadOnlyList<FishableSurfaceBlock> blocks)
+    {
+        var result = new Dictionary<ExtractedSceneTriangle, FishableSurfaceBlock>();
+        foreach (var block in blocks)
+        {
+            foreach (var triangle in block.Triangles)
+                result[triangle] = block;
+        }
+
+        return result;
+    }
+
+    private static bool TryFindLocalFishableCenter(
+        Vector3 candidatePosition,
+        ExtractedSceneTriangle nearestFishableTriangle,
+        Vector3 nearestFishablePoint,
+        FishableSurfaceBlock block,
+        out Vector3 center)
+    {
+        center = default;
+        if (TryGetHorizontalDirection(nearestFishablePoint - candidatePosition, out var direction)
+            && TryFindLocalFishableCenterAlongDirection(nearestFishablePoint, direction, block, out center))
+            return true;
+
+        if (TryGetHorizontalDirection(nearestFishableTriangle.Centroid - nearestFishablePoint, out direction)
+            && TryFindLocalFishableCenterAlongDirection(nearestFishablePoint, direction, block, out center))
+            return true;
+
+        if (TryGetHorizontalDirection(block.Center - nearestFishablePoint, out direction)
+            && TryFindLocalFishableCenterAlongDirection(nearestFishablePoint, direction, block, out center))
+            return true;
+
+        return false;
+    }
+
+    private static bool TryFindLocalFishableCenterAlongDirection(
+        Vector3 entryPoint,
+        Vector2 direction,
+        FishableSurfaceBlock block,
+        out Vector3 center)
+    {
+        center = default;
+        if (!TryFindFishableInteriorOffset(entryPoint, direction, block, out var firstInsideOffset))
+            return false;
+
+        var entryOffset = RefineFishableEntry(entryPoint, direction, block, firstInsideOffset);
+        var lastInsideOffset = firstInsideOffset;
+        for (var offset = firstInsideOffset + FishableCenterProbeStep;
+             offset <= FishableCenterProbeMaxDistance;
+             offset += FishableCenterProbeStep)
+        {
+            if (block.Index.ContainsPoint(CreateProbePoint(entryPoint, direction, offset)))
+            {
+                lastInsideOffset = offset;
+                continue;
+            }
+
+            var exitOffset = RefineFishableExit(entryPoint, direction, block, lastInsideOffset, offset);
+            center = CreateProbePoint(entryPoint, direction, (entryOffset + exitOffset) * 0.5f);
+            return true;
+        }
+
+        center = CreateProbePoint(entryPoint, direction, (entryOffset + lastInsideOffset) * 0.5f);
+        return true;
+    }
+
+    private static bool TryFindFishableInteriorOffset(
+        Vector3 entryPoint,
+        Vector2 direction,
+        FishableSurfaceBlock block,
+        out float insideOffset)
+    {
+        foreach (var offset in FishableCenterEntryOffsets)
+        {
+            if (!block.Index.ContainsPoint(CreateProbePoint(entryPoint, direction, offset)))
+                continue;
+
+            insideOffset = offset;
+            return true;
+        }
+
+        insideOffset = 0f;
+        return false;
+    }
+
+    private static float RefineFishableEntry(
+        Vector3 entryPoint,
+        Vector2 direction,
+        FishableSurfaceBlock block,
+        float insideOffset)
+    {
+        var outsideOffset = 0f;
+        if (block.Index.ContainsPoint(CreateProbePoint(entryPoint, direction, outsideOffset)))
+            return outsideOffset;
+
+        for (var index = 0; index < FishableCenterBoundaryRefineSteps; index++)
+        {
+            var midpoint = (outsideOffset + insideOffset) * 0.5f;
+            if (block.Index.ContainsPoint(CreateProbePoint(entryPoint, direction, midpoint)))
+                insideOffset = midpoint;
+            else
+                outsideOffset = midpoint;
+        }
+
+        return (outsideOffset + insideOffset) * 0.5f;
+    }
+
+    private static float RefineFishableExit(
+        Vector3 entryPoint,
+        Vector2 direction,
+        FishableSurfaceBlock block,
+        float insideOffset,
+        float outsideOffset)
+    {
+        for (var index = 0; index < FishableCenterBoundaryRefineSteps; index++)
+        {
+            var midpoint = (insideOffset + outsideOffset) * 0.5f;
+            if (block.Index.ContainsPoint(CreateProbePoint(entryPoint, direction, midpoint)))
+                insideOffset = midpoint;
+            else
+                outsideOffset = midpoint;
+        }
+
+        return (insideOffset + outsideOffset) * 0.5f;
+    }
+
+    private static Vector3 CreateProbePoint(Vector3 entryPoint, Vector2 direction, float offset)
+    {
+        return new Vector3(
+            entryPoint.X + (direction.X * offset),
+            entryPoint.Y,
+            entryPoint.Z + (direction.Y * offset));
+    }
+
+    private static bool TryGetHorizontalDirection(Vector3 vector, out Vector2 direction)
+    {
+        direction = new Vector2(vector.X, vector.Z);
+        var lengthSquared = direction.LengthSquared();
+        if (lengthSquared <= 0.0001f)
+            return false;
+
+        direction /= MathF.Sqrt(lengthSquared);
+        return true;
+    }
+
     private static void AddOuterEdge(Dictionary<EdgeKey, List<BoundaryEdge>> buckets, BoundaryEdge edge)
     {
         if (edge.HorizontalLength < MinimumBoundaryEdgeLength)
@@ -363,79 +656,137 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             edges.Add(edge);
     }
 
-    private static void AddBoundaryEdgeSamples(
+    private static bool TryCreateSurfaceCandidate(
+        Vector3 edgePoint,
         BoundaryEdge fishableEdge,
-        BoundaryEdge walkableEdge,
-        HashSet<CandidateKey> candidateKeys,
-        List<CandidateScratch> candidates,
-        bool exactSharedEdge)
+        TriangleIndex walkableIndex,
+        TriangleIndex fishableIndex,
+        IReadOnlyDictionary<ExtractedSceneTriangle, FishableSurfaceBlock> fishableBlockByTriangle,
+        out CandidateScratch candidate)
     {
-        if (!TryGetDirectionTowardWalkable(fishableEdge, walkableEdge, out var direction))
-            return;
+        candidate = default;
+        if (!walkableIndex.TryFindNearest(
+                edgePoint,
+                MaximumCandidateDistanceFromFishableSurface,
+                out var walkableTriangle,
+                out var closestWalkablePoint,
+                out _))
+            return false;
 
-        var sampleCount = Math.Clamp(
-            (int)MathF.Ceiling(fishableEdge.HorizontalLength / BoundarySampleSpacing),
-            1,
-            MaxSamplesPerEdge);
-        var rotation = AngleMath.NormalizeRotation(MathF.Atan2(direction.X, direction.Z));
-        var score = CalculateScore(fishableEdge, walkableEdge, exactSharedEdge);
-
-        for (var sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+        var towardWalkableInterior = walkableTriangle.Centroid - closestWalkablePoint;
+        towardWalkableInterior.Y = 0f;
+        if (towardWalkableInterior.LengthSquared() <= 0.0001f)
         {
-            var t = (sampleIndex + 0.5f) / sampleCount;
-            var edgePoint = Vector3.Lerp(fishableEdge.Start, fishableEdge.End, t);
-            var position = edgePoint + (direction * BoundaryPointOffsetTowardWalkableMeters);
-            if (!TryProjectYOnTriangleXz(walkableEdge.Triangle, position.X, position.Z, out var y))
+            towardWalkableInterior = walkableTriangle.Centroid - edgePoint;
+            towardWalkableInterior.Y = 0f;
+        }
+
+        if (towardWalkableInterior.LengthSquared() <= 0.0001f)
+        {
+            var edgeDirection = fishableEdge.HorizontalDirection;
+            towardWalkableInterior = new Vector3(-edgeDirection.Z, 0f, edgeDirection.X);
+        }
+
+        towardWalkableInterior = Vector3.Normalize(towardWalkableInterior);
+        foreach (var offset in CandidateSurfaceOffsets)
+        {
+            var position = closestWalkablePoint + (towardWalkableInterior * offset);
+            if (!TryProjectYOnTriangleXz(walkableTriangle, position.X, position.Z, out var y))
                 continue;
 
             position.Y = y;
-
-            var key = CandidateKey.From(position, rotation);
-            if (!candidateKeys.Add(key))
+            if (walkableIndex.HasContainingPointAboveWithinRadius(
+                    position,
+                    CandidateOverheadWalkableRadiusMeters,
+                    CandidateOverheadWalkableMinimumDeltaY,
+                    CandidateOverheadWalkableClearanceMeters))
                 continue;
 
-            candidates.Add(new CandidateScratch(position, rotation, score));
+            if (fishableIndex.ContainsPoint(position))
+                continue;
+
+            if (!fishableIndex.TryFindNearest(
+                    position,
+                    MaximumCandidateDistanceFromFishableSurface,
+                    out var nearestFishableTriangle,
+                    out var nearestFishablePoint,
+                    out var fishableDistance))
+                continue;
+
+            var surfaceGroupId = string.Empty;
+            var facingTarget = nearestFishablePoint;
+            if (fishableBlockByTriangle.TryGetValue(nearestFishableTriangle, out var fishableBlock))
+            {
+                surfaceGroupId = fishableBlock.SurfaceGroupId;
+                if (TryFindLocalFishableCenter(
+                        position,
+                        nearestFishableTriangle,
+                        nearestFishablePoint,
+                        fishableBlock,
+                        out var localFishableCenter))
+                    facingTarget = localFishableCenter;
+            }
+            var facing = facingTarget - position;
+            facing.Y = 0f;
+            if (facing.LengthSquared() <= 0.0001f)
+            {
+                facing = nearestFishablePoint - position;
+                facing.Y = 0f;
+            }
+
+            if (facing.LengthSquared() <= 0.0001f)
+                continue;
+
+            if (HasWalkableSurfaceOcclusion(position, facingTarget, walkableIndex, fishableIndex))
+                continue;
+
+            var rotation = AngleMath.NormalizeRotation(MathF.Atan2(facing.X, facing.Z));
+            candidate = new CandidateScratch(position, rotation, surfaceGroupId);
+            return true;
         }
+
+        return false;
     }
 
-    private static bool TryGetDirectionTowardWalkable(
-        BoundaryEdge fishableEdge,
-        BoundaryEdge walkableEdge,
-        out Vector3 direction)
+    private static bool HasWalkableSurfaceOcclusion(
+        Vector3 candidatePosition,
+        Vector3 facingTarget,
+        TriangleIndex walkableIndex,
+        TriangleIndex fishableIndex)
     {
-        direction = default;
-        var edgeVector = fishableEdge.End - fishableEdge.Start;
-        edgeVector.Y = 0f;
-        if (edgeVector.LengthSquared() <= 0.0001f)
+        if (!TryGetHorizontalDirection(facingTarget - candidatePosition, out var direction))
             return false;
 
-        edgeVector = Vector3.Normalize(edgeVector);
-        var normal = new Vector3(-edgeVector.Z, 0f, edgeVector.X);
-        var toWalkable = walkableEdge.Triangle.Centroid - fishableEdge.Midpoint;
-        toWalkable.Y = 0f;
-        if (toWalkable.LengthSquared() <= 0.0001f)
-            toWalkable = walkableEdge.Midpoint - fishableEdge.Midpoint;
-        toWalkable.Y = 0f;
+        var targetDistance = HorizontalDistance(candidatePosition, facingTarget);
+        var maxDistance = Math.Clamp(
+            targetDistance + WalkableOcclusionProbePastTargetDistance,
+            WalkableOcclusionProbeStep,
+            WalkableOcclusionMaxProbeDistance);
+        var coveredLength = 0f;
+        for (var offset = WalkableOcclusionProbeStep;
+             offset <= maxDistance;
+             offset += WalkableOcclusionProbeStep)
+        {
+            var probe = CreateProbePoint(candidatePosition, direction, offset);
+            if (!fishableIndex.TryFindContainingPoint(probe, candidatePosition.Y, out _, out var fishableY)
+                || !walkableIndex.TryFindContainingPointNearY(
+                    probe,
+                    candidatePosition.Y,
+                    WalkableOcclusionSameDeckHeightTolerance,
+                    out _,
+                    out var walkableY)
+                || walkableY - fishableY < WalkableOcclusionMinimumClearanceAboveFishable)
+            {
+                coveredLength = 0f;
+                continue;
+            }
 
-        if (toWalkable.LengthSquared() <= 0.0001f)
-            return false;
+            coveredLength += WalkableOcclusionProbeStep;
+            if (coveredLength >= WalkableOcclusionMinimumCoveredLength)
+                return true;
+        }
 
-        if (Vector3.Dot(normal, toWalkable) < 0f)
-            normal = -normal;
-
-        direction = normal;
-        return true;
-    }
-
-    private static float CalculateScore(BoundaryEdge fishableEdge, BoundaryEdge walkableEdge, bool exactSharedEdge)
-    {
-        var edgeLengthScore = Math.Clamp(fishableEdge.HorizontalLength / 12f, 0f, 1f);
-        var normalScore = Math.Clamp((fishableEdge.Triangle.Normal.Y + walkableEdge.Triangle.Normal.Y) * 0.5f, 0f, 1f);
-        var matchScore = exactSharedEdge
-            ? 1f
-            : 1f - Math.Clamp(HorizontalDistance(fishableEdge.Midpoint, walkableEdge.Midpoint) / NearbyEdgeMatchDistance, 0f, 1f);
-
-        return (matchScore * 0.45f) + (edgeLengthScore * 0.25f) + (normalScore * 0.3f);
+        return false;
     }
 
     private static bool TryProjectYOnTriangleXz(ExtractedSceneTriangle triangle, float x, float z, out float y)
@@ -487,18 +838,35 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             MathF.Min(DistanceToSegment(p, b, c), DistanceToSegment(p, c, a)));
     }
 
-    private static float HorizontalDistanceToSegment(Vector3 point, BoundaryEdge edge)
+    private static Vector3 ClosestPointOnTriangleXz(Vector3 point, ExtractedSceneTriangle triangle)
     {
         var p = new Vector2(point.X, point.Z);
-        var start = new Vector2(edge.Start.X, edge.Start.Z);
-        var end = new Vector2(edge.End.X, edge.End.Z);
-        var segment = end - start;
-        var lengthSquared = segment.LengthSquared();
-        if (lengthSquared <= 0.0001f)
-            return Vector2.Distance(p, start);
+        var a = new Vector2(triangle.A.X, triangle.A.Z);
+        var b = new Vector2(triangle.B.X, triangle.B.Z);
+        var c = new Vector2(triangle.C.X, triangle.C.Z);
+        var closest = PointInTriangle(p, a, b, c)
+            ? p
+            : ClosestPointOnTriangleEdge(p, a, b, c);
 
-        var t = Math.Clamp(Vector2.Dot(p - start, segment) / lengthSquared, 0f, 1f);
-        return Vector2.Distance(p, start + (segment * t));
+        var result = new Vector3(closest.X, triangle.Centroid.Y, closest.Y);
+        if (TryProjectYOnTriangleXz(triangle, result.X, result.Z, out var y))
+            result.Y = y;
+
+        return result;
+    }
+
+    private static Vector2 ClosestPointOnTriangleEdge(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
+    {
+        var ab = ClosestPointOnSegment(point, a, b);
+        var bc = ClosestPointOnSegment(point, b, c);
+        var ca = ClosestPointOnSegment(point, c, a);
+        var abDistance = Vector2.DistanceSquared(point, ab);
+        var bcDistance = Vector2.DistanceSquared(point, bc);
+        var caDistance = Vector2.DistanceSquared(point, ca);
+        if (abDistance <= bcDistance && abDistance <= caDistance)
+            return ab;
+
+        return bcDistance <= caDistance ? bc : ca;
     }
 
     private static bool PointInTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
@@ -513,13 +881,18 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
     private static float DistanceToSegment(Vector2 point, Vector2 start, Vector2 end)
     {
+        return Vector2.Distance(point, ClosestPointOnSegment(point, start, end));
+    }
+
+    private static Vector2 ClosestPointOnSegment(Vector2 point, Vector2 start, Vector2 end)
+    {
         var segment = end - start;
         var lengthSquared = segment.LengthSquared();
         if (lengthSquared <= 0.0001f)
-            return Vector2.Distance(point, start);
+            return start;
 
         var t = Math.Clamp(Vector2.Dot(point - start, segment) / lengthSquared, 0f, 1f);
-        return Vector2.Distance(point, start + (segment * t));
+        return start + (segment * t);
     }
 
     private static float Cross(Vector2 left, Vector2 right)
@@ -562,20 +935,20 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var index = 0;
         foreach (var candidate in candidates
             .OrderBy(candidate => HorizontalDistance(candidate.Position.ToVector3(), playerPosition))
-            .ThenByDescending(candidate => candidate.Score)
+            .ThenBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
             .Take(MaxDebugCandidates))
         {
             index++;
             var position = candidate.Position.ToVector3();
             pluginLog.Debug(
-                "FPG nearby candidate {Index}: pos=({X:F2},{Y:F2},{Z:F2}) dist={Distance:F1} rotation={Rotation:F3} score={Score:F3}",
+                "FPG nearby candidate {Index}: pos=({X:F2},{Y:F2},{Z:F2}) dist={Distance:F1} rotation={Rotation:F3} surface={SurfaceGroupId}",
                 index,
                 position.X,
                 position.Y,
                 position.Z,
                 HorizontalDistance(position, playerPosition),
                 candidate.Rotation,
-                candidate.Score);
+                string.IsNullOrWhiteSpace(candidate.SurfaceGroupId) ? "-" : candidate.SurfaceGroupId);
         }
     }
 
@@ -730,76 +1103,182 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return counts;
     }
 
-    private sealed class BoundaryEdgeIndex
+    private sealed class TriangleIndex
     {
         private readonly float cellSize;
-        private readonly Dictionary<GridCell, List<BoundaryEdge>> cells = [];
+        private readonly Dictionary<GridCell, List<ExtractedSceneTriangle>> cells = [];
 
-        public BoundaryEdgeIndex(IReadOnlyList<BoundaryEdge> edges, float cellSize)
+        public TriangleIndex(IReadOnlyList<ExtractedSceneTriangle> triangles, float cellSize)
         {
             this.cellSize = cellSize;
-            foreach (var edge in edges)
-                Add(edge);
+            foreach (var triangle in triangles)
+                Add(triangle);
         }
 
-        public BoundaryEdge? FindNearest(BoundaryEdge fishableEdge)
+        public bool ContainsPoint(Vector3 point)
         {
-            var center = GridCell.From(fishableEdge.Midpoint.X, fishableEdge.Midpoint.Z, cellSize);
-            var range = (int)MathF.Ceiling(NearbyEdgeMatchDistance / cellSize) + 1;
-            BoundaryEdge? best = null;
-            var bestDistance = float.MaxValue;
+            var cell = GridCell.From(point.X, point.Z, cellSize);
+            if (!cells.TryGetValue(cell, out var triangles))
+                return false;
+
+            var point2 = new Vector2(point.X, point.Z);
+            foreach (var triangle in triangles)
+            {
+                if (PointInTriangle(
+                        point2,
+                        new Vector2(triangle.A.X, triangle.A.Z),
+                        new Vector2(triangle.B.X, triangle.B.Z),
+                        new Vector2(triangle.C.X, triangle.C.Z)))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public bool TryFindContainingPointNearY(
+            Vector3 point,
+            float referenceY,
+            float maxDeltaY,
+            out ExtractedSceneTriangle triangle,
+            out float y)
+        {
+            if (!TryFindContainingPoint(point, referenceY, out triangle, out y))
+                return false;
+
+            return MathF.Abs(y - referenceY) <= maxDeltaY;
+        }
+
+        public bool HasContainingPointAboveWithinRadius(
+            Vector3 point,
+            float radius,
+            float minimumDeltaY,
+            float maximumDeltaY)
+        {
+            var center = GridCell.From(point.X, point.Z, cellSize);
+            var range = (int)MathF.Ceiling(radius / cellSize) + 1;
+            var radiusSquared = radius * radius;
+            for (var x = center.X - range; x <= center.X + range; x++)
+            {
+                for (var z = center.Z - range; z <= center.Z + range; z++)
+                {
+                    if (!cells.TryGetValue(new GridCell(x, z), out var triangles))
+                        continue;
+
+                    foreach (var candidate in triangles)
+                    {
+                        var candidatePoint = ClosestPointOnTriangleXz(point, candidate);
+                        var dx = candidatePoint.X - point.X;
+                        var dz = candidatePoint.Z - point.Z;
+                        if ((dx * dx) + (dz * dz) > radiusSquared)
+                            continue;
+
+                        var deltaY = candidatePoint.Y - point.Y;
+                        if (deltaY >= minimumDeltaY && deltaY <= maximumDeltaY)
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        public bool TryFindContainingPoint(
+            Vector3 point,
+            float referenceY,
+            out ExtractedSceneTriangle triangle,
+            out float y)
+        {
+            var cell = GridCell.From(point.X, point.Z, cellSize);
+            triangle = default;
+            y = 0f;
+            if (!cells.TryGetValue(cell, out var triangles))
+                return false;
+
+            var point2 = new Vector2(point.X, point.Z);
+            var bestDeltaY = float.MaxValue;
+            foreach (var candidate in triangles)
+            {
+                if (!PointInTriangle(
+                        point2,
+                        new Vector2(candidate.A.X, candidate.A.Z),
+                        new Vector2(candidate.B.X, candidate.B.Z),
+                        new Vector2(candidate.C.X, candidate.C.Z))
+                    || !TryProjectYOnTriangleXz(candidate, point.X, point.Z, out var candidateY))
+                    continue;
+
+                var deltaY = MathF.Abs(candidateY - referenceY);
+                if (deltaY >= bestDeltaY)
+                    continue;
+
+                bestDeltaY = deltaY;
+                y = candidateY;
+                triangle = candidate;
+            }
+
+            return bestDeltaY < float.MaxValue;
+        }
+
+        public bool TryFindNearest(
+            Vector3 point,
+            float radius,
+            out ExtractedSceneTriangle triangle,
+            out Vector3 nearestPoint,
+            out float distance)
+        {
+            var center = GridCell.From(point.X, point.Z, cellSize);
+            var range = (int)MathF.Ceiling(radius / cellSize) + 1;
+            triangle = default;
+            nearestPoint = default;
+            distance = float.MaxValue;
 
             for (var x = center.X - range; x <= center.X + range; x++)
             {
                 for (var z = center.Z - range; z <= center.Z + range; z++)
                 {
-                    if (!cells.TryGetValue(new GridCell(x, z), out var edges))
+                    if (!cells.TryGetValue(new GridCell(x, z), out var triangles))
                         continue;
 
-                    foreach (var edge in edges)
+                    foreach (var candidate in triangles)
                     {
-                        if (!IsNearbyBoundaryMatch(fishableEdge, edge, out var distance))
+                        var candidatePoint = ClosestPointOnTriangleXz(point, candidate);
+                        var candidateDistance = HorizontalDistance(point, candidatePoint);
+                        if (candidateDistance > radius || candidateDistance >= distance)
                             continue;
 
-                        if (distance < bestDistance)
-                        {
-                            bestDistance = distance;
-                            best = edge;
-                        }
+                        distance = candidateDistance;
+                        nearestPoint = candidatePoint;
+                        triangle = candidate;
                     }
                 }
             }
 
-            return best;
+            return distance < float.MaxValue;
         }
 
-        private void Add(BoundaryEdge edge)
+        private void Add(ExtractedSceneTriangle triangle)
         {
-            var cell = GridCell.From(edge.Midpoint.X, edge.Midpoint.Z, cellSize);
-            if (!cells.TryGetValue(cell, out var list))
+            var minX = MathF.Min(triangle.A.X, MathF.Min(triangle.B.X, triangle.C.X));
+            var maxX = MathF.Max(triangle.A.X, MathF.Max(triangle.B.X, triangle.C.X));
+            var minZ = MathF.Min(triangle.A.Z, MathF.Min(triangle.B.Z, triangle.C.Z));
+            var maxZ = MathF.Max(triangle.A.Z, MathF.Max(triangle.B.Z, triangle.C.Z));
+            var minCell = GridCell.From(minX, minZ, cellSize);
+            var maxCell = GridCell.From(maxX, maxZ, cellSize);
+
+            for (var x = minCell.X; x <= maxCell.X; x++)
             {
-                list = [];
-                cells[cell] = list;
+                for (var z = minCell.Z; z <= maxCell.Z; z++)
+                {
+                    var cell = new GridCell(x, z);
+                    if (!cells.TryGetValue(cell, out var list))
+                    {
+                        list = [];
+                        cells[cell] = list;
+                    }
+
+                    list.Add(triangle);
+                }
             }
-
-            list.Add(edge);
         }
-    }
-
-    private static bool IsNearbyBoundaryMatch(BoundaryEdge fishableEdge, BoundaryEdge walkableEdge, out float distance)
-    {
-        distance = float.MaxValue;
-        if (MathF.Abs(fishableEdge.Midpoint.Y - walkableEdge.Midpoint.Y) > NearbyEdgeHeightTolerance)
-            return false;
-
-        var directionDot = MathF.Abs(Vector3.Dot(fishableEdge.HorizontalDirection, walkableEdge.HorizontalDirection));
-        if (directionDot < NearbyEdgeDirectionDot)
-            return false;
-
-        var fishableToWalkable = HorizontalDistanceToSegment(fishableEdge.Midpoint, walkableEdge);
-        var walkableToFishable = HorizontalDistanceToSegment(walkableEdge.Midpoint, fishableEdge);
-        distance = MathF.Min(fishableToWalkable, walkableToFishable);
-        return distance <= NearbyEdgeMatchDistance;
     }
 
     private sealed class BoundaryEdgeBucket
@@ -826,6 +1305,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         string NearestMaterial,
         SceneMeshType NearestMeshType);
 
+    private sealed record FishableSurfaceBlock(
+        string SurfaceGroupId,
+        IReadOnlyList<ExtractedSceneTriangle> Triangles,
+        Vector3 Center,
+        float Area,
+        TriangleIndex Index);
+
     private readonly record struct BoundaryEdge(Vector3 Start, Vector3 End, ExtractedSceneTriangle Triangle)
     {
         public Vector3 Midpoint => (Start + End) * 0.5f;
@@ -851,7 +1337,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         }
     }
 
-    private readonly record struct CandidateScratch(Vector3 Position, float Rotation, float Score);
+    private readonly record struct CandidateScratch(Vector3 Position, float Rotation, string SurfaceGroupId);
 
     private readonly record struct CandidateKey(int X, int Y, int Z, int Rotation)
     {

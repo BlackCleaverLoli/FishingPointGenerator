@@ -18,11 +18,13 @@ public sealed record SpotCandidate
     public string CandidateFingerprint { get; init; } = string.Empty;
     public string RegionId { get; init; } = string.Empty;
     public string BlockId { get; init; } = string.Empty;
+    public string SurfaceGroupId { get; init; } = string.Empty;
     public Point3 Position { get; init; }
     public float Rotation { get; init; }
-    public float Score { get; init; }
     public CandidateStatus Status { get; init; }
     public string SourceCandidateId { get; init; } = string.Empty;
+    public float DistanceToTargetCenterMeters { get; init; }
+    public bool IsWithinTargetSearchRadius { get; init; }
     public List<uint> NearbyFishingSpotIds { get; init; } = [];
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

@@ -8,25 +8,12 @@ internal sealed class SpotScanService
     private const float MinimumSearchRadiusMeters = 35f;
     private const float MaximumSearchRadiusMeters = 140f;
     private const float SearchRadiusPaddingMeters = 24f;
-    private const float TargetPreferenceDistanceMeters = 180f;
 
     private readonly TerritoryGeometryCache geometryCache;
 
     public SpotScanService(TerritoryGeometryCache geometryCache)
     {
         this.geometryCache = geometryCache;
-    }
-
-    public SpotScanDocument ScanSpot(
-        FishingSpotTarget target,
-        IReadOnlyList<FishingSpotTarget> catalogTargets,
-        bool forceTerritoryRescan)
-    {
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(catalogTargets);
-
-        var survey = geometryCache.ScanCurrentTerritory(forceTerritoryRescan);
-        return CreateSpotScan(target, catalogTargets, survey);
     }
 
     public TerritorySurveyDocument ScanCurrentTerritory(bool forceTerritoryRescan)
@@ -56,10 +43,15 @@ internal sealed class SpotScanService
         }
 
         var candidates = survey.Candidates
-            .Select(candidate => CreateSpotCandidate(target, candidate))
+            .Select(candidate => CreateSpotCandidate(target, catalogTargets, candidate))
             .GroupBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
-            .Select(group => group.OrderByDescending(candidate => candidate.Score).First())
-            .OrderByDescending(candidate => candidate.Score)
+            .Select(group => group
+                .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
+                .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
+                .ThenBy(candidate => candidate.SourceCandidateId, StringComparer.Ordinal)
+                .First())
+            .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
+            .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
             .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .ToList();
 
@@ -83,32 +75,58 @@ internal sealed class SpotScanService
         };
     }
 
-    private static SpotCandidate CreateSpotCandidate(FishingSpotTarget target, ApproachCandidate candidate)
+    private static SpotCandidate CreateSpotCandidate(
+        FishingSpotTarget target,
+        IReadOnlyList<FishingSpotTarget> catalogTargets,
+        ApproachCandidate candidate)
     {
         var key = target.Key;
+        var targetDistance = GetDistanceToTargetCenter(target, candidate.Position);
+        var searchRadius = GetSearchRadius(target);
         return new SpotCandidate
         {
             Key = key,
             CandidateFingerprint = SpotFingerprint.CreateCandidateFingerprint(key, candidate.Position, candidate.Rotation),
             RegionId = candidate.RegionId,
             BlockId = candidate.BlockId,
+            SurfaceGroupId = candidate.SurfaceGroupId,
             Position = candidate.Position,
             Rotation = candidate.Rotation,
-            Score = CalculateTargetPreferenceScore(target, candidate),
             Status = candidate.Status,
             SourceCandidateId = candidate.CandidateId,
-            NearbyFishingSpotIds = [],
+            DistanceToTargetCenterMeters = targetDistance,
+            IsWithinTargetSearchRadius = targetDistance <= searchRadius,
+            NearbyFishingSpotIds = FindNearbyFishingSpotIds(target, catalogTargets, candidate.Position),
             CreatedAt = candidate.CreatedAt,
         };
     }
 
-    private static float CalculateTargetPreferenceScore(FishingSpotTarget target, ApproachCandidate candidate)
+    private static List<uint> FindNearbyFishingSpotIds(
+        FishingSpotTarget target,
+        IReadOnlyList<FishingSpotTarget> catalogTargets,
+        Point3 position)
     {
-        var targetCenter = new Point3(target.WorldX, candidate.Position.Y, target.WorldZ);
-        var distance = candidate.Position.HorizontalDistanceTo(targetCenter);
-        var softRadius = MathF.Max(GetSearchRadius(target), TargetPreferenceDistanceMeters);
-        var targetPreference = 1f - Math.Clamp(distance / softRadius, 0f, 1f);
-        return (candidate.Score * 0.75f) + (targetPreference * 0.25f);
+        var targetCenter = new Point3(target.WorldX, position.Y, target.WorldZ);
+        if (position.HorizontalDistanceTo(targetCenter) > GetSearchRadius(target))
+            return [];
+
+        return catalogTargets
+            .Where(other => other.TerritoryId == target.TerritoryId)
+            .Where(other =>
+            {
+                var center = new Point3(other.WorldX, position.Y, other.WorldZ);
+                return position.HorizontalDistanceTo(center) <= GetSearchRadius(other);
+            })
+            .Select(other => other.FishingSpotId)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
+    }
+
+    private static float GetDistanceToTargetCenter(FishingSpotTarget target, Point3 position)
+    {
+        var targetCenter = new Point3(target.WorldX, position.Y, target.WorldZ);
+        return position.HorizontalDistanceTo(targetCenter);
     }
 
     private static float GetSearchRadius(FishingSpotTarget target)

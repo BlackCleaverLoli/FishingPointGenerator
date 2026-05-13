@@ -29,19 +29,19 @@ public sealed class SpotJsonStore
         return Path.Combine(rootDirectory, "data", "catalog", CatalogFileName);
     }
 
-    public string GetScanPath(SpotKey key)
+    public string GetLegacySpotScanPath(SpotKey key)
     {
         ValidateKey(key);
         return Path.Combine(rootDirectory, "data", "scans", $"territory_{key.TerritoryId}", $"spot_{key.FishingSpotId}.scan.json");
     }
 
-    public string GetLedgerPath(SpotKey key)
+    public string GetLegacyLedgerPath(SpotKey key)
     {
         ValidateKey(key);
         return Path.Combine(rootDirectory, "data", "labels", $"territory_{key.TerritoryId}", $"spot_{key.FishingSpotId}.ledger.json");
     }
 
-    public string GetReviewPath(SpotKey key)
+    public string GetLegacyReviewPath(SpotKey key)
     {
         ValidateKey(key);
         return Path.Combine(rootDirectory, "data", "review", $"territory_{key.TerritoryId}", $"spot_{key.FishingSpotId}.review.json");
@@ -75,9 +75,9 @@ public sealed class SpotJsonStore
         WriteJson(GetCatalogPath(), document with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
-    public SpotScanDocument LoadScan(SpotKey key)
+    public SpotScanDocument LoadLegacySpotScan(SpotKey key)
     {
-        var path = GetScanPath(key);
+        var path = GetLegacySpotScanPath(key);
         if (!File.Exists(path))
             return new SpotScanDocument { Key = key };
 
@@ -85,22 +85,14 @@ public sealed class SpotJsonStore
             ?? new SpotScanDocument { Key = key };
     }
 
-    public void SaveScan(SpotScanDocument document)
+    public bool DeleteLegacySpotScan(SpotKey key)
     {
-        ArgumentNullException.ThrowIfNull(document);
-        ValidateKey(document.Key);
-
-        WriteJson(GetScanPath(document.Key), document with { GeneratedAt = DateTimeOffset.UtcNow });
+        return DeleteFile(GetLegacySpotScanPath(key));
     }
 
-    public bool DeleteScan(SpotKey key)
+    public SpotLabelLedger LoadLegacyLedger(SpotKey key)
     {
-        return DeleteFile(GetScanPath(key));
-    }
-
-    public SpotLabelLedger LoadLedger(SpotKey key)
-    {
-        var path = GetLedgerPath(key);
+        var path = GetLegacyLedgerPath(key);
         if (!File.Exists(path))
             return new SpotLabelLedger { Key = key };
 
@@ -108,22 +100,9 @@ public sealed class SpotJsonStore
             ?? new SpotLabelLedger { Key = key };
     }
 
-    public void SaveLedger(SpotLabelLedger ledger)
+    public SpotReviewDocument LoadLegacyReview(SpotKey key)
     {
-        ArgumentNullException.ThrowIfNull(ledger);
-        ValidateKey(ledger.Key);
-
-        WriteJson(GetLedgerPath(ledger.Key), ledger with { UpdatedAt = DateTimeOffset.UtcNow });
-    }
-
-    public bool DeleteLedger(SpotKey key)
-    {
-        return DeleteFile(GetLedgerPath(key));
-    }
-
-    public SpotReviewDocument LoadReview(SpotKey key)
-    {
-        var path = GetReviewPath(key);
+        var path = GetLegacyReviewPath(key);
         if (!File.Exists(path))
             return new SpotReviewDocument { Key = key };
 
@@ -131,12 +110,12 @@ public sealed class SpotJsonStore
             ?? new SpotReviewDocument { Key = key };
     }
 
-    public void SaveReview(SpotReviewDocument review)
+    public void SaveLegacyReview(SpotReviewDocument review)
     {
         ArgumentNullException.ThrowIfNull(review);
         ValidateKey(review.Key);
 
-        WriteJson(GetReviewPath(review.Key), review with { UpdatedAt = DateTimeOffset.UtcNow });
+        WriteJson(GetLegacyReviewPath(review.Key), review with { UpdatedAt = DateTimeOffset.UtcNow });
     }
 
     public SpotValidationReport LoadReport(SpotKey key)

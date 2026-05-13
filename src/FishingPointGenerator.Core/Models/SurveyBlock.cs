@@ -28,12 +28,3 @@ public sealed record SurveyBlock
         }
     }
 }
-
-public sealed record SurveyBlockState
-{
-    public SurveyBlock Block { get; init; } = new();
-    public SurveyBlockStatus Status { get; init; }
-    public IReadOnlySet<uint> FishingSpotIds { get; init; } = new HashSet<uint>();
-    public int LabelCount { get; init; }
-    public bool Exportable => Status == SurveyBlockStatus.SingleSpot;
-}

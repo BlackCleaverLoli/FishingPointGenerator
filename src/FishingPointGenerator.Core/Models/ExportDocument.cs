@@ -33,10 +33,9 @@ public sealed record ExportedApproachPoint
     [JsonPropertyName("Rotation")]
     public float Rotation { get; init; }
 
-    public float Score { get; init; }
     public string SourceBlockId { get; init; } = string.Empty;
     public string SourceCandidateId { get; init; } = string.Empty;
     public string SourceCandidateFingerprint { get; init; } = string.Empty;
-    public string SourceLabelId { get; init; } = string.Empty;
+    public string SourceEvidenceId { get; init; } = string.Empty;
     public string SourceScanId { get; init; } = string.Empty;
 }

@@ -127,8 +127,7 @@ public sealed class SurveyBlockBuilder
     private bool ShouldLinkBlock(ApproachCandidate left, ApproachCandidate right)
     {
         return MathF.Abs(left.Position.Y - right.Position.Y) <= options.BlockHeightToleranceMeters
-            && left.Position.HorizontalDistanceTo(right.Position) <= options.BlockLinkDistanceMeters
-            && AngleMath.AngularDistance(left.Rotation, right.Rotation) <= options.BlockRotationToleranceRadians;
+            && left.Position.HorizontalDistanceTo(right.Position) <= options.BlockLinkDistanceMeters;
     }
 
     private static IReadOnlyList<Component> BuildComponents(

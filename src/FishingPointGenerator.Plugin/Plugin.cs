@@ -20,16 +20,18 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg catalog - 重建 FishingSpot 目录\n"
         + "/fpg refresh - 重新加载当前区域目标\n"
         + "/fpg next - 选择下一个需要处理的目标\n"
-        + "/fpg target <fishingSpotId> - 选择当前区域内的目标\n"
+        + "/fpg target <fishingSpotId> - 选择已选领地内的目标\n"
         + "/fpg scan - 扫描当前区域全图并缓存候选点\n"
-        + "/fpg scantarget - 从全图缓存生成已选目标缓存\n"
+        + "/fpg scantarget - 从 Territory 缓存为已选目标派生推荐候选\n"
         + "/fpg debugnear [radius] - 只分析角色附近碰撞面，输出调试日志并显示 Fishable/Walkable overlay\n"
+        + "/fpg debugcandidates [radius] [limit] - 输出已选钓场附近候选点、块和点亮范围调试日志\n"
         + "/fpg debugclear - 清除附近碰撞面调试 overlay\n"
         + "/fpg flag - 为已选钓场中心插旗\n"
         + "/fpg flagstand - 为推荐点位插旗\n"
         + "/fpg confirm - 确认已选目标的推荐\n"
         + "/fpg mismatch - 记录此目标与推荐不匹配\n"
         + "/fpg allowweak - 允许已选目标以弱覆盖状态导出\n"
+        + "/fpg allowrisk - 允许已选目标在风险复核后导出\n"
         + "/fpg ignore - 忽略已选目标\n"
         + "/fpg report - 为已选目标生成验证报告\n"
         + "/fpg export - 导出已确认的 FishingSpot 点位";
@@ -60,6 +62,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.Draw += DrawUi;
         pluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
         pluginInterface.UiBuilder.OpenConfigUi += ToggleMainUi;
+        DService.Instance().ClientState.TerritoryChanged += OnTerritoryChanged;
 
         DService.Instance().Command.AddHandler(
             CommandName,
@@ -82,6 +85,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.Draw -= DrawUi;
         pluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleMainUi;
+        DService.Instance().ClientState.TerritoryChanged -= OnTerritoryChanged;
 
         castMonitor.Dispose();
         windowSystem.RemoveAllWindows();
@@ -99,6 +103,19 @@ public sealed class Plugin : IDalamudPlugin
     private void ToggleMainUi()
     {
         mainWindow.IsOpen = !mainWindow.IsOpen;
+    }
+
+    private void OnTerritoryChanged(uint territoryId)
+    {
+        try
+        {
+            session.HandleTerritoryChanged(territoryId);
+            pluginLog.Debug("FishingPointGenerator 已处理切图：Territory={TerritoryId}", territoryId);
+        }
+        catch (Exception ex)
+        {
+            pluginLog.Error(ex, "FishingPointGenerator 切图处理失败");
+        }
     }
 
     private void OnCommand(string command, string args)
@@ -149,6 +166,33 @@ public sealed class Plugin : IDalamudPlugin
                 }
 
                 session.DebugScanNearby(debugRadius);
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "debugcandidates":
+            case "debugcand":
+                var candidateRadius = 35f;
+                var candidateLimit = 80;
+                if (parts.Length >= 2
+                    && (!float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out candidateRadius)
+                        || candidateRadius <= 0f))
+                {
+                    Print("用法：/fpg debugcandidates [radius] [limit]");
+                    return;
+                }
+
+                if (parts.Length >= 3
+                    && (!int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out candidateLimit)
+                        || candidateLimit <= 0))
+                {
+                    Print("用法：/fpg debugcandidates [radius] [limit]");
+                    return;
+                }
+
+                foreach (var line in session.BuildNearbyCandidateDebugLines(candidateRadius, candidateLimit))
+                    pluginLog.Information("{Message}", line);
+
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;
@@ -222,6 +266,12 @@ public sealed class Plugin : IDalamudPlugin
 
             case "allowweak":
                 session.AllowWeakCoverageExport();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "allowrisk":
+                session.AllowRiskExport();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;

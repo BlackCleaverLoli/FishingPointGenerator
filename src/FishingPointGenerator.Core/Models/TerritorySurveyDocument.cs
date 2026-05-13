@@ -7,5 +7,4 @@ public sealed record TerritorySurveyDocument
     public string TerritoryName { get; init; } = string.Empty;
     public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<ApproachCandidate> Candidates { get; init; } = [];
-    public List<FishingSpotLabel> Labels { get; init; } = [];
 }

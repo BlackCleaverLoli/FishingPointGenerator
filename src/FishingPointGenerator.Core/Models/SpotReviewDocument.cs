@@ -1,11 +1,13 @@
 namespace FishingPointGenerator.Core.Models;
 
+[Flags]
 public enum SpotReviewDecision
 {
-    None,
-    AllowWeakCoverageExport,
-    IgnoreSpot,
-    NeedsManualReview,
+    None = 0,
+    AllowWeakCoverageExport = 1,
+    AllowRiskExport = 2,
+    IgnoreSpot = 4,
+    NeedsManualReview = 8,
 }
 
 public sealed record SpotReviewDocument

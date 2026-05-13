@@ -6,8 +6,6 @@ namespace FishingPointGenerator.Core;
 
 public sealed class SurveyJsonStore
 {
-    public const string ExportFileName = "FishingSpotApproachPoints.json";
-
     private readonly string rootDirectory;
     private readonly JsonSerializerOptions jsonOptions;
 
@@ -28,16 +26,6 @@ public sealed class SurveyJsonStore
         return Path.Combine(rootDirectory, "data", "generated", $"territory_{territoryId}.json");
     }
 
-    public string GetLabelsPath(uint territoryId)
-    {
-        return Path.Combine(rootDirectory, "data", "labels", $"territory_{territoryId}.labels.json");
-    }
-
-    public string GetExportPath()
-    {
-        return Path.Combine(rootDirectory, "data", "exports", ExportFileName);
-    }
-
     public TerritorySurveyDocument LoadGeneratedSurvey(uint territoryId)
     {
         var path = GetGeneratedSurveyPath(territoryId);
@@ -53,40 +41,6 @@ public sealed class SurveyJsonStore
         ArgumentNullException.ThrowIfNull(document);
 
         WriteJson(GetGeneratedSurveyPath(document.TerritoryId), document with { GeneratedAt = DateTimeOffset.UtcNow });
-    }
-
-    public TerritoryLabelsDocument LoadLabels(uint territoryId)
-    {
-        var path = GetLabelsPath(territoryId);
-        if (!File.Exists(path))
-            return new TerritoryLabelsDocument { TerritoryId = territoryId };
-
-        return JsonSerializer.Deserialize<TerritoryLabelsDocument>(File.ReadAllText(path), jsonOptions)
-            ?? new TerritoryLabelsDocument { TerritoryId = territoryId };
-    }
-
-    public void SaveLabels(TerritoryLabelsDocument document)
-    {
-        ArgumentNullException.ThrowIfNull(document);
-
-        WriteJson(GetLabelsPath(document.TerritoryId), document with { UpdatedAt = DateTimeOffset.UtcNow });
-    }
-
-    public ExportDocument LoadExport()
-    {
-        var path = GetExportPath();
-        if (!File.Exists(path))
-            return new ExportDocument();
-
-        return JsonSerializer.Deserialize<ExportDocument>(File.ReadAllText(path), jsonOptions)
-            ?? new ExportDocument();
-    }
-
-    public void SaveExport(ExportDocument document)
-    {
-        ArgumentNullException.ThrowIfNull(document);
-
-        WriteJson(GetExportPath(), document with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
     private void WriteJson<T>(string path, T value)

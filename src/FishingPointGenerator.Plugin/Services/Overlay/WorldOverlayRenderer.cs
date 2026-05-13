@@ -62,13 +62,14 @@ internal sealed unsafe class WorldOverlayRenderer
         var territoryLimit = session.OverlayShowCandidates ? candidateLimit / 2 : candidateLimit;
         var selectedLimit = session.OverlayShowTerritoryCache ? candidateLimit - territoryLimit : candidateLimit;
         var drawList = ImGui.GetWindowDrawList();
-        if (session.CurrentTarget is not null)
+        var canDrawSelectedTerritory = session.SelectedTerritoryIsCurrent;
+        if (session.CurrentTarget is not null && canDrawSelectedTerritory)
             DrawTarget(drawList, session, player.Position);
         if (session.OverlayShowFishableDebug || session.OverlayShowWalkableDebug)
             DrawSurfaceDebug(drawList, session, player.Position, drawDistance, Math.Min(candidateLimit, 512));
-        if (session.OverlayShowTerritoryCache && territoryLimit > 0)
+        if (session.OverlayShowTerritoryCache && territoryLimit > 0 && canDrawSelectedTerritory)
             DrawTerritoryCache(drawList, session, player.Position, drawDistance, territoryLimit);
-        if (session.OverlayShowCandidates && selectedLimit > 0)
+        if (session.OverlayShowCandidates && selectedLimit > 0 && canDrawSelectedTerritory)
             DrawCandidates(drawList, session, player.Position, drawDistance, selectedLimit);
 
         ImGui.End();
@@ -119,12 +120,11 @@ internal sealed unsafe class WorldOverlayRenderer
             return;
 
         var recommendedFingerprint = session.CurrentAnalysis?.RecommendedCandidate?.CandidateFingerprint;
-        var confirmedFingerprints = session.CurrentLedger?.Events
-            .Where(label => label.EventType is SpotLabelEventType.Confirm or SpotLabelEventType.Override)
-            .Select(label => label.CandidateFingerprint)
+        var confirmedFingerprints = session.CurrentApproachPoints
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(point => point.SourceCandidateFingerprint)
             .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
-            .ToHashSet(StringComparer.Ordinal)
-            ?? [];
+            .ToHashSet(StringComparer.Ordinal);
 
         var candidates = scan.Candidates
             .Select(candidate => new
@@ -134,7 +134,6 @@ internal sealed unsafe class WorldOverlayRenderer
             })
             .Where(item => item.Distance <= drawDistance)
             .OrderBy(item => item.Distance)
-            .ThenByDescending(item => item.Candidate.Score)
             .ThenBy(item => item.Candidate.CandidateFingerprint, StringComparer.Ordinal)
             .Take(candidateLimit)
             .ToList();

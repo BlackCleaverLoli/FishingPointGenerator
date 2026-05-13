@@ -9,6 +9,7 @@ internal sealed class PluginPaths
         RootDirectory = pluginInterface.GetPluginConfigDirectory();
         DataDirectory = Path.Combine(RootDirectory, "data");
         CatalogDirectory = Path.Combine(DataDirectory, "catalog");
+        MaintenanceDirectory = Path.Combine(DataDirectory, "maintenance");
         ScansDirectory = Path.Combine(DataDirectory, "scans");
         GeneratedDirectory = Path.Combine(DataDirectory, "generated");
         LabelsDirectory = Path.Combine(DataDirectory, "labels");
@@ -17,6 +18,7 @@ internal sealed class PluginPaths
         ExportsDirectory = Path.Combine(DataDirectory, "exports");
 
         Directory.CreateDirectory(CatalogDirectory);
+        Directory.CreateDirectory(MaintenanceDirectory);
         Directory.CreateDirectory(ScansDirectory);
         Directory.CreateDirectory(GeneratedDirectory);
         Directory.CreateDirectory(LabelsDirectory);
@@ -28,6 +30,7 @@ internal sealed class PluginPaths
     public string RootDirectory { get; }
     public string DataDirectory { get; }
     public string CatalogDirectory { get; }
+    public string MaintenanceDirectory { get; }
     public string ScansDirectory { get; }
     public string GeneratedDirectory { get; }
     public string LabelsDirectory { get; }

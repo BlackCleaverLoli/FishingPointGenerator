@@ -11,6 +11,16 @@ public static class SpotFingerprint
 
     public static string CreateCandidateFingerprint(SpotKey key, Point3 position, float rotation)
     {
+        return CreateFingerprint("sp_", key, position, rotation);
+    }
+
+    public static string CreateApproachPointId(SpotKey key, Point3 position, float rotation)
+    {
+        return CreateFingerprint("ap_", key, position, rotation);
+    }
+
+    private static string CreateFingerprint(string prefix, SpotKey key, Point3 position, float rotation)
+    {
         if (!key.IsValid)
             throw new ArgumentException("SpotKey 必须包含 TerritoryId 和 FishingSpotId。", nameof(key));
 
@@ -25,7 +35,7 @@ public static class SpotFingerprint
             Quantize(normalizedRotation, RotationQuantumRadians).ToString());
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload));
-        return "sp_" + Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant();
+        return prefix + Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant();
     }
 
     private static int Quantize(float value, float quantum)

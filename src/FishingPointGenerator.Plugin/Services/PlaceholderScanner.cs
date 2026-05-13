@@ -69,9 +69,9 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
             {
                 CandidateId = $"placeholder_{territoryId}_{DateTimeOffset.UtcNow:yyyyMMddHHmmss}_{index:D2}",
                 TerritoryId = territoryId,
+                SurfaceGroupId = $"placeholder_{territoryId}_surface_0001",
                 Position = Point3.From(standingPosition),
                 Rotation = rotation,
-                Score = 1f - (index * 0.05f),
                 Status = CandidateStatus.Unlabeled,
             });
         }
