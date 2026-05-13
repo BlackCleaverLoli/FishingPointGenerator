@@ -32,6 +32,9 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg refreshcandidate - 刷新当前候选选择\n"
         + "/fpg confirm - 用玩家当前站位确认已选钓场\n"
         + "/fpg rejectcandidate - 排除当前候选\n"
+        + "/fpg clearspotmaintenance - 清除当前钓场维护数据\n"
+        + "/fpg clearterritorymaintenance - 清除当前领地维护数据\n"
+        + "/fpg clearterritorysurvey - 清除当前领地全图候选缓存\n"
         + "/fpg allowweak - 允许已选目标以弱覆盖状态导出\n"
         + "/fpg allowrisk - 允许已选目标在风险复核后导出\n"
         + "/fpg ignore - 忽略已选目标\n"
@@ -274,6 +277,24 @@ public sealed class Plugin : IDalamudPlugin
 
             case "rejectcandidate":
                 session.RejectSelectedCandidate();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "clearspotmaintenance":
+                session.ClearCurrentSpotMaintenance();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "clearterritorymaintenance":
+                session.ClearCurrentTerritoryMaintenance();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "clearterritorysurvey":
+                session.ClearCurrentTerritorySurvey();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;

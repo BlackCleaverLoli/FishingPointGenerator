@@ -65,6 +65,7 @@ internal sealed class MainWindow : Window, IDisposable
         }
 
         ImGui.Separator();
+        DrawDataCleanup();
         DrawDebugOptions();
         DrawPaths();
     }
@@ -428,6 +429,28 @@ internal sealed class MainWindow : Window, IDisposable
         DrawFloatInput("overlay 距离(m)", session.OverlayMaxDistanceMeters, MinimumOverlayDistance, MaximumOverlayDistance, value => session.OverlayMaxDistanceMeters = value, 10f, 50f, "%.0f");
         ImGui.SameLine();
         DrawIntInput("overlay 点数上限", session.OverlayCandidateLimit, MinimumOverlayCandidateLimit, MaximumOverlayCandidateLimit, value => session.OverlayCandidateLimit = value);
+    }
+
+    private void DrawDataCleanup()
+    {
+        if (!ImGui.CollapsingHeader("数据清理"))
+            return;
+
+        var ctrlDown = ImGui.GetIO().KeyCtrl;
+        var hasTarget = session.CurrentTarget is not null;
+        var hasTerritory = session.SelectedTerritoryId != 0;
+
+        ImGui.TextColored(WarnText, "按住 Ctrl 启用清理按钮。");
+        if (ActionButton("清当前钓场维护", !ctrlDown || !hasTarget))
+            session.ClearCurrentSpotMaintenance();
+
+        ImGui.SameLine();
+        if (ActionButton("清当前领地维护", !ctrlDown || !hasTerritory))
+            session.ClearCurrentTerritoryMaintenance();
+
+        ImGui.SameLine();
+        if (ActionButton("清当前领地候选缓存", !ctrlDown || !hasTerritory))
+            session.ClearCurrentTerritorySurvey();
     }
 
     private void DrawPaths()

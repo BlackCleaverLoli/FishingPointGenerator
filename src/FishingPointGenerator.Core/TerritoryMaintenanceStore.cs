@@ -77,6 +77,11 @@ public sealed class TerritoryMaintenanceStore
             document with { UpdatedAt = DateTimeOffset.UtcNow });
     }
 
+    public bool DeleteTerritory(uint territoryId)
+    {
+        return DeleteFile(GetTerritoryMaintenancePath(territoryId));
+    }
+
     private TerritoryMaintenanceDocument? LoadTerritoryFile(string path)
     {
         try
@@ -96,5 +101,14 @@ public sealed class TerritoryMaintenanceStore
             Directory.CreateDirectory(directory);
 
         File.WriteAllText(path, JsonSerializer.Serialize(value, jsonOptions) + "\n");
+    }
+
+    private static bool DeleteFile(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        File.Delete(path);
+        return true;
     }
 }

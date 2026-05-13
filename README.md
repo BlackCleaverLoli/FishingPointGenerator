@@ -44,6 +44,9 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点
 /fpg refreshcandidate
 /fpg confirm
 /fpg rejectcandidate
+/fpg clearspotmaintenance
+/fpg clearterritorymaintenance
+/fpg clearterritorysurvey
 /fpg allowweak
 /fpg allowrisk
 /fpg ignore

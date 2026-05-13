@@ -30,6 +30,8 @@ data/maintenance/territory_{territoryId}.json
 
 每个 `SpotMaintenanceRecord` 保存 `fishingSpotId`、review 决策、`ApproachPoints` 和 `Evidence`。重扫只刷新 scan cache，不删除 `ApproachPoints`、`Evidence` 或 review。
 
+`/fpg clearspotmaintenance` 会重置当前 `SpotMaintenanceRecord`，并删除同一 `SpotKey` 的旧版 ledger/review 文件，防止旧数据再次导入。`/fpg clearterritorymaintenance` 会对当前领地所有目录内钓场执行同样重置。
+
 ## Legacy Spot Scan
 
 路径：
@@ -48,6 +50,8 @@ hash(territoryId, fishingSpotId, quantized position, quantized rotation)
 
 其中 position 按 0.5m 量化，rotation 按 0.05 rad 量化。`Position + Rotation` 是下游消费形态。候选点同时保留扫描期 `surfaceGroupId`，表示同一片 fishable 水面连通组件；抛竿自动点亮会优先在 seed 候选点的同一 `surfaceGroupId` 内沿候选点图连锁扩展。
 从全图缓存派生到单个钓场时，候选会记录 `distanceToTargetCenterMeters` 与 `isWithinTargetSearchRadius`。状态统计和当前候选选择只看目标范围内候选；抛竿自动点亮仍可使用全图候选作为实证兜底。
+
+`/fpg clearterritorysurvey` 会删除当前领地的 `data/generated/territory_{territoryId}.json`，不影响维护层真实点位。
 
 ## Legacy Label Ledger
 

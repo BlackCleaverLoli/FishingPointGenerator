@@ -90,6 +90,16 @@ public sealed class SpotJsonStore
         return DeleteFile(GetLegacySpotScanPath(key));
     }
 
+    public bool DeleteLegacyLedger(SpotKey key)
+    {
+        return DeleteFile(GetLegacyLedgerPath(key));
+    }
+
+    public bool DeleteLegacyReview(SpotKey key)
+    {
+        return DeleteFile(GetLegacyReviewPath(key));
+    }
+
     public SpotLabelLedger LoadLegacyLedger(SpotKey key)
     {
         var path = GetLegacyLedgerPath(key);

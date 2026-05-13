@@ -878,6 +878,90 @@ internal sealed class SpotWorkflowSession
         LastMessage = $"已清除 FishingSpot {fishingSpotId} 的旧版 spot 扫描缓存（scan={FormatRemoved(removedScan)}）。当前主流程使用 Territory 全图缓存，维护记录、ledger 和 review 已保留。";
     }
 
+    public void ClearCurrentSpotMaintenance()
+    {
+        if (!EnsureCurrentTarget())
+            return;
+
+        var target = CurrentTarget!;
+        var removedLedger = store.DeleteLegacyLedger(target.Key);
+        var removedReview = store.DeleteLegacyReview(target.Key);
+        UpdateMaintenanceSpot(target, _ => CreateMaintenanceSpot(target));
+        CurrentCandidateSelection = CurrentScan is null
+            ? null
+            : GetOrBuildCandidateSelection(target, CurrentScan);
+        LastMessage = $"已清除 FishingSpot {target.FishingSpotId} 的维护数据：真实点、证据和复核状态已重置（ledger={FormatRemoved(removedLedger)}, review={FormatRemoved(removedReview)}）。";
+    }
+
+    public void ClearCurrentTerritoryMaintenance()
+    {
+        if (SelectedTerritoryId == 0)
+        {
+            LastMessage = "未选择领地，不能清除维护数据。";
+            return;
+        }
+
+        var targets = CurrentTerritoryTargets;
+        if (targets.Count == 0)
+        {
+            LastMessage = $"已选领地 {SelectedTerritoryId} 没有钓场目录，不能清除维护数据。";
+            return;
+        }
+
+        var removedLedgers = 0;
+        var removedReviews = 0;
+        foreach (var target in targets)
+        {
+            if (store.DeleteLegacyLedger(target.Key))
+                removedLedgers++;
+            if (store.DeleteLegacyReview(target.Key))
+                removedReviews++;
+        }
+
+        var document = new TerritoryMaintenanceDocument
+        {
+            TerritoryId = SelectedTerritoryId,
+            TerritoryName = SelectedTerritoryName,
+            Spots = targets
+                .OrderBy(target => target.FishingSpotId)
+                .Select(CreateMaintenanceSpot)
+                .ToList(),
+        };
+        maintenanceStore.SaveTerritory(document);
+        CurrentTerritoryMaintenance = document;
+        CurrentCandidateSelection = CurrentScan is null || CurrentTarget is null
+            ? null
+            : GetOrBuildCandidateSelection(CurrentTarget, CurrentScan);
+        RebuildTerritorySummaries();
+        RebuildAnalyses();
+        SyncCurrentAnalysis();
+        LastMessage = $"已清除领地 {SelectedTerritoryId} {SelectedTerritoryName} 的维护数据：{targets.Count} 个钓场已重置（ledger={removedLedgers}, review={removedReviews}）。";
+    }
+
+    public void ClearCurrentTerritorySurvey()
+    {
+        var territoryId = SelectedTerritoryId != 0 ? SelectedTerritoryId : CurrentTerritoryId;
+        if (territoryId == 0)
+        {
+            LastMessage = "未选择领地，不能清除全图候选缓存。";
+            return;
+        }
+
+        var removedSurvey = surveyStore.DeleteGeneratedSurvey(territoryId);
+        if (SelectedTerritoryId == territoryId)
+        {
+            SetCurrentTerritorySurvey(new TerritorySurveyDocument { TerritoryId = territoryId, TerritoryName = SelectedTerritoryName });
+            CurrentScan = null;
+            CurrentCandidateSelection = null;
+            CurrentTargetBlocks = [];
+            RebuildAnalyses();
+            SyncCurrentAnalysis();
+        }
+
+        RebuildTerritorySummaries();
+        LastMessage = $"已清除领地 {territoryId} 的全图候选缓存（survey={FormatRemoved(removedSurvey)}）。";
+    }
+
     private void UpsertAutoCastFillApproachPoints(
         FishingSpotTarget target,
         SpotScanDocument scan,

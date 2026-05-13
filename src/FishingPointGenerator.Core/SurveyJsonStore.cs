@@ -43,6 +43,11 @@ public sealed class SurveyJsonStore
         WriteJson(GetGeneratedSurveyPath(document.TerritoryId), document with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
+    public bool DeleteGeneratedSurvey(uint territoryId)
+    {
+        return DeleteFile(GetGeneratedSurveyPath(territoryId));
+    }
+
     private void WriteJson<T>(string path, T value)
     {
         var directory = Path.GetDirectoryName(path);
@@ -50,5 +55,14 @@ public sealed class SurveyJsonStore
             Directory.CreateDirectory(directory);
 
         File.WriteAllText(path, JsonSerializer.Serialize(value, jsonOptions) + "\n");
+    }
+
+    private static bool DeleteFile(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        File.Delete(path);
+        return true;
     }
 }
