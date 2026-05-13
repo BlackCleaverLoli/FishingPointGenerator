@@ -19,6 +19,25 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
     public string Name => "占位扫描器";
     public bool IsPlaceholder => true;
 
+    public TerritoryScanCapture CaptureCurrentTerritory()
+    {
+        var service = DService.Instance();
+        var scene = new ActiveLayoutScene();
+        return new TerritoryScanCapture(service.ClientState.TerritoryType, string.Empty, scene);
+    }
+
+    public TerritorySurveyDocument ScanCapturedTerritory(
+        TerritoryScanCapture capture,
+        IProgress<TerritoryScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(new TerritoryScanProgress("占位扫描", 0, 1, "正在生成占位候选。"));
+        var survey = ScanCurrentTerritory();
+        progress?.Report(new TerritoryScanProgress("占位扫描", 1, 1, $"已生成 {survey.Candidates.Count} 个占位候选。"));
+        return survey;
+    }
+
     public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
         return new NearbyScanDebugResult

@@ -29,6 +29,20 @@ internal sealed class TerritoryGeometryCache
         return cachedSurvey;
     }
 
+    public TerritoryScanCapture CaptureCurrentTerritory()
+    {
+        return scanner.CaptureCurrentTerritory();
+    }
+
+    public TerritorySurveyDocument ScanCapturedTerritory(
+        TerritoryScanCapture capture,
+        IProgress<TerritoryScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        cachedSurvey = scanner.ScanCapturedTerritory(capture, progress, cancellationToken);
+        return cachedSurvey;
+    }
+
     public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
         return scanner.DebugScanNearby(radiusMeters);

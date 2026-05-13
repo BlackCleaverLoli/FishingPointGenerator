@@ -35,7 +35,7 @@ internal sealed class VnavmeshQueryService
         }
         catch (OperationCanceledException)
         {
-            return PathQueryResult.Unavailable("vnavmesh pathfind canceled");
+            throw;
         }
         catch (Exception ex)
         {

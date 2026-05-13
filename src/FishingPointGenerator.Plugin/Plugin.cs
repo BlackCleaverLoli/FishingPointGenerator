@@ -101,6 +101,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void DrawUi()
     {
+        session.PollBackgroundOperations();
         overlayRenderer.Draw(session);
         windowSystem.Draw();
     }

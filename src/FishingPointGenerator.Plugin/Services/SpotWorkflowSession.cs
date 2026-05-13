@@ -26,6 +26,10 @@ internal sealed class SpotWorkflowSession
     private readonly SurveyBlockBuilder blockBuilder;
     private readonly SpotScanService scanService;
     private readonly VnavmeshQueryService navmeshQuery = new();
+    private Task<TerritoryScanWorkResult>? territoryScanTask;
+    private CancellationTokenSource? territoryScanCancellation;
+    private bool territoryScanCancelMessageRequested;
+    private int territoryScanGeneration;
 
     public SpotWorkflowSession(PluginPaths paths, ICurrentTerritoryScanner scanner)
     {
@@ -70,9 +74,12 @@ internal sealed class SpotWorkflowSession
     public uint LastCastFishingSpotId { get; private set; }
     public int LastCastRecordedCount { get; private set; }
     public NearbyScanDebugResult? NearbyDebugOverlay { get; private set; }
+    public TerritoryScanProgress? TerritoryScanProgress { get; private set; }
 
     public uint CurrentTerritoryId => DService.Instance().ClientState.TerritoryType;
     public bool SelectedTerritoryIsCurrent => SelectedTerritoryId == CurrentTerritoryId;
+    public bool TerritoryScanInProgress => territoryScanTask is { IsCompleted: false };
+    public float TerritoryScanProgressFraction => TerritoryScanProgress?.Fraction ?? 0f;
     public string CatalogPath => store.GetCatalogPath();
     public string MaintenancePath => SelectedTerritoryId == 0 ? string.Empty : maintenanceStore.GetTerritoryMaintenancePath(SelectedTerritoryId);
     public string ExportPath => store.GetExportPath();
@@ -229,10 +236,24 @@ internal sealed class SpotWorkflowSession
 
     public void ScanCurrentTerritory()
     {
-        TerritorySurveyDocument scannedSurvey;
+        if (TerritoryScanInProgress)
+        {
+            LastMessage = TerritoryScanProgress is { } currentProgress
+                ? $"扫描正在后台进行：{currentProgress.Message}"
+                : "扫描正在后台进行。";
+            return;
+        }
+
+        TerritoryScanCapture capture;
+        bool currentTerritoryFlyable;
+        bool navmeshReady;
+        PlayerSnapshot? playerSnapshot;
         try
         {
-            scannedSurvey = scanService.ScanCurrentTerritory(forceTerritoryRescan: true);
+            capture = scanService.CaptureCurrentTerritory();
+            currentTerritoryFlyable = CurrentGameState.IsCurrentTerritoryFlyable();
+            navmeshReady = navmeshQuery.IsReady;
+            playerSnapshot = GetPlayerSnapshot();
         }
         catch (Exception ex)
         {
@@ -245,31 +266,95 @@ internal sealed class SpotWorkflowSession
             return;
         }
 
-        var rawCandidates = scannedSurvey.Candidates.Count;
-        var blocks = blockBuilder.BuildBlocks(scannedSurvey.Candidates);
-        var blockedSurvey = scannedSurvey with
+        if (capture.TerritoryId == 0)
         {
-            Candidates = blocks.SelectMany(block => block.Candidates).ToList(),
-        };
-        var filteredSurvey = FilterSurveyReachability(blockedSurvey, rawCandidates);
-        if (filteredSurvey is null)
+            LastMessage = "扫描当前区域失败：没有可用区域。";
+            return;
+        }
+
+        territoryScanCancellation?.Dispose();
+        territoryScanCancellation = new CancellationTokenSource();
+        territoryScanCancelMessageRequested = false;
+        var cancellationToken = territoryScanCancellation.Token;
+        var scanGeneration = Interlocked.Increment(ref territoryScanGeneration);
+        var scanProgress = new Progress<TerritoryScanProgress>(value =>
+        {
+            if (Volatile.Read(ref territoryScanGeneration) == scanGeneration)
+                TerritoryScanProgress = value;
+        });
+        TerritoryScanProgress = new TerritoryScanProgress("准备", 0, 1, $"正在启动区域 {capture.TerritoryId} 后台扫描。");
+        territoryScanTask = Task.Run(
+            async () => await ExecuteTerritoryScanAsync(
+                    capture,
+                    currentTerritoryFlyable,
+                    navmeshReady,
+                    playerSnapshot,
+                    scanProgress,
+                    cancellationToken)
+                .ConfigureAwait(false),
+            cancellationToken);
+        LastMessage = $"已开始后台扫描区域 {capture.TerritoryId}。扫描期间可以继续操作客户端。";
+    }
+
+    public void CancelTerritoryScan()
+    {
+        CancelTerritoryScan(setMessage: true);
+    }
+
+    public void PollBackgroundOperations()
+    {
+        var task = territoryScanTask;
+        if (task is null || !task.IsCompleted)
             return;
 
-        var filteredBlocks = blockBuilder.BuildBlocks(filteredSurvey.Candidates);
-        CurrentTerritorySurvey = filteredSurvey with
+        territoryScanTask = null;
+        Interlocked.Increment(ref territoryScanGeneration);
+        var showCancellationMessage = territoryScanCancelMessageRequested;
+        territoryScanCancelMessageRequested = false;
+        territoryScanCancellation?.Dispose();
+        territoryScanCancellation = null;
+        TerritoryScanProgress = null;
+
+        TerritoryScanWorkResult result;
+        try
         {
-            Candidates = filteredBlocks.SelectMany(block => block.Candidates).ToList(),
-            ReachableCandidateCount = filteredBlocks.Sum(block => block.Candidates.Count),
-        };
-        CurrentTerritoryBlocks = filteredBlocks;
+            result = task.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            if (showCancellationMessage)
+                LastMessage = "扫描已取消。";
+            return;
+        }
+        catch (Exception ex)
+        {
+            ClearCurrentTerritoryCandidateState();
+            LastMessage = $"扫描当前区域失败：{ex.Message}";
+            return;
+        }
+
+        if (!result.Success || result.Survey is null)
+        {
+            ClearCurrentTerritoryCandidateState();
+            LastMessage = result.Message;
+            return;
+        }
+
+        if (result.Survey.TerritoryId != CurrentTerritoryId)
+        {
+            LastMessage = $"扫描区域 {result.Survey.TerritoryId} 已完成，但当前已切换到区域 {CurrentTerritoryId}；结果已丢弃。";
+            return;
+        }
+
+        if (SelectedTerritoryId != result.Survey.TerritoryId)
+            SelectTerritory(result.Survey.TerritoryId, selectNext: false, setMessage: false);
+
+        CurrentTerritorySurvey = result.Survey;
+        CurrentTerritoryBlocks = result.Blocks;
         RebuildTerritorySummaries();
-
-        if (SelectedTerritoryId != CurrentTerritorySurvey.TerritoryId)
-            SelectTerritory(CurrentTerritorySurvey.TerritoryId, selectNext: false, setMessage: false);
-
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"已扫描区域 {CurrentTerritorySurvey.TerritoryId}：原始 {CurrentTerritorySurvey.RawCandidateCount} 个，可用 {TerritoryCandidateCount} 个，丢弃不可达 {CurrentTerritorySurvey.UnreachableCandidateCount} 个，{TerritoryBlockCount} 个块。{CurrentTerritorySurvey.ReachabilityNote}";
+        LastMessage = result.Message;
     }
 
     public void ScanCurrentTarget()
@@ -1595,6 +1680,171 @@ internal sealed class SpotWorkflowSession
             SpotAnalysisStatus.WeakCoverage;
     }
 
+    private async Task<TerritoryScanWorkResult> ExecuteTerritoryScanAsync(
+        TerritoryScanCapture capture,
+        bool currentTerritoryFlyable,
+        bool navmeshReady,
+        PlayerSnapshot? playerSnapshot,
+        IProgress<TerritoryScanProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            progress.Report(new TerritoryScanProgress("扫描", 0, 1, $"正在扫描区域 {capture.TerritoryId}。"));
+            var scannedSurvey = scanService.ScanCapturedTerritory(capture, progress, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var rawCandidates = scannedSurvey.Candidates.Count;
+            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {rawCandidates} 个候选构建块。"));
+            var blocks = blockBuilder.BuildBlocks(scannedSurvey.Candidates);
+            var blockedSurvey = scannedSurvey with
+            {
+                Candidates = blocks.SelectMany(block => block.Candidates).ToList(),
+            };
+
+            var reachability = await FilterSurveyReachabilityAsync(
+                    blockedSurvey,
+                    rawCandidates,
+                    currentTerritoryFlyable,
+                    navmeshReady,
+                    playerSnapshot,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!reachability.Success || reachability.Survey is null)
+                return new TerritoryScanWorkResult(false, null, [], reachability.Message);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {reachability.Survey.Candidates.Count} 个可用候选重建块。"));
+            var filteredBlocks = blockBuilder.BuildBlocks(reachability.Survey.Candidates);
+            var finalSurvey = reachability.Survey with
+            {
+                Candidates = filteredBlocks.SelectMany(block => block.Candidates).ToList(),
+                ReachableCandidateCount = filteredBlocks.Sum(block => block.Candidates.Count),
+            };
+            var message = $"已扫描区域 {finalSurvey.TerritoryId}：原始 {finalSurvey.RawCandidateCount} 个，可用 {finalSurvey.Candidates.Count} 个，丢弃不可达 {finalSurvey.UnreachableCandidateCount} 个，{filteredBlocks.Count} 个块。{finalSurvey.ReachabilityNote}";
+            progress.Report(new TerritoryScanProgress("完成", 1, 1, message));
+            return new TerritoryScanWorkResult(true, finalSurvey, filteredBlocks, message);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new TerritoryScanWorkResult(false, null, [], $"扫描当前区域失败：{ex.Message}");
+        }
+    }
+
+    private async Task<TerritoryReachabilityResult> FilterSurveyReachabilityAsync(
+        TerritorySurveyDocument survey,
+        int rawCandidateCount,
+        bool currentTerritoryFlyable,
+        bool navmeshReady,
+        PlayerSnapshot? playerSnapshot,
+        IProgress<TerritoryScanProgress> progress,
+        CancellationToken cancellationToken)
+    {
+        if (survey.Candidates.Count == 0)
+        {
+            return new TerritoryReachabilityResult(
+                true,
+                survey with
+                {
+                    ReachabilityMode = SurveyReachabilityMode.NotChecked,
+                    RawCandidateCount = rawCandidateCount,
+                    ReachableCandidateCount = 0,
+                    UnreachableCandidateCount = 0,
+                    ReachabilityNote = "扫描未生成候选点。",
+                },
+                string.Empty);
+        }
+
+        if (currentTerritoryFlyable)
+        {
+            progress.Report(new TerritoryScanProgress("可达性", 1, 1, "当前区域已解锁飞行，候选全部保留。"));
+            var candidates = survey.Candidates
+                .Select(candidate => candidate with
+                {
+                    Reachability = CandidateReachability.Flyable,
+                    PathLengthMeters = null,
+                })
+                .ToList();
+            return new TerritoryReachabilityResult(
+                true,
+                survey with
+                {
+                    ReachabilityMode = SurveyReachabilityMode.Flyable,
+                    RawCandidateCount = rawCandidateCount,
+                    ReachableCandidateCount = candidates.Count,
+                    UnreachableCandidateCount = 0,
+                    ReachabilityNote = "当前区域已解锁飞行，扫描候选全部保留。",
+                    Candidates = candidates,
+                },
+                string.Empty);
+        }
+
+        if (playerSnapshot is null)
+            return new TerritoryReachabilityResult(false, null, "当前区域不能飞，但无法读取玩家位置；为避免保留不可达候选，本次扫描未更新内存候选。");
+
+        if (!navmeshReady)
+            return new TerritoryReachabilityResult(false, null, "当前区域不能飞，但 vnavmesh 未就绪；为避免保留不可达候选，本次扫描未更新内存候选。");
+
+        var reachable = new List<ApproachCandidate>();
+        var unreachable = 0;
+        var unavailable = 0;
+        for (var index = 0; index < survey.Candidates.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (index % 10 == 0)
+            {
+                progress.Report(new TerritoryScanProgress(
+                    "可达性",
+                    index,
+                    survey.Candidates.Count,
+                    $"正在检查步行可达性：{index}/{survey.Candidates.Count}，保留 {reachable.Count} 个。"));
+            }
+
+            var candidate = survey.Candidates[index];
+            var result = await navmeshQuery
+                .QueryPathAsync(playerSnapshot.Position.ToVector3(), candidate.Position.ToVector3(), fly: false, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (result.IsReachable)
+            {
+                reachable.Add(candidate with
+                {
+                    Reachability = CandidateReachability.WalkReachable,
+                    PathLengthMeters = result.PathLengthMeters,
+                });
+                continue;
+            }
+
+            if (result.Status == PathQueryStatus.Unavailable)
+                unavailable++;
+            else
+                unreachable++;
+        }
+
+        if (unavailable > 0)
+            return new TerritoryReachabilityResult(false, null, $"当前区域不能飞，可达性检查中有 {unavailable} 个候选无法查询；为避免保留不完整候选，本次扫描未更新内存候选。");
+
+        progress.Report(new TerritoryScanProgress("可达性", survey.Candidates.Count, survey.Candidates.Count, $"步行可达性检查完成，保留 {reachable.Count} 个候选。"));
+        return new TerritoryReachabilityResult(
+            true,
+            survey with
+            {
+                ReachabilityMode = SurveyReachabilityMode.WalkPath,
+                ReachabilityOrigin = playerSnapshot.Position,
+                RawCandidateCount = rawCandidateCount,
+                ReachableCandidateCount = reachable.Count,
+                UnreachableCandidateCount = unreachable,
+                ReachabilityNote = $"当前区域不能飞，已从角色位置检查步行路径，保留可达候选 {reachable.Count} 个。",
+                Candidates = reachable,
+            },
+            string.Empty);
+    }
+
     private IReadOnlyList<SpotAnalysis> BuildExportAnalysesFromMaintenance(
         IReadOnlyList<TerritoryMaintenanceDocument> maintenanceDocuments)
     {
@@ -1651,111 +1901,6 @@ internal sealed class SpotWorkflowSession
             GetSpotScanForTarget(target),
             GetMaintenanceRecord(target.Key),
             TryLoadLegacyReview(target.Key));
-    }
-
-    private TerritorySurveyDocument? FilterSurveyReachability(TerritorySurveyDocument survey, int rawCandidateCount)
-    {
-        if (survey.Candidates.Count == 0)
-        {
-            return survey with
-            {
-                ReachabilityMode = SurveyReachabilityMode.NotChecked,
-                RawCandidateCount = rawCandidateCount,
-                ReachableCandidateCount = 0,
-                UnreachableCandidateCount = 0,
-                ReachabilityNote = "扫描未生成候选点。",
-            };
-        }
-
-        if (CurrentGameState.IsCurrentTerritoryFlyable())
-        {
-            var candidates = survey.Candidates
-                .Select(candidate => candidate with
-                {
-                    Reachability = CandidateReachability.Flyable,
-                    PathLengthMeters = null,
-                })
-                .ToList();
-            return survey with
-            {
-                ReachabilityMode = SurveyReachabilityMode.Flyable,
-                RawCandidateCount = rawCandidateCount,
-                ReachableCandidateCount = candidates.Count,
-                UnreachableCandidateCount = 0,
-                ReachabilityNote = "当前区域已解锁飞行，扫描候选全部保留。",
-                Candidates = candidates,
-            };
-        }
-
-        var playerSnapshot = GetPlayerSnapshot();
-        if (playerSnapshot is null)
-        {
-            CurrentTerritorySurvey = null;
-            CurrentTerritoryBlocks = [];
-            CurrentScan = null;
-            CurrentCandidateSelection = null;
-            CurrentTargetBlocks = [];
-            LastMessage = "当前区域不能飞，但无法读取玩家位置；为避免保留不可达候选，本次扫描未更新内存候选。";
-            return null;
-        }
-
-        if (!navmeshQuery.IsReady)
-        {
-            CurrentTerritorySurvey = null;
-            CurrentTerritoryBlocks = [];
-            CurrentScan = null;
-            CurrentCandidateSelection = null;
-            CurrentTargetBlocks = [];
-            LastMessage = "当前区域不能飞，但 vnavmesh 未就绪；为避免保留不可达候选，本次扫描未更新内存候选。";
-            return null;
-        }
-
-        var reachable = new List<ApproachCandidate>();
-        var unreachable = 0;
-        var unavailable = 0;
-        foreach (var candidate in survey.Candidates)
-        {
-            var result = navmeshQuery
-                .QueryPathAsync(playerSnapshot.Position.ToVector3(), candidate.Position.ToVector3(), fly: false, CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
-            if (result.IsReachable)
-            {
-                reachable.Add(candidate with
-                {
-                    Reachability = CandidateReachability.WalkReachable,
-                    PathLengthMeters = result.PathLengthMeters,
-                });
-                continue;
-            }
-
-            if (result.Status == PathQueryStatus.Unavailable)
-                unavailable++;
-            else
-                unreachable++;
-        }
-
-        if (unavailable > 0)
-        {
-            CurrentTerritorySurvey = null;
-            CurrentTerritoryBlocks = [];
-            CurrentScan = null;
-            CurrentCandidateSelection = null;
-            CurrentTargetBlocks = [];
-            LastMessage = $"当前区域不能飞，可达性检查中有 {unavailable} 个候选无法查询；为避免保留不完整候选，本次扫描未更新内存候选。";
-            return null;
-        }
-
-        return survey with
-        {
-            ReachabilityMode = SurveyReachabilityMode.WalkPath,
-            ReachabilityOrigin = playerSnapshot.Position,
-            RawCandidateCount = rawCandidateCount,
-            ReachableCandidateCount = reachable.Count,
-            UnreachableCandidateCount = unreachable,
-            ReachabilityNote = $"当前区域不能飞，已从角色位置检查步行路径，保留可达候选 {reachable.Count} 个。",
-            Candidates = reachable,
-        };
     }
 
     private CandidateSelection? BuildCandidateSelection(
@@ -2058,6 +2203,7 @@ internal sealed class SpotWorkflowSession
 
     private void ClearCurrentTerritoryRuntimeState()
     {
+        CancelTerritoryScan(setMessage: false);
         CurrentTerritorySurvey = null;
         CurrentTerritoryBlocks = [];
         CurrentTerritoryTargets = [];
@@ -2074,6 +2220,27 @@ internal sealed class SpotWorkflowSession
         LastCastPlaceNameId = 0;
         LastCastFishingSpotId = 0;
         LastCastRecordedCount = 0;
+    }
+
+    private void ClearCurrentTerritoryCandidateState()
+    {
+        CurrentTerritorySurvey = null;
+        CurrentTerritoryBlocks = [];
+        CurrentScan = null;
+        CurrentCandidateSelection = null;
+        CurrentTargetBlocks = [];
+    }
+
+    private void CancelTerritoryScan(bool setMessage)
+    {
+        if (territoryScanTask is null || territoryScanTask.IsCompleted)
+            return;
+
+        territoryScanCancellation?.Cancel();
+        territoryScanCancelMessageRequested = setMessage;
+        TerritoryScanProgress = new TerritoryScanProgress("取消", 0, 1, "正在取消后台扫描。");
+        if (setMessage)
+            LastMessage = "正在取消后台扫描。";
     }
 
     private void SetCurrentTerritorySurvey(TerritorySurveyDocument? survey)
@@ -2276,6 +2443,11 @@ internal sealed class SpotWorkflowSession
     private sealed record PlayerSnapshot(Point3 Position, float Rotation);
 
     private sealed record FillBlockSelection(SurveyBlock Block, ApproachCandidate SeedCandidate, float Distance);
+
+    private sealed record TerritoryReachabilityResult(
+        bool Success,
+        TerritorySurveyDocument? Survey,
+        string Message);
 }
 
 internal sealed record TerritoryMaintenanceSummary(

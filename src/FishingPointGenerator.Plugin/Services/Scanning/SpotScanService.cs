@@ -21,6 +21,19 @@ internal sealed class SpotScanService
         return geometryCache.ScanCurrentTerritory(forceTerritoryRescan);
     }
 
+    public TerritoryScanCapture CaptureCurrentTerritory()
+    {
+        return geometryCache.CaptureCurrentTerritory();
+    }
+
+    public TerritorySurveyDocument ScanCapturedTerritory(
+        TerritoryScanCapture capture,
+        IProgress<TerritoryScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        return geometryCache.ScanCapturedTerritory(capture, progress, cancellationToken);
+    }
+
     public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
         return geometryCache.DebugScanNearby(radiusMeters);

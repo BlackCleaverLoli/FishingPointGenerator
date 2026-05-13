@@ -83,6 +83,13 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.PushTextWrapPos();
         ImGui.TextColored(GetMessageColor(), session.LastMessage);
         ImGui.PopTextWrapPos();
+
+        if (session.TerritoryScanInProgress)
+        {
+            var progress = session.TerritoryScanProgress;
+            var text = progress is null ? "扫描进行中" : $"{progress.Stage}: {progress.Message}";
+            ImGui.ProgressBar(session.TerritoryScanProgressFraction, new Vector2(-1f, 0f), text);
+        }
     }
 
     private void DrawTerritoryDrawer()
@@ -95,8 +102,14 @@ internal sealed class MainWindow : Window, IDisposable
         if (ActionButton("当前区域"))
             session.RefreshCurrentTerritory(selectNext: false);
         ImGui.SameLine();
-        if (ActionButton("扫描当前"))
+        if (ActionButton("扫描当前", session.TerritoryScanInProgress))
             session.ScanCurrentTerritory();
+        if (session.TerritoryScanInProgress)
+        {
+            ImGui.SameLine();
+            if (ActionButton("取消扫描"))
+                session.CancelTerritoryScan();
+        }
 
         ImGui.SetNextItemWidth(-1f);
         ImGui.InputText("##territory_filter", ref territoryFilterText, 64);
@@ -495,6 +508,8 @@ internal sealed class MainWindow : Window, IDisposable
 
     private (string Text, Vector4 Color) GetStatus()
     {
+        if (session.TerritoryScanInProgress)
+            return ("扫描中", AccentText);
         if (IsErrorMessage(session.LastMessage))
             return ("错误", ErrorText);
         if (session.TargetCount == 0)

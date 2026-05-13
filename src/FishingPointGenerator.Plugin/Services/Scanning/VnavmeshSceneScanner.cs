@@ -171,26 +171,41 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         };
     }
 
-    public TerritorySurveyDocument ScanCurrentTerritory()
+    public TerritoryScanCapture CaptureCurrentTerritory()
     {
         var service = DService.Instance();
         var currentTerritoryId = service.ClientState.TerritoryType;
-        if (currentTerritoryId == 0)
-            return Empty(currentTerritoryId, string.Empty);
-
         var scene = new ActiveLayoutScene();
-        scene.FillFromActiveLayout();
+        if (currentTerritoryId != 0)
+            scene.FillFromActiveLayout();
 
-        var territoryId = scene.TerritoryId != 0 ? scene.TerritoryId : currentTerritoryId;
         var territoryName = scene.GetTerritoryName(currentTerritoryId);
-        var extractor = new CollisionSceneExtractor(scene);
+        return new TerritoryScanCapture(currentTerritoryId, territoryName, scene);
+    }
+
+    public TerritorySurveyDocument ScanCapturedTerritory(
+        TerritoryScanCapture capture,
+        IProgress<TerritoryScanProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var territoryId = capture.TerritoryId;
+        if (territoryId == 0)
+            return Empty(territoryId, string.Empty);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(new TerritoryScanProgress("读取碰撞", 0, 4, "正在解析当前区域碰撞几何。"));
+        var extractor = new CollisionSceneExtractor(capture.Scene);
         var triangles = extractor.ExtractTriangles();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        progress?.Report(new TerritoryScanProgress("筛选碰撞", 1, 4, $"已读取 {triangles.Count} 个碰撞三角面。"));
         var fishableTriangles = triangles
             .Where(triangle => triangle.IsFishable && triangle.Area > 0.05f)
             .ToList();
         var walkableTriangles = triangles
             .Where(triangle => triangle.IsWalkable && triangle.Area > 0.05f)
             .ToList();
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (fishableTriangles.Count == 0 || walkableTriangles.Count == 0)
         {
@@ -199,10 +214,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 territoryId,
                 fishableTriangles.Count,
                 walkableTriangles.Count);
-            return Empty(territoryId, territoryName);
+            return Empty(territoryId, capture.TerritoryName);
         }
 
-        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles);
+        progress?.Report(new TerritoryScanProgress("生成候选", 2, 4, $"fishable={fishableTriangles.Count} walkable={walkableTriangles.Count}，正在生成候选。"));
+        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, progress, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         pluginLog.Information(
             "FPG 场景扫描完成。Territory={TerritoryId}, fishableTriangles={FishableCount}, walkableTriangles={WalkableCount}, candidates={CandidateCount}",
             territoryId,
@@ -210,12 +227,19 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             walkableTriangles.Count,
             candidates.Count);
 
+        progress?.Report(new TerritoryScanProgress("生成候选", 4, 4, $"已生成 {candidates.Count} 个候选。"));
         return new TerritorySurveyDocument
         {
             TerritoryId = territoryId,
-            TerritoryName = territoryName,
+            TerritoryName = capture.TerritoryName,
             Candidates = candidates,
         };
+    }
+
+    public TerritorySurveyDocument ScanCurrentTerritory()
+    {
+        var capture = CaptureCurrentTerritory();
+        return ScanCapturedTerritory(capture, null, CancellationToken.None);
     }
 
     private static TerritorySurveyDocument Empty(uint territoryId, string territoryName) => new()
@@ -227,12 +251,14 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static List<ApproachCandidate> GenerateCandidates(
         uint territoryId,
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
-        IReadOnlyList<ExtractedSceneTriangle> walkableTriangles)
+        IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
+        IProgress<TerritoryScanProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         var candidateKeys = new HashSet<CandidateKey>();
         var candidates = new List<CandidateScratch>();
 
-        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, candidateKeys, candidates);
+        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, candidateKeys, candidates, progress, cancellationToken);
 
         return candidates
             .OrderBy(candidate => candidate.Position.X)
@@ -303,7 +329,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
         HashSet<CandidateKey> candidateKeys,
-        List<CandidateScratch> candidates)
+        List<CandidateScratch> candidates,
+        IProgress<TerritoryScanProgress>? progress,
+        CancellationToken cancellationToken)
     {
         var fishableEdges = BuildOuterEdges(fishableTriangles);
         if (fishableEdges.Count == 0)
@@ -319,8 +347,18 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var fishableBlockByTriangle = BuildFishableBlockLookup(fishableBlocks);
         var walkableIndex = new TriangleIndex(walkableSurfaces, SurfaceIndexCellSize);
         var fishableIndex = new TriangleIndex(fishableTriangles, SurfaceIndexCellSize);
-        foreach (var fishableEdge in fishableEdges)
+        var progressTotal = Math.Max(1, fishableEdges.Count + walkableSurfaces.Count);
+        for (var fishableEdgeIndex = 0; fishableEdgeIndex < fishableEdges.Count; fishableEdgeIndex++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (fishableEdgeIndex % 16 == 0)
+                progress?.Report(new TerritoryScanProgress(
+                    "生成候选",
+                    fishableEdgeIndex,
+                    progressTotal,
+                    $"正在沿 fishable 边界采样候选：{fishableEdgeIndex}/{fishableEdges.Count}，已生成 {candidates.Count} 个。"));
+
+            var fishableEdge = fishableEdges[fishableEdgeIndex];
             var sampleCount = Math.Clamp(
                 (int)MathF.Ceiling(fishableEdge.HorizontalLength / BoundarySampleSpacing),
                 1,
@@ -351,7 +389,11 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             fishableIndex,
             fishableBlockByTriangle,
             candidateKeys,
-            candidates);
+            candidates,
+            progress,
+            cancellationToken,
+            fishableEdges.Count,
+            progressTotal);
     }
 
     private static int CountNearbySurfaceMatches(
@@ -775,10 +817,23 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         TriangleIndex fishableIndex,
         IReadOnlyDictionary<ExtractedSceneTriangle, FishableSurfaceBlock> fishableBlockByTriangle,
         HashSet<CandidateKey> candidateKeys,
-        List<CandidateScratch> candidates)
+        List<CandidateScratch> candidates,
+        IProgress<TerritoryScanProgress>? progress,
+        CancellationToken cancellationToken,
+        int progressOffset,
+        int progressTotal)
     {
-        foreach (var walkableSurface in walkableSurfaces)
+        for (var walkableSurfaceIndex = 0; walkableSurfaceIndex < walkableSurfaces.Count; walkableSurfaceIndex++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (walkableSurfaceIndex % 64 == 0)
+                progress?.Report(new TerritoryScanProgress(
+                    "生成候选",
+                    progressOffset + walkableSurfaceIndex,
+                    progressTotal,
+                    $"正在从 walkable 投影补充候选：{walkableSurfaceIndex}/{walkableSurfaces.Count}，已生成 {candidates.Count} 个。"));
+
+            var walkableSurface = walkableSurfaces[walkableSurfaceIndex];
             foreach (var sample in EnumerateWalkableSurfaceSamples(walkableSurface))
             {
                 if (!TryCreateProjectedWalkableSurfaceCandidate(
