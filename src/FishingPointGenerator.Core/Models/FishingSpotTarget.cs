@@ -14,6 +14,7 @@ public sealed record FishingSpotCatalogDocument
 public sealed record FishingSpotTarget
 {
     public uint FishingSpotId { get; init; }
+    public uint PlaceNameId { get; init; }
     public string Name { get; init; } = string.Empty;
     public uint TerritoryId { get; init; }
     public string TerritoryName { get; init; } = string.Empty;

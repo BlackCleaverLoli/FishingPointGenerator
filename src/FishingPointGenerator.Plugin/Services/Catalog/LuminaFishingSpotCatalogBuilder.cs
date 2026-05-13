@@ -74,6 +74,7 @@ internal sealed class LuminaFishingSpotCatalogBuilder
         return new FishingSpotTarget
         {
             FishingSpotId = spot.RowId,
+            PlaceNameId = spot.PlaceName.RowId,
             Name = GetText(spot.PlaceName.ValueNullable?.Name),
             TerritoryId = spot.TerritoryType.RowId,
             TerritoryName = GetText(territory.Value.PlaceName.ValueNullable?.Name),

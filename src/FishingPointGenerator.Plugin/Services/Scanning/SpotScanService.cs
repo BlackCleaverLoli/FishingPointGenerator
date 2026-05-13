@@ -34,7 +34,7 @@ internal sealed class SpotScanService
         return geometryCache.ScanCurrentTerritory(forceTerritoryRescan);
     }
 
-    public string DebugScanNearby(float radiusMeters)
+    public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
         return geometryCache.DebugScanNearby(radiusMeters);
     }

@@ -152,6 +152,16 @@ internal sealed class MainWindow : Window, IDisposable
         if (ImGui.Checkbox("显示钓场半径", ref showRadius))
             session.OverlayShowTargetRadius = showRadius;
 
+        ImGui.SameLine();
+        var showFishableDebug = session.OverlayShowFishableDebug;
+        if (ImGui.Checkbox("显示 Fishable 水面", ref showFishableDebug))
+            session.OverlayShowFishableDebug = showFishableDebug;
+
+        ImGui.SameLine();
+        var showWalkableDebug = session.OverlayShowWalkableDebug;
+        if (ImGui.Checkbox("显示 Walkable 可走面", ref showWalkableDebug))
+            session.OverlayShowWalkableDebug = showWalkableDebug;
+
         DrawFloatInput(
             "抛竿块选择距离(m)",
             session.CastBlockSnapDistanceMeters,
@@ -185,8 +195,23 @@ internal sealed class MainWindow : Window, IDisposable
             MaximumOverlayCandidateLimit,
             value => session.OverlayCandidateLimit = value);
 
-        if (session.LastCastFishingSpotId != 0)
-            ImGui.TextColored(MutedText, $"最后抛竿 FishingSpot: {session.LastCastFishingSpotId}，新增: {session.LastCastRecordedCount}");
+        if (session.LastCastPlaceNameId != 0)
+        {
+            var resolved = session.LastCastFishingSpotId != 0
+                ? session.LastCastFishingSpotId.ToString()
+                : "-";
+            ImGui.TextColored(MutedText, $"最后抛竿 PlaceName: {session.LastCastPlaceNameId}，FishingSpot: {resolved}，新增: {session.LastCastRecordedCount}");
+        }
+
+        if (session.NearbyDebugOverlay is { } debug)
+        {
+            ImGui.TextColored(
+                MutedText,
+                $"附近调试面：Fishable {debug.FishableTriangles.Count}，Walkable {debug.WalkableTriangles.Count}，半径 {debug.RadiusMeters:F1}m，区域 {debug.TerritoryId}");
+            ImGui.SameLine();
+            if (SmallActionButton("清除调试面"))
+                session.ClearNearbyDebugOverlay();
+        }
     }
 
     private void DrawTerritoryOverview()
@@ -224,6 +249,7 @@ internal sealed class MainWindow : Window, IDisposable
             return;
 
         DrawSummaryRow("RowId", target.FishingSpotId.ToString());
+        DrawSummaryRow("PlaceName", target.PlaceNameId.ToString());
         DrawSummaryRow("名称", target.Name);
         DrawSummaryRow("状态", FormatStatus(analysis?.Status), GetStatusColor(analysis?.Status));
         DrawSummaryRow("地图坐标", $"{target.MapX:F2}, {target.MapY:F2}");

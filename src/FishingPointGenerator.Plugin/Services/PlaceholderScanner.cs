@@ -2,6 +2,7 @@ using System.Numerics;
 using Dalamud.Plugin.Services;
 using FishingPointGenerator.Core.Geometry;
 using FishingPointGenerator.Core.Models;
+using FishingPointGenerator.Plugin.Services.Scanning;
 using OmenTools;
 
 namespace FishingPointGenerator.Plugin.Services;
@@ -18,9 +19,12 @@ internal sealed class PlaceholderScanner : ICurrentTerritoryScanner
     public string Name => "占位扫描器";
     public bool IsPlaceholder => true;
 
-    public string DebugScanNearby(float radiusMeters)
+    public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
-        return "占位扫描器不支持附近碰撞面调试。";
+        return new NearbyScanDebugResult
+        {
+            Message = "占位扫描器不支持附近碰撞面调试。",
+        };
     }
 
     public TerritorySurveyDocument ScanCurrentTerritory()

@@ -4,6 +4,7 @@ using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using FishingPointGenerator.Core.Models;
+using FishingPointGenerator.Plugin.Services.Scanning;
 using OmenTools;
 
 namespace FishingPointGenerator.Plugin.Services.Overlay;
@@ -17,8 +18,16 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint RecommendedColor = 0xff35f0ff;
     private const uint BlockLabelColor = 0xffc0a060;
     private const uint WarningColor = 0xff4080ff;
+    private const uint FishableDebugEdgeColor = 0xff45a0ff;
+    private const uint FishableDebugHatchColor = 0x9945a0ff;
+    private const uint FishableDebugTextColor = 0xffd0f0ff;
+    private const uint WalkableDebugEdgeColor = 0xff55d779;
+    private const uint WalkableDebugHatchColor = 0x9955d779;
+    private const uint WalkableDebugTextColor = 0xffdfffe8;
     private const int CircleSegments = 48;
     private const float FacingGuideLengthMeters = 5f;
+    private const float DebugSurfaceHatchSpacingMeters = 4f;
+    private const int MaxSurfaceDebugLabels = 4;
 
     private Matrix4x4 viewProj;
     private Vector4 nearPlane;
@@ -55,6 +64,8 @@ internal sealed unsafe class WorldOverlayRenderer
         var drawList = ImGui.GetWindowDrawList();
         if (session.CurrentTarget is not null)
             DrawTarget(drawList, session, player.Position);
+        if (session.OverlayShowFishableDebug || session.OverlayShowWalkableDebug)
+            DrawSurfaceDebug(drawList, session, player.Position, drawDistance, Math.Min(candidateLimit, 512));
         if (session.OverlayShowTerritoryCache && territoryLimit > 0)
             DrawTerritoryCache(drawList, session, player.Position, drawDistance, territoryLimit);
         if (session.OverlayShowCandidates && selectedLimit > 0)
@@ -159,6 +170,103 @@ internal sealed unsafe class WorldOverlayRenderer
         DrawTargetBlockLabels(drawList, session, playerPosition, drawDistance, confirmedFingerprints);
     }
 
+    private void DrawSurfaceDebug(
+        ImDrawListPtr drawList,
+        SpotWorkflowSession session,
+        Vector3 playerPosition,
+        float drawDistance,
+        int triangleLimit)
+    {
+        var debug = session.NearbyDebugOverlay;
+        if (debug is null)
+            return;
+
+        if (debug.TerritoryId != 0 && debug.TerritoryId != session.CurrentTerritoryId)
+            return;
+
+        var fishableDrawn = 0;
+        var walkableDrawn = 0;
+        var limit = Math.Clamp(triangleLimit, 1, 512);
+        if (session.OverlayShowFishableDebug)
+            fishableDrawn = DrawSurfaceDebugSet(
+                drawList,
+                debug.FishableTriangles,
+                playerPosition,
+                drawDistance,
+                limit,
+                "water",
+                FishableDebugEdgeColor,
+                FishableDebugHatchColor,
+                FishableDebugTextColor);
+
+        if (session.OverlayShowWalkableDebug)
+            walkableDrawn = DrawSurfaceDebugSet(
+                drawList,
+                debug.WalkableTriangles,
+                playerPosition,
+                drawDistance,
+                limit,
+                "walk",
+                WalkableDebugEdgeColor,
+                WalkableDebugHatchColor,
+                WalkableDebugTextColor);
+
+        if (TryWorldToScreen(debug.PlayerPosition + new Vector3(0f, 3f, 0f), out var screen))
+            drawList.AddText(
+                screen,
+                FishableDebugTextColor,
+                $"FPG surfaces water {fishableDrawn}/{debug.FishableTriangles.Count} walk {walkableDrawn}/{debug.WalkableTriangles.Count} r={debug.RadiusMeters:F0}m");
+    }
+
+    private int DrawSurfaceDebugSet(
+        ImDrawListPtr drawList,
+        IReadOnlyList<DebugOverlayTriangle> source,
+        Vector3 playerPosition,
+        float drawDistance,
+        int triangleLimit,
+        string labelPrefix,
+        uint edgeColor,
+        uint hatchColor,
+        uint textColor)
+    {
+        if (source.Count == 0)
+            return 0;
+
+        var triangles = source
+            .Select(triangle => new
+            {
+                Triangle = triangle,
+                Distance = HorizontalDistance(triangle.Centroid, playerPosition),
+            })
+            .Where(item => item.Distance <= drawDistance)
+            .OrderBy(item => item.Distance)
+            .Take(triangleLimit)
+            .ToList();
+
+        foreach (var item in triangles)
+        {
+            var triangle = item.Triangle;
+            DrawWorldLine(drawList, triangle.A, triangle.B, edgeColor);
+            DrawWorldLine(drawList, triangle.B, triangle.C, edgeColor);
+            DrawWorldLine(drawList, triangle.C, triangle.A, edgeColor);
+            DrawWorldTriangleHatch(drawList, triangle, hatchColor);
+            DrawWorldPoint(drawList, triangle.Centroid, 2f, edgeColor, false);
+        }
+
+        var labelIndex = 0;
+        foreach (var item in triangles.Take(MaxSurfaceDebugLabels))
+        {
+            labelIndex++;
+            DrawWorldText(
+                drawList,
+                item.Triangle.Centroid + new Vector3(0f, 0.5f, 0f),
+                $"{labelPrefix}{labelIndex} {FormatMaterial(item.Triangle.Material)} {item.Distance:F1}m",
+                textColor);
+        }
+
+        return triangles.Count;
+    }
+
     private void DrawTerritoryCache(
         ImDrawListPtr drawList,
         SpotWorkflowSession session,
@@ -249,6 +357,27 @@ internal sealed unsafe class WorldOverlayRenderer
             drawList.AddLine(screenStart, screenEnd, color, thickness);
     }
 
+    private void DrawWorldTriangleHatch(ImDrawListPtr drawList, DebugOverlayTriangle triangle, uint color)
+    {
+        var maxLength = MathF.Max(
+            HorizontalDistance(triangle.A, triangle.B),
+            MathF.Max(
+                HorizontalDistance(triangle.B, triangle.C),
+                HorizontalDistance(triangle.C, triangle.A)));
+        var stripeCount = Math.Clamp(
+            (int)MathF.Ceiling(maxLength / DebugSurfaceHatchSpacingMeters),
+            2,
+            24);
+
+        for (var index = 1; index <= stripeCount; index++)
+        {
+            var t = index / (stripeCount + 1f);
+            var start = Vector3.Lerp(triangle.A, triangle.B, t);
+            var end = Vector3.Lerp(triangle.A, triangle.C, t);
+            DrawWorldLine(drawList, start, end, color);
+        }
+    }
+
     private void DrawFacingGuide(ImDrawListPtr drawList, Vector3 standing, float rotation, uint color, int thickness = 1)
     {
         var direction = new Vector3(MathF.Sin(rotation), 0f, MathF.Cos(rotation));
@@ -319,6 +448,18 @@ internal sealed unsafe class WorldOverlayRenderer
     }
 
     private static Vector3 ToVector3(Point3 point) => new(point.X, point.Y, point.Z);
+
+    private static float HorizontalDistance(Vector3 left, Vector3 right)
+    {
+        var dx = left.X - right.X;
+        var dz = left.Z - right.Z;
+        return MathF.Sqrt((dx * dx) + (dz * dz));
+    }
+
+    private static string FormatMaterial(ulong material)
+    {
+        return "0x" + material.ToString("X");
+    }
 
     private static string ShortBlockId(string blockId)
     {

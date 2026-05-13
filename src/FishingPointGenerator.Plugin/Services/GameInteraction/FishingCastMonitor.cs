@@ -44,7 +44,8 @@ internal sealed class FishingCastMonitor : IDisposable
 
             pluginLog.Debug($"FPG cast log: {logMessageId}|{param1}|{param2}|{param3}");
 
-            if (!session.RecordCastFill(param2))
+            // LogMessage 1110/0x456 uses PlaceName,IntegerParameter(1), which is item parameter index 0.
+            if (!session.RecordCastFill(param1))
                 return;
 
             DService.Instance().Chat.Print($"[FPG] {session.LastMessage}");

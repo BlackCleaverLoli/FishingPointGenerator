@@ -36,13 +36,18 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     public string Name => "当前布局可钓/可走边界扫描器";
     public bool IsPlaceholder => false;
 
-    public string DebugScanNearby(float radiusMeters)
+    public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
         var service = DService.Instance();
         var player = service.ObjectTable.LocalPlayer;
         var currentTerritoryId = service.ClientState.TerritoryType;
         if (currentTerritoryId == 0 || player is null)
-            return "附近扫描失败：没有可用区域或本地玩家。";
+        {
+            return new NearbyScanDebugResult
+            {
+                Message = "附近扫描失败：没有可用区域或本地玩家。",
+            };
+        }
 
         var radius = Math.Clamp(radiusMeters, 5f, 200f);
         var playerPosition = player.Position;
@@ -99,7 +104,20 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         LogDebugCells(playerPosition, fishableTriangles, walkableTriangles, candidates);
         LogDebugCandidates(playerPosition, candidates);
 
-        return $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbyEdges={nearbyMatches} candidates={candidates.Count}。详情见 Dalamud log。";
+        return new NearbyScanDebugResult
+        {
+            Message = $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbyEdges={nearbyMatches} candidates={candidates.Count}。详情见 Dalamud log；Fishable/Walkable 面已送入 overlay 调试层。",
+            TerritoryId = territoryId,
+            PlayerPosition = playerPosition,
+            RadiusMeters = radius,
+            FishableTriangles = fishableTriangles
+                .Select(ToDebugOverlayTriangle)
+                .ToList(),
+            WalkableTriangles = walkableTriangles
+                .Select(ToDebugOverlayTriangle)
+                .ToList(),
+            Candidates = candidates,
+        };
     }
 
     public TerritorySurveyDocument ScanCurrentTerritory()
@@ -680,6 +698,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static float TriangleMaxY(ExtractedSceneTriangle triangle)
     {
         return MathF.Max(triangle.A.Y, MathF.Max(triangle.B.Y, triangle.C.Y));
+    }
+
+    private static DebugOverlayTriangle ToDebugOverlayTriangle(ExtractedSceneTriangle triangle)
+    {
+        return new DebugOverlayTriangle(
+            triangle.A,
+            triangle.B,
+            triangle.C,
+            triangle.Material,
+            triangle.MeshType);
     }
 
     private static string FormatMaterial(ulong material)

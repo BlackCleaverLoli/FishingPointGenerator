@@ -29,7 +29,7 @@ internal sealed class TerritoryGeometryCache
         return cachedSurvey;
     }
 
-    public string DebugScanNearby(float radiusMeters)
+    public NearbyScanDebugResult DebugScanNearby(float radiusMeters)
     {
         return scanner.DebugScanNearby(radiusMeters);
     }

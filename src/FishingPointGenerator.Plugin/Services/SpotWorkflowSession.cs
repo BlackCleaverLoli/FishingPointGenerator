@@ -4,6 +4,7 @@ using FishingPointGenerator.Core.Models;
 using FishingPointGenerator.Plugin.Services.GameInteraction;
 using FishingPointGenerator.Plugin.Services.Catalog;
 using FishingPointGenerator.Plugin.Services.Scanning;
+using Lumina.Excel.Sheets;
 using OmenTools;
 
 namespace FishingPointGenerator.Plugin.Services;
@@ -54,12 +55,16 @@ internal sealed class SpotWorkflowSession
     public bool OverlayShowCandidates { get; set; } = true;
     public bool OverlayShowTerritoryCache { get; set; } = true;
     public bool OverlayShowTargetRadius { get; set; } = true;
+    public bool OverlayShowFishableDebug { get; set; } = true;
+    public bool OverlayShowWalkableDebug { get; set; } = true;
     public float CastBlockSnapDistanceMeters { get; set; } = 6f;
     public float CastBlockFillRangeMeters { get; set; } = 30f;
     public float OverlayMaxDistanceMeters { get; set; } = 90f;
     public int OverlayCandidateLimit { get; set; } = 160;
+    public uint LastCastPlaceNameId { get; private set; }
     public uint LastCastFishingSpotId { get; private set; }
     public int LastCastRecordedCount { get; private set; }
+    public NearbyScanDebugResult? NearbyDebugOverlay { get; private set; }
 
     public uint CurrentTerritoryId => DService.Instance().ClientState.TerritoryType;
     public string CatalogPath => store.GetCatalogPath();
@@ -204,12 +209,23 @@ internal sealed class SpotWorkflowSession
     {
         try
         {
-            LastMessage = scanService.DebugScanNearby(radiusMeters);
+            NearbyDebugOverlay = scanService.DebugScanNearby(radiusMeters);
+            OverlayEnabled = true;
+            OverlayShowFishableDebug = true;
+            OverlayShowWalkableDebug = true;
+            LastMessage = NearbyDebugOverlay.Message;
         }
         catch (Exception ex)
         {
+            NearbyDebugOverlay = null;
             LastMessage = $"附近碰撞面调试失败：{ex.Message}";
         }
+    }
+
+    public void ClearNearbyDebugOverlay()
+    {
+        NearbyDebugOverlay = null;
+        LastMessage = "已清除附近碰撞面调试 overlay。";
     }
 
     public void PlaceCurrentTargetFlag()
@@ -252,37 +268,48 @@ internal sealed class SpotWorkflowSession
         LastMessage = $"已为 FishingSpot {CurrentTarget.FishingSpotId} 的推荐点位插旗。";
     }
 
-    public bool RecordCastFill(uint fishingSpotId)
+    public bool RecordCastFill(uint castPlaceNameId)
     {
-        LastCastFishingSpotId = fishingSpotId;
+        LastCastPlaceNameId = castPlaceNameId;
+        LastCastFishingSpotId = 0;
         LastCastRecordedCount = 0;
 
         if (!AutoRecordCastsEnabled)
             return false;
 
-        if (fishingSpotId == 0)
+        if (castPlaceNameId == 0)
         {
-            LastMessage = "检测到抛竿，但日志中没有有效 FishingSpot.RowId。";
+            LastMessage = "检测到抛竿，但日志中没有有效 PlaceName.RowId。";
             return true;
         }
 
         if (CurrentTarget is null)
         {
-            LastMessage = $"检测到 FishingSpot {fishingSpotId} 抛竿，但尚未选择要填色的目标。";
+            LastMessage = $"检测到 PlaceName {castPlaceNameId} 抛竿，但尚未选择要填色的目标。";
             return true;
         }
 
         if (CurrentTarget.TerritoryId != CurrentTerritoryId)
         {
-            LastMessage = $"检测到抛竿 FishingSpot {fishingSpotId}，但当前目标不在当前区域。";
+            LastMessage = $"检测到 PlaceName {castPlaceNameId} 抛竿，但当前目标不在当前区域。";
             return true;
         }
 
-        if (CurrentTarget.FishingSpotId != fishingSpotId)
+        var currentTargetPlaceNameId = GetTargetPlaceNameId(CurrentTarget);
+        if (currentTargetPlaceNameId == 0)
         {
-            LastMessage = $"抛竿命中 FishingSpot {fishingSpotId}，与当前目标 {CurrentTarget.FishingSpotId} 不一致，未记录。";
+            LastMessage = $"当前目标 FishingSpot {CurrentTarget.FishingSpotId} 没有可用 PlaceName.RowId。请刷新目录后重试。";
             return true;
         }
+
+        if (currentTargetPlaceNameId != castPlaceNameId)
+        {
+            LastMessage = $"抛竿命中 PlaceName {castPlaceNameId}，与当前目标 FishingSpot {CurrentTarget.FishingSpotId} 的 PlaceName {currentTargetPlaceNameId} 不一致，未记录。{FormatCastPlaceNameMatches(castPlaceNameId)}";
+            return true;
+        }
+
+        var fishingSpotId = CurrentTarget.FishingSpotId;
+        LastCastFishingSpotId = fishingSpotId;
 
         var playerSnapshot = GetPlayerSnapshot();
         if (playerSnapshot is null)
@@ -355,7 +382,7 @@ internal sealed class SpotWorkflowSession
                 ConfirmedRotation = candidate.Rotation,
                 SourceScanId = scan.ScanId,
                 SourceScannerVersion = scan.ScannerVersion,
-                Note = $"autoFillFromCast player={FormatPoint(playerSnapshot.Position)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={fillRange:F1}",
+                Note = $"autoFillFromCast placeName={castPlaceNameId} player={FormatPoint(playerSnapshot.Position)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={fillRange:F1}",
             })
             .ToList();
 
@@ -848,6 +875,29 @@ internal sealed class SpotWorkflowSession
             return 0;
 
         return (ushort)Math.Clamp(MathF.Round(target.Radius / 7f), 1f, ushort.MaxValue);
+    }
+
+    private static uint GetTargetPlaceNameId(FishingSpotTarget target)
+    {
+        if (target.PlaceNameId != 0)
+            return target.PlaceNameId;
+
+        var spot = DService.Instance().Data.GetExcelSheet<FishingSpot>().GetRowOrDefault(target.FishingSpotId);
+        return spot?.PlaceName.RowId ?? 0;
+    }
+
+    private string FormatCastPlaceNameMatches(uint castPlaceNameId)
+    {
+        var matches = CurrentTerritoryTargets
+            .Where(target => GetTargetPlaceNameId(target) == castPlaceNameId)
+            .Select(target => target.FishingSpotId)
+            .OrderBy(id => id)
+            .Take(8)
+            .ToList();
+
+        return matches.Count == 0
+            ? " 当前区域目录没有匹配该 PlaceName 的 FishingSpot。"
+            : $" 该 PlaceName 匹配当前区域 FishingSpot: {string.Join(", ", matches)}。";
     }
 
     private static PlayerSnapshot? GetPlayerSnapshot()
