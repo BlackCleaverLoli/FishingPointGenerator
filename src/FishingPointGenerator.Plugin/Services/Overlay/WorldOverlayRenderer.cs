@@ -18,12 +18,12 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint RecommendedColor = 0xff35f0ff;
     private const uint BlockLabelColor = 0xffc0a060;
     private const uint WarningColor = 0xff4080ff;
+    private const uint FishableDebugFillColor = 0x3345a0ff;
     private const uint FishableDebugEdgeColor = 0xff45a0ff;
-    private const uint FishableDebugHatchColor = 0x9945a0ff;
     private const uint FishableDebugTextColor = 0xffd0f0ff;
-    private const uint WalkableDebugEdgeColor = 0xff55d779;
-    private const uint WalkableDebugHatchColor = 0x9955d779;
-    private const uint WalkableDebugTextColor = 0xffdfffe8;
+    private const uint WalkableDebugEdgeColor = 0xffff9a2f;
+    private const uint WalkableDebugHatchColor = 0xbbff9a2f;
+    private const uint WalkableDebugTextColor = 0xffffddb0;
     private const int CircleSegments = 48;
     private const float FacingGuideLengthMeters = 5f;
     private const float DebugSurfaceHatchSpacingMeters = 4f;
@@ -196,7 +196,7 @@ internal sealed unsafe class WorldOverlayRenderer
                 limit,
                 "water",
                 FishableDebugEdgeColor,
-                FishableDebugHatchColor,
+                FishableDebugFillColor,
                 FishableDebugTextColor);
 
         if (session.OverlayShowWalkableDebug)
@@ -226,7 +226,7 @@ internal sealed unsafe class WorldOverlayRenderer
         int triangleLimit,
         string labelPrefix,
         uint edgeColor,
-        uint hatchColor,
+        uint surfaceColor,
         uint textColor)
     {
         if (source.Count == 0)
@@ -246,10 +246,14 @@ internal sealed unsafe class WorldOverlayRenderer
         foreach (var item in triangles)
         {
             var triangle = item.Triangle;
+            if (labelPrefix == "water")
+                DrawWorldTriangleFilled(drawList, triangle.A, triangle.B, triangle.C, surfaceColor);
+            else
+                DrawWorldTriangleHatch(drawList, triangle, surfaceColor);
+
             DrawWorldLine(drawList, triangle.A, triangle.B, edgeColor);
             DrawWorldLine(drawList, triangle.B, triangle.C, edgeColor);
             DrawWorldLine(drawList, triangle.C, triangle.A, edgeColor);
-            DrawWorldTriangleHatch(drawList, triangle, hatchColor);
             DrawWorldPoint(drawList, triangle.Centroid, 2f, edgeColor, false);
         }
 
@@ -376,6 +380,14 @@ internal sealed unsafe class WorldOverlayRenderer
             var end = Vector3.Lerp(triangle.A, triangle.C, t);
             DrawWorldLine(drawList, start, end, color);
         }
+    }
+
+    private void DrawWorldTriangleFilled(ImDrawListPtr drawList, Vector3 a, Vector3 b, Vector3 c, uint color)
+    {
+        if (TryWorldToScreen(a, out var screenA)
+            && TryWorldToScreen(b, out var screenB)
+            && TryWorldToScreen(c, out var screenC))
+            drawList.AddTriangleFilled(screenA, screenB, screenC, color);
     }
 
     private void DrawFacingGuide(ImDrawListPtr drawList, Vector3 standing, float rotation, uint color, int thickness = 1)
