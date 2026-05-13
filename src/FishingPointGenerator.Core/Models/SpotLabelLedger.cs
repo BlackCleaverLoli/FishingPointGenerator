@@ -6,7 +6,6 @@ public enum SpotLabelEventType
 {
     Confirm,
     Reject,
-    Mismatch,
     IgnoreTarget,
     Override,
 }

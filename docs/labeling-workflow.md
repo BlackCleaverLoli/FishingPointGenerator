@@ -1,6 +1,6 @@
 # Labeling Workflow
 
-当前主流程是客户端目录驱动的 `Territory -> FishingSpot` 维护，而不是 block-first。长期维护事实是 `SpotKey = (territoryId, fishingSpotId)` 下的真实可钓点 `Position + Rotation`；扫描候选点只是推荐辅助和证据来源。
+当前主流程是客户端目录驱动的 `Territory -> FishingSpot` 维护，而不是 block-first。长期维护事实是 `SpotKey = (territoryId, fishingSpotId)` 下的真实可钓点 `Position + Rotation`；扫描候选点用于插旗、可达性判断、抛竿点亮和人工标记辅助，不作为长期事实。
 
 ## 标注步骤
 
@@ -9,11 +9,11 @@
 3. 运行 `/fpg refresh` 读取当前 territory 的钓场目标。
 4. 在 UI 左侧领地抽屉选择 Territory，再在钓场列表中选择目标；也可运行 `/fpg next` 选择下一个需要维护的钓场。领地抽屉由可维护 FishingSpot 目录按 Territory 推导，`需维护` 统计来自每个钓场的分析状态。
 5. 运行 `/fpg scan` 重扫当前 Territory 全图候选点。
-6. 运行 `/fpg scantarget`，或在 UI 中为已选 `SpotKey` 从 Territory 缓存派生推荐候选。
-7. UI 显示真实可钓点列表、推荐点位、朝向和当前状态；overlay 的短线表示该点位记录的 `Rotation`。
+6. 运行 `/fpg scantarget`，或在 UI 中为已选 `SpotKey` 从 Territory 缓存派生候选。
+7. UI 显示真实可钓点列表、当前候选、朝向、可飞状态、距角色距离和路径检查结果；overlay 的短线表示该点位记录的 `Rotation`。
 8. 人工移动到候选点附近并朝可钓碰撞面抛竿。
-9. 如果抛竿日志命中当前目标钓场，自动记录同块的局部范围；也可运行 `/fpg confirm` 或点击确认手动记录当前站位。若已有推荐候选，会把推荐候选作为来源；若没有推荐候选，则直接把玩家当前位置和面向写入维护层。
-10. 如果抛竿结果不匹配当前目标，运行 `/fpg mismatch`，保留复核证据。
+9. 如果抛竿日志命中当前目标钓场，自动记录同块的局部范围；也可运行 `/fpg confirm` 或点击确认手动记录玩家当前站位。
+10. 如果当前候选确认不可用，运行 `/fpg rejectcandidate` 或点击排除当前候选，后续候选选择会跳过它。
 11. 如果只有弱覆盖但人工确认足够可靠，运行 `/fpg allowweak` 允许该钓场导出。
 12. 如果存在混合风险但已经人工复核，运行 `/fpg allowrisk` 允许该钓场导出。
     两个复核许可可以叠加；同时弱覆盖和混合风险的钓场需要分别执行这两个操作。
@@ -21,7 +21,7 @@
 14. 运行 `/fpg report` 生成当前钓场验证报告。
 15. 运行 `/fpg export` 导出所有 confirmed 钓场。
 
-`/fpg label <fishingSpotId>` 作为兼容快捷命令保留：它会先选择已选 Territory 中对应钓场，再把当前推荐记录为真实可钓点。
+`/fpg label <fishingSpotId>` 会先选择已选 Territory 中对应钓场，再用玩家当前站位确认该钓场。
 
 ## 状态规则
 
@@ -35,4 +35,4 @@
 
 ## 扫描器状态
 
-当前插件默认接入 `VnavmeshSceneScanner`。它会从当前 active layout 中找出 fishable 材质面与纯 walkable 面的边界线，沿边界生成 Territory 级候选点；候选 `Rotation` 垂直于边界线并朝向纯 walkable 面。`SpotScanService` 再为当前 `FishingSpot` 按需派生推荐候选，但长期事实只写入维护层的真实可钓点。`PlaceholderScanner` 仅作为开发回退实现保留，默认不会使用。
+当前插件默认接入 `VnavmeshSceneScanner`。它会从当前 active layout 中找出 fishable 材质面与纯 walkable 面的边界线，沿边界生成 Territory 级候选点；候选 `Rotation` 垂直于边界线并朝向纯 walkable 面。`SpotScanService` 再为当前 `FishingSpot` 按需派生候选，但长期事实只写入维护层的真实可钓点。`PlaceholderScanner` 仅作为开发回退实现保留，默认不会使用。

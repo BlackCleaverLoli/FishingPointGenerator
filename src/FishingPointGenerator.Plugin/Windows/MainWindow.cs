@@ -220,7 +220,7 @@ internal sealed class MainWindow : Window, IDisposable
 
         DrawSelectedSpotSummary(target);
         DrawApproachPoints();
-        DrawRecommendation();
+        DrawCandidateSelection();
         DrawTargetActions(session.CurrentAnalysis);
     }
 
@@ -282,23 +282,34 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.EndTable();
     }
 
-    private void DrawRecommendation()
+    private void DrawCandidateSelection()
     {
-        var candidate = session.CurrentAnalysis?.RecommendedCandidate;
-        if (candidate is null)
+        var selection = session.CurrentCandidateSelection;
+        if (selection is null)
             return;
 
+        var candidate = selection.Candidate;
         ImGui.Spacing();
-        ImGui.TextColored(AccentText, "推荐候选");
-        if (!ImGui.BeginTable("##fpg_recommendation", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        ImGui.TextColored(AccentText, "当前候选");
+        if (!ImGui.BeginTable("##fpg_candidate_selection", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
             return;
 
-        DrawSummaryRow("原因", FormatRecommendationReason(session.CurrentAnalysis?.RecommendationReason));
+        DrawSummaryRow("状态", selection.ModeText);
+        DrawSummaryRow(
+            "可用",
+            session.CurrentCandidateSelectionIsActionable ? "可插旗" : "仅参考",
+            session.CurrentCandidateSelectionIsActionable ? GoodText : WarnText);
         DrawSummaryRow("点位", FormatPoint(candidate.Position));
         DrawSummaryRow("朝向", candidate.Rotation.ToString("F3"));
         DrawSummaryRow("距中心", candidate.DistanceToTargetCenterMeters.ToString("F1"));
+        DrawSummaryRow("距角色", FormatNullableDistance(selection.DistanceToPlayerMeters));
+        DrawSummaryRow("路径", FormatNullableDistance(selection.PathLengthMeters));
+        DrawSummaryRow("检查候选", selection.CheckedCandidateCount == 0 ? "-" : selection.CheckedCandidateCount.ToString());
+        DrawSummaryRow("可飞", selection.CanFly ? "是" : "否");
         DrawSummaryRow("Surface", string.IsNullOrWhiteSpace(candidate.SurfaceGroupId) ? "-" : candidate.SurfaceGroupId);
+        DrawSummaryRow("Block", string.IsNullOrWhiteSpace(candidate.BlockId) ? "-" : candidate.BlockId);
         DrawSummaryRow("Fingerprint", candidate.CandidateFingerprint);
+        DrawSummaryRow("说明", string.IsNullOrWhiteSpace(selection.Note) ? "-" : selection.Note);
 
         ImGui.EndTable();
     }
@@ -306,7 +317,8 @@ internal sealed class MainWindow : Window, IDisposable
     private void DrawTargetActions(SpotAnalysis? analysis)
     {
         var hasTarget = session.CurrentTarget is not null;
-        var hasRecommendation = analysis?.RecommendedCandidate is not null;
+        var hasCandidateSelection = session.CurrentCandidateSelection?.Candidate is not null;
+        var actionableCandidateSelection = session.CurrentCandidateSelectionIsActionable;
         var sameTerritory = session.SelectedTerritoryIsCurrent;
 
         ImGui.Spacing();
@@ -314,19 +326,27 @@ internal sealed class MainWindow : Window, IDisposable
             session.ScanCurrentTarget();
 
         ImGui.SameLine();
+        if (ActionButton("刷新候选", !hasTarget || !sameTerritory || session.CurrentScan is null))
+            session.RefreshCandidateSelection();
+
+        ImGui.SameLine();
         if (ActionButton("插旗钓场", !hasTarget || !sameTerritory))
             session.PlaceCurrentTargetFlag();
 
         ImGui.SameLine();
-        if (ActionButton("插旗点位", !hasRecommendation || !sameTerritory))
-            session.PlaceRecommendedStandingFlag();
-
-        if (ActionButton("确认当前站位", !hasTarget || !sameTerritory))
-            session.ConfirmRecommendation();
+        if (ActionButton("插旗候选", !actionableCandidateSelection || !sameTerritory))
+            session.PlaceSelectedCandidateFlag();
 
         ImGui.SameLine();
-        if (ActionButton("记录不匹配", !hasRecommendation || !sameTerritory))
-            session.RecordMismatch();
+        if (ActionButton("插旗未记录", !hasTarget || !sameTerritory || session.CurrentScan is null))
+            session.PlaceNearestUnrecordedCandidateFlag();
+
+        if (ActionButton("确认当前站位", !hasTarget || !sameTerritory))
+            session.ConfirmCurrentStanding();
+
+        ImGui.SameLine();
+        if (ActionButton("排除此候选", !hasCandidateSelection || !sameTerritory))
+            session.RejectSelectedCandidate();
 
         ImGui.SameLine();
         if (ActionButton("允许弱覆盖导出", analysis?.Status != SpotAnalysisStatus.WeakCoverage))
@@ -519,17 +539,6 @@ internal sealed class MainWindow : Window, IDisposable
         };
     }
 
-    private static string FormatRecommendationReason(SpotRecommendationReason? reason)
-    {
-        return reason switch
-        {
-            SpotRecommendationReason.NeedsVisit => "需到访",
-            SpotRecommendationReason.WeakCoverage => "弱覆盖",
-            SpotRecommendationReason.MixedRiskReview => "检查混合风险",
-            _ => "-",
-        };
-    }
-
     private static string FormatReviewDecision(SpotReviewDecision decision)
     {
         if (decision == SpotReviewDecision.None)
@@ -564,7 +573,7 @@ internal sealed class MainWindow : Window, IDisposable
         return source switch
         {
             ApproachPointSourceKind.Manual => "手动",
-            ApproachPointSourceKind.RecommendedCandidate => "推荐确认",
+            ApproachPointSourceKind.Candidate => "候选",
             ApproachPointSourceKind.AutoCastFill => "抛竿连锁",
             ApproachPointSourceKind.Imported => "导入",
             _ => source.ToString(),
@@ -581,6 +590,15 @@ internal sealed class MainWindow : Window, IDisposable
     private static string FormatPoint(Point3 point)
     {
         return $"{point.X:F2}, {point.Y:F2}, {point.Z:F2}";
+    }
+
+    private static string FormatNullableDistance(float? distance)
+    {
+        return distance is null
+            ? "-"
+            : distance.Value == float.MaxValue
+                ? "inf"
+                : $"{distance.Value:F1}m";
     }
 
     private static void DrawSummaryRow(string label, string value)

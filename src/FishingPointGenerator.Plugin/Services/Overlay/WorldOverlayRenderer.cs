@@ -4,6 +4,7 @@ using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using FishingPointGenerator.Core.Models;
+using FishingPointGenerator.Plugin.Services;
 using FishingPointGenerator.Plugin.Services.Scanning;
 using OmenTools;
 
@@ -15,7 +16,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint TerritoryCandidateColor = 0x66808080;
     private const uint CandidateColor = 0xffd0d0d0;
     private const uint ConfirmedColor = 0xff55d779;
-    private const uint RecommendedColor = 0xff35f0ff;
+    private const uint SelectedCandidateColor = 0xff35f0ff;
     private const uint BlockLabelColor = 0xffc0a060;
     private const uint WarningColor = 0xff4080ff;
     private const uint FishableDebugFillColor = 0x3345a0ff;
@@ -28,6 +29,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private const float FacingGuideLengthMeters = 5f;
     private const float DebugSurfaceHatchSpacingMeters = 4f;
     private const int MaxSurfaceDebugLabels = 4;
+    private const int MaxCandidateLabels = 18;
 
     private Matrix4x4 viewProj;
     private Vector4 nearPlane;
@@ -98,7 +100,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private void DrawTarget(ImDrawListPtr drawList, SpotWorkflowSession session, Vector3 playerPosition)
     {
         var target = session.CurrentTarget!;
-        var baseY = session.CurrentAnalysis?.RecommendedCandidate?.Position.Y ?? playerPosition.Y;
+        var baseY = session.CurrentCandidateSelection?.Candidate.Position.Y ?? playerPosition.Y;
         var center = new Vector3(target.WorldX, baseY, target.WorldZ);
 
         DrawWorldPoint(drawList, center, 5f, TargetColor, true);
@@ -119,7 +121,7 @@ internal sealed unsafe class WorldOverlayRenderer
         if (scan is null || scan.Candidates.Count == 0)
             return;
 
-        var recommendedFingerprint = session.CurrentAnalysis?.RecommendedCandidate?.CandidateFingerprint;
+        var selectedCandidateFingerprint = session.CurrentCandidateSelection?.Candidate.CandidateFingerprint;
         var confirmedFingerprints = session.CurrentApproachPoints
             .Where(point => point.Status == ApproachPointStatus.Confirmed)
             .Select(point => point.SourceCandidateFingerprint)
@@ -138,27 +140,28 @@ internal sealed unsafe class WorldOverlayRenderer
             .Take(candidateLimit)
             .ToList();
 
+        var selection = session.CurrentCandidateSelection;
         var labelCount = 0;
         foreach (var item in candidates)
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var isRecommended = string.Equals(candidate.CandidateFingerprint, recommendedFingerprint, StringComparison.Ordinal);
+            var isSelectedCandidate = string.Equals(candidate.CandidateFingerprint, selectedCandidateFingerprint, StringComparison.Ordinal);
             var isConfirmed = confirmedFingerprints.Contains(candidate.CandidateFingerprint);
-            var color = isRecommended ? RecommendedColor : isConfirmed ? ConfirmedColor : CandidateColor;
-            var pointRadius = isRecommended ? 5f : isConfirmed ? 4f : 3f;
-            var lineThickness = isRecommended ? 2 : 1;
+            var color = isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor;
+            var pointRadius = isSelectedCandidate ? 5f : isConfirmed ? 4f : 3f;
+            var lineThickness = isSelectedCandidate ? 2 : 1;
 
             DrawFacingGuide(drawList, standing, candidate.Rotation, color, lineThickness);
             DrawWorldPoint(drawList, standing, pointRadius, color, true);
 
-            if (isRecommended || (isConfirmed && labelCount < 8))
+            if (isSelectedCandidate || isConfirmed || labelCount < MaxCandidateLabels)
             {
                 DrawWorldText(
                     drawList,
                     standing + new Vector3(0f, 1.6f, 0f),
-                    isRecommended ? "推荐" : "已记录",
-                    isRecommended ? RecommendedColor : ConfirmedColor);
+                    BuildCandidateLabel(candidate, item.Distance, isSelectedCandidate, isConfirmed, selection),
+                    isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor);
                 labelCount++;
             }
         }
@@ -167,6 +170,26 @@ internal sealed unsafe class WorldOverlayRenderer
             drawList.AddText(screen, WarningColor, $"FPG overlay {candidates.Count}/{scan.Candidates.Count}");
 
         DrawTargetBlockLabels(drawList, session, playerPosition, drawDistance, confirmedFingerprints);
+    }
+
+    private static string BuildCandidateLabel(
+        SpotCandidate candidate,
+        float distanceToPlayer,
+        bool isSelectedCandidate,
+        bool isConfirmed,
+        CandidateSelection? selection)
+    {
+        var status = isConfirmed
+            ? "已记录"
+            : isSelectedCandidate && selection is not null
+                ? $"当前/{selection.ModeText}"
+                : "未记录";
+        var range = candidate.IsWithinTargetSearchRadius ? "in" : "out";
+        var path = isSelectedCandidate && selection?.PathLengthMeters is { } pathLength
+            ? $" path={pathLength:F1}m"
+            : string.Empty;
+        return $"{status} p={distanceToPlayer:F1}m c={candidate.DistanceToTargetCenterMeters:F1}m{path} {range} "
+            + $"s={ShortId(candidate.SurfaceGroupId)} b={ShortId(candidate.BlockId)} fp={ShortId(candidate.CandidateFingerprint)}";
     }
 
     private void DrawSurfaceDebug(
@@ -479,5 +502,13 @@ internal sealed unsafe class WorldOverlayRenderer
 
         var index = blockId.LastIndexOf("_block_", StringComparison.Ordinal);
         return index >= 0 ? "b" + blockId[(index + "_block_".Length)..] : blockId;
+    }
+
+    private static string ShortId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "-";
+
+        return value.Length <= 10 ? value : value[..10];
     }
 }

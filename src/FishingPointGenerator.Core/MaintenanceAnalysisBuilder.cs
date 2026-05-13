@@ -37,7 +37,6 @@ public sealed class MaintenanceAnalysisBuilder
         var candidateCount = relevantCandidates.Count;
         var hasMixedRisk = scan?.Candidates.Any(candidate =>
             candidate.NearbyFishingSpotIds.Any(id => id != 0 && id != target.FishingSpotId)) ?? false;
-        var recommendedCandidate = PickRecommendedCandidate(scan, maintenance);
 
         if (hasMixedRisk && !HasDecision(reviewDecision, SpotReviewDecision.AllowRiskExport))
         {
@@ -48,8 +47,6 @@ public sealed class MaintenanceAnalysisBuilder
                 CandidateCount = candidateCount,
                 ConfirmedApproachPointCount = confirmedCount,
                 HasMixedRisk = true,
-                RecommendedCandidate = recommendedCandidate,
-                RecommendationReason = SpotRecommendationReason.MixedRiskReview,
                 Messages = ["一个或多个候选点接近其它 FishingSpot 目标。"],
             };
         }
@@ -68,10 +65,6 @@ public sealed class MaintenanceAnalysisBuilder
                 CandidateCount = candidateCount,
                 ConfirmedApproachPointCount = confirmedCount,
                 HasMixedRisk = hasMixedRisk,
-                RecommendedCandidate = status == SpotAnalysisStatus.Confirmed ? null : recommendedCandidate,
-                RecommendationReason = status == SpotAnalysisStatus.WeakCoverage
-                    ? SpotRecommendationReason.WeakCoverage
-                    : null,
             };
         }
 
@@ -91,7 +84,7 @@ public sealed class MaintenanceAnalysisBuilder
             {
                 Key = target.Key,
                 Status = SpotAnalysisStatus.NoCandidate,
-                Messages = ["扫描已完成，但没有为此 FishingSpot 生成推荐范围内的候选点。"],
+                Messages = ["扫描已完成，但没有为此 FishingSpot 生成钓场范围内的候选点。"],
             };
         }
 
@@ -100,8 +93,6 @@ public sealed class MaintenanceAnalysisBuilder
             Key = target.Key,
             Status = SpotAnalysisStatus.NeedsVisit,
             CandidateCount = candidateCount,
-            RecommendedCandidate = recommendedCandidate,
-            RecommendationReason = SpotRecommendationReason.NeedsVisit,
             Messages = ["已有候选点，但尚未记录真实可钓点。"],
         };
     }
@@ -114,43 +105,6 @@ public sealed class MaintenanceAnalysisBuilder
     private static bool HasDecision(SpotReviewDecision decisions, SpotReviewDecision flag)
     {
         return (decisions & flag) == flag;
-    }
-
-    private static SpotCandidate? PickRecommendedCandidate(SpotScanDocument? scan, SpotMaintenanceRecord? maintenance)
-    {
-        if (scan is null || scan.Candidates.Count == 0)
-            return null;
-
-        var candidates = GetRelevantCandidates(scan);
-        if (candidates.Count == 0)
-            return null;
-
-        var excludedFingerprints = maintenance?.ApproachPoints
-            .Where(point => point.Status == ApproachPointStatus.Confirmed)
-            .Select(point => point.SourceCandidateFingerprint)
-            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
-            .ToHashSet(StringComparer.Ordinal)
-            ?? [];
-
-        foreach (var evidence in maintenance?.Evidence ?? [])
-        {
-            if (evidence.EventType is SpotEvidenceEventType.Reject or SpotEvidenceEventType.Mismatch
-                && !string.IsNullOrWhiteSpace(evidence.CandidateFingerprint))
-                excludedFingerprints.Add(evidence.CandidateFingerprint);
-        }
-
-        return candidates
-            .Where(candidate => candidate.Status is not CandidateStatus.Ignored and not CandidateStatus.Quarantined)
-            .Where(candidate => !excludedFingerprints.Contains(candidate.CandidateFingerprint))
-            .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
-            .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
-            .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
-            .FirstOrDefault()
-            ?? candidates
-                .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
-                .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
-                .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
-                .FirstOrDefault();
     }
 
     private static IReadOnlyList<SpotCandidate> GetRelevantCandidates(SpotScanDocument? scan)

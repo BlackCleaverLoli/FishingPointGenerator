@@ -15,13 +15,6 @@ public enum SpotAnalysisStatus
     Stale,
 }
 
-public enum SpotRecommendationReason
-{
-    NeedsVisit,
-    WeakCoverage,
-    MixedRiskReview,
-}
-
 public sealed record SpotAnalysis
 {
     public SpotKey Key { get; init; }
@@ -29,8 +22,6 @@ public sealed record SpotAnalysis
     public int CandidateCount { get; init; }
     public int ConfirmedApproachPointCount { get; init; }
     public bool HasMixedRisk { get; init; }
-    public SpotCandidate? RecommendedCandidate { get; init; }
-    public SpotRecommendationReason? RecommendationReason { get; init; }
     public List<string> Messages { get; init; } = [];
 
     [JsonIgnore]

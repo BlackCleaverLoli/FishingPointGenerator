@@ -5,6 +5,8 @@ using FishingPointGenerator.Plugin.Services.Catalog;
 using FishingPointGenerator.Plugin.Services.Scanning;
 using Lumina.Excel.Sheets;
 using OmenTools;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace FishingPointGenerator.Plugin.Services;
 
@@ -20,11 +22,15 @@ internal sealed class SpotWorkflowSession
     private readonly TerritoryMaintenanceStore maintenanceStore;
     private readonly LuminaFishingSpotCatalogBuilder catalogBuilder = new();
     private readonly MaintenanceAnalysisBuilder maintenanceAnalysisBuilder = new();
-    private readonly SpotRecommendationEngine recommendationEngine = new();
+    private readonly SpotTargetSelectionEngine targetSelectionEngine = new();
     private readonly MaintenanceExportBuilder maintenanceExportBuilder = new();
     private readonly SurveyBlockOptions blockOptions = new();
     private readonly SurveyBlockBuilder blockBuilder;
     private readonly SpotScanService scanService;
+    private readonly VnavmeshQueryService navmeshQuery = new();
+    private readonly object reachabilityLock = new();
+    private CancellationTokenSource? reachabilityCancellation;
+    private int reachabilityRequestId;
 
     public SpotWorkflowSession(PluginPaths paths, ICurrentTerritoryScanner scanner)
     {
@@ -53,6 +59,7 @@ internal sealed class SpotWorkflowSession
     public IReadOnlyList<SurveyBlock> CurrentTerritoryBlocks { get; private set; } = [];
     public IReadOnlyList<SurveyBlock> CurrentTargetBlocks { get; private set; } = [];
     public SpotScanDocument? CurrentScan { get; private set; }
+    public CandidateSelection? CurrentCandidateSelection { get; private set; }
     public string LastMessage { get; private set; } = "就绪。";
     public bool AutoRecordCastsEnabled { get; set; } = true;
     public bool OverlayEnabled { get; set; } = true;
@@ -85,6 +92,7 @@ internal sealed class SpotWorkflowSession
     public int MixedRiskCount => CountStatus(SpotAnalysisStatus.MixedRisk);
     public int IgnoredCount => CountStatus(SpotAnalysisStatus.Ignored);
     public int WeakCoverageCount => CountStatus(SpotAnalysisStatus.WeakCoverage);
+    public bool CurrentCandidateSelectionIsActionable => CanUseCandidateSelection(CurrentCandidateSelection);
     public SpotReviewDecision CurrentReviewDecision => GetCurrentMaintenanceRecord()?.ReviewDecision ?? SpotReviewDecision.None;
     public string CurrentReviewNote => GetCurrentMaintenanceRecord()?.ReviewNote ?? string.Empty;
     public IReadOnlyList<ApproachPoint> CurrentApproachPoints => GetCurrentMaintenanceRecord()?.ApproachPoints ?? [];
@@ -117,6 +125,7 @@ internal sealed class SpotWorkflowSession
             CurrentTarget = null;
             CurrentAnalysis = null;
             CurrentScan = null;
+            CurrentCandidateSelection = null;
             CurrentTargetBlocks = [];
             return;
         }
@@ -134,6 +143,7 @@ internal sealed class SpotWorkflowSession
             CurrentTarget = null;
             CurrentAnalysis = null;
             CurrentScan = null;
+            CurrentCandidateSelection = null;
             CurrentTargetBlocks = [];
             LastMessage = $"当前区域 {territoryId} 不在 FishingSpot 目录中。";
             return;
@@ -144,6 +154,7 @@ internal sealed class SpotWorkflowSession
 
     public bool SelectTerritory(uint territoryId, bool selectNext = false, bool setMessage = true)
     {
+        CancelReachabilityProbe();
         if (Catalog.Spots.Count == 0)
             Catalog = store.LoadCatalog();
 
@@ -183,6 +194,7 @@ internal sealed class SpotWorkflowSession
 
     public void HandleTerritoryChanged(uint territoryId)
     {
+        CancelReachabilityProbe();
         ClearCurrentTerritoryRuntimeState();
         RefreshCurrentTerritory(selectNext: true);
         LastMessage = $"已切换区域 {territoryId}：已清空上一张图的内存扫描状态。{LastMessage}";
@@ -190,6 +202,7 @@ internal sealed class SpotWorkflowSession
 
     public bool SelectTarget(uint fishingSpotId)
     {
+        CancelReachabilityProbe();
         var target = CurrentTerritoryTargets.FirstOrDefault(target => target.FishingSpotId == fishingSpotId);
         if (target is null)
         {
@@ -205,7 +218,8 @@ internal sealed class SpotWorkflowSession
 
     public void SelectNextTarget(bool setMessage = true)
     {
-        var next = recommendationEngine.PickNext(Analyses);
+        CancelReachabilityProbe();
+        var next = targetSelectionEngine.PickNext(Analyses);
         if (next is null)
         {
             CurrentTarget = CurrentTerritoryTargets.FirstOrDefault();
@@ -233,6 +247,7 @@ internal sealed class SpotWorkflowSession
             CurrentTerritorySurvey = null;
             CurrentTerritoryBlocks = [];
             CurrentScan = null;
+            CurrentCandidateSelection = null;
             CurrentTargetBlocks = [];
             LastMessage = $"扫描当前区域失败：{ex.Message}";
             return;
@@ -260,10 +275,11 @@ internal sealed class SpotWorkflowSession
         if (!EnsureCurrentTarget())
             return;
 
-        var scan = CreateScanFromTerritory(CurrentTarget!);
+        var target = CurrentTarget!;
+        var scan = CreateScanFromTerritory(target);
         if (scan is null)
         {
-            LastMessage = "没有当前区域全图缓存。请先扫描当前区域，再为已选钓场派生推荐候选。";
+            LastMessage = "没有当前区域全图缓存。请先扫描当前区域，再为已选钓场派生候选。";
             return;
         }
 
@@ -271,7 +287,29 @@ internal sealed class SpotWorkflowSession
         CurrentTargetBlocks = BuildBlocksFromSpotCandidates(scan.Candidates);
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"已从 Territory 全图缓存为 FishingSpot {CurrentTarget!.FishingSpotId} 派生推荐候选：{scan.Candidates.Count} 个候选点，{CurrentTargetBlocks.Count} 个块。";
+        LastMessage = $"已从 Territory 全图缓存为 FishingSpot {target.FishingSpotId} 派生候选：{scan.Candidates.Count} 个候选点，{CurrentTargetBlocks.Count} 个块。";
+    }
+
+    public void RefreshCandidateSelection()
+    {
+        if (!EnsureCurrentTarget())
+            return;
+
+        var target = CurrentTarget!;
+        var scan = EnsureScanForCurrentTarget();
+        if (scan is null)
+        {
+            CurrentCandidateSelection = null;
+            LastMessage = "已选目标没有可派生候选。请先扫描当前区域。";
+            return;
+        }
+
+        CurrentCandidateSelection = BuildCandidateSelection(target, scan, forceProbe: true);
+        CurrentAnalysis ??= BuildAnalysis(target);
+        ReplaceAnalysis(CurrentAnalysis);
+        LastMessage = CurrentCandidateSelection is null
+            ? $"FishingSpot {target.FishingSpotId} 没有可用候选。"
+            : $"已刷新 FishingSpot {target.FishingSpotId} 的候选选择：{CurrentCandidateSelection.ModeText}。";
     }
 
     public void DebugScanNearby(float radiusMeters)
@@ -444,23 +482,78 @@ internal sealed class SpotWorkflowSession
         LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的钓场中心插旗。";
     }
 
-    public void PlaceRecommendedStandingFlag()
+    public void PlaceSelectedCandidateFlag()
     {
-        if (!EnsureRecommendation(out _, out var candidate))
+        if (!EnsureCandidateSelection(out _, out var candidate, requireActionable: true))
             return;
 
-        if (!FlagPlacer.SetFlagFromWorld(
-                CurrentTarget!.TerritoryId,
-                CurrentTarget.MapId,
-                candidate.Position.X,
-                candidate.Position.Z,
-                $"{CurrentTarget.Name} 点位"))
+        if (!CanUseCandidateSelection(CurrentCandidateSelection))
         {
-            LastMessage = $"无法为 FishingSpot {CurrentTarget.FishingSpotId} 的推荐点位插旗。";
+            LastMessage = "当前候选尚未通过可达性检查，不能插旗该候选。请等待候选可达性刷新完成，或使用“插旗未记录”手动查看候选。";
             return;
         }
 
-        LastMessage = $"已为 FishingSpot {CurrentTarget.FishingSpotId} 的推荐点位插旗。";
+        var target = CurrentTarget!;
+        if (!FlagPlacer.SetFlagFromWorld(
+                target.TerritoryId,
+                target.MapId,
+                candidate.Position.X,
+                candidate.Position.Z,
+                $"{target.Name} 点位"))
+        {
+            LastMessage = $"无法为 FishingSpot {target.FishingSpotId} 的候选点插旗。";
+            return;
+        }
+
+        LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的候选点插旗。";
+    }
+
+    public void PlaceNearestUnrecordedCandidateFlag()
+    {
+        if (!EnsureCurrentTarget())
+            return;
+        if (!EnsureSelectedTargetIsCurrentTerritory())
+            return;
+
+        var target = CurrentTarget!;
+        var scan = EnsureScanForCurrentTarget();
+        if (scan is null)
+        {
+            LastMessage = "已选目标没有可派生候选。请先扫描当前区域。";
+            return;
+        }
+
+        var playerSnapshot = GetPlayerSnapshot();
+        if (playerSnapshot is null)
+        {
+            LastMessage = "无法选择未记录候选：没有可用的玩家位置。";
+            return;
+        }
+
+        var candidate = GetSelectableCandidatePool(scan, GetMaintenanceRecord(target.Key))
+            .OrderBy(candidate => candidate.Position.HorizontalDistanceTo(playerSnapshot.Position))
+            .ThenByDescending(candidate => candidate.IsWithinTargetSearchRadius)
+            .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
+            .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (candidate is null)
+        {
+            LastMessage = $"FishingSpot {target.FishingSpotId} 没有未记录候选可插旗。";
+            return;
+        }
+
+        if (!FlagPlacer.SetFlagFromWorld(
+                target.TerritoryId,
+                target.MapId,
+                candidate.Position.X,
+                candidate.Position.Z,
+                $"{target.Name} 未记录点"))
+        {
+            LastMessage = $"无法为 FishingSpot {target.FishingSpotId} 的未记录候选插旗。";
+            return;
+        }
+
+        LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的未记录候选插旗：距角色 {candidate.Position.HorizontalDistanceTo(playerSnapshot.Position):F1}m，距中心 {candidate.DistanceToTargetCenterMeters:F1}m。";
     }
 
     public bool RecordCastFill(uint castPlaceNameId)
@@ -567,79 +660,63 @@ internal sealed class SpotWorkflowSession
         return true;
     }
 
-    public void ConfirmRecommendation()
+    public void ConfirmCurrentStanding()
     {
         if (!EnsureCurrentTarget())
             return;
         if (!EnsureSelectedTargetIsCurrentTerritory())
             return;
 
+        var target = CurrentTarget!;
         var playerSnapshot = GetPlayerSnapshot();
         var evidenceId = Guid.NewGuid().ToString("N");
         var scan = EnsureScanForCurrentTarget();
         if (scan is not null)
         {
             CurrentAnalysis = maintenanceAnalysisBuilder.Analyze(
-                CurrentTarget!,
+                target,
                 scan,
-                GetMaintenanceRecord(CurrentTarget.Key),
-                TryLoadLegacyReview(CurrentTarget.Key));
+                GetMaintenanceRecord(target.Key),
+                TryLoadLegacyReview(target.Key));
+            CurrentCandidateSelection = GetOrBuildCandidateSelection(target, scan);
             ReplaceAnalysis(CurrentAnalysis);
-        }
-
-        var candidate = CurrentAnalysis?.RecommendedCandidate;
-        if (scan is not null && candidate is not null)
-        {
-            var position = playerSnapshot?.Position ?? candidate.Position;
-            var rotation = playerSnapshot?.Rotation ?? candidate.Rotation;
-            UpsertApproachPointFromCandidate(
-                CurrentTarget!,
-                scan,
-                candidate,
-                evidenceId,
-                ApproachPointSourceKind.RecommendedCandidate,
-                position,
-                rotation,
-                "manualConfirm");
-
-            LastMessage = $"已确认 FishingSpot {CurrentTarget.FishingSpotId} 的推荐。";
-            return;
         }
 
         if (playerSnapshot is null)
         {
-            LastMessage = "没有推荐候选，也无法读取玩家当前位置，不能记录真实可钓点。";
+            LastMessage = "无法读取玩家当前位置，不能记录真实可钓点。";
             return;
         }
 
         UpsertManualApproachPoint(
-            CurrentTarget!,
+            target,
             evidenceId,
             playerSnapshot.Position,
             playerSnapshot.Rotation,
             "manualCurrentStanding");
-        LastMessage = $"已用当前站位确认 FishingSpot {CurrentTarget.FishingSpotId}。";
+        LastMessage = $"已用当前站位确认 FishingSpot {target.FishingSpotId}。";
     }
 
-    public void RecordMismatch()
+    public void RejectSelectedCandidate()
     {
-        if (!EnsureRecommendation(out var scan, out var candidate))
+        if (!EnsureCandidateSelection(out var scan, out var candidate, requireActionable: false))
             return;
         if (!EnsureSelectedTargetIsCurrentTerritory())
             return;
 
+        var target = CurrentTarget!;
         var playerSnapshot = GetPlayerSnapshot();
         AppendMaintenanceEvidence(
-            CurrentTarget!,
-            SpotEvidenceEventType.Mismatch,
+            target,
+            SpotEvidenceEventType.Reject,
             playerSnapshot?.Position ?? candidate.Position,
             playerSnapshot?.Rotation ?? candidate.Rotation,
             candidate.CandidateFingerprint,
             scan.ScanId,
             scan.ScannerVersion,
-            "mismatch");
+            "rejectCandidate");
 
-        LastMessage = $"已记录 FishingSpot {CurrentTarget.FishingSpotId} 的不匹配。";
+        LastMessage = $"已排除 FishingSpot {target.FishingSpotId} 的当前候选。";
     }
 
     public void IgnoreCurrentTarget()
@@ -647,15 +724,16 @@ internal sealed class SpotWorkflowSession
         if (!EnsureCurrentTarget())
             return;
 
+        var target = CurrentTarget!;
         store.SaveLegacyReview(new SpotReviewDocument
         {
-            Key = CurrentTarget!.Key,
+            Key = target.Key,
             Decision = SpotReviewDecision.IgnoreSpot,
         });
-        SetMaintenanceReview(CurrentTarget!, SpotReviewDecision.IgnoreSpot, "ignore", merge: false);
+        SetMaintenanceReview(target, SpotReviewDecision.IgnoreSpot, "ignore", merge: false);
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"已忽略 FishingSpot {CurrentTarget.FishingSpotId}。";
+        LastMessage = $"已忽略 FishingSpot {target.FishingSpotId}。";
     }
 
     public void AllowWeakCoverageExport()
@@ -663,16 +741,17 @@ internal sealed class SpotWorkflowSession
         if (!EnsureCurrentTarget())
             return;
 
+        var target = CurrentTarget!;
         var reviewDecision = MergeReviewDecision(CurrentReviewDecision, SpotReviewDecision.AllowWeakCoverageExport);
         store.SaveLegacyReview(new SpotReviewDocument
         {
-            Key = CurrentTarget!.Key,
+            Key = target.Key,
             Decision = reviewDecision,
         });
-        SetMaintenanceReview(CurrentTarget!, SpotReviewDecision.AllowWeakCoverageExport, "allowWeakCoverageExport", merge: true);
+        SetMaintenanceReview(target, SpotReviewDecision.AllowWeakCoverageExport, "allowWeakCoverageExport", merge: true);
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"已允许 FishingSpot {CurrentTarget.FishingSpotId} 以弱覆盖状态导出。";
+        LastMessage = $"已允许 FishingSpot {target.FishingSpotId} 以弱覆盖状态导出。";
     }
 
     public void AllowRiskExport()
@@ -680,16 +759,17 @@ internal sealed class SpotWorkflowSession
         if (!EnsureCurrentTarget())
             return;
 
+        var target = CurrentTarget!;
         var reviewDecision = MergeReviewDecision(CurrentReviewDecision, SpotReviewDecision.AllowRiskExport);
         store.SaveLegacyReview(new SpotReviewDocument
         {
-            Key = CurrentTarget!.Key,
+            Key = target.Key,
             Decision = reviewDecision,
         });
-        SetMaintenanceReview(CurrentTarget!, SpotReviewDecision.AllowRiskExport, "allowRiskExport", merge: true);
+        SetMaintenanceReview(target, SpotReviewDecision.AllowRiskExport, "allowRiskExport", merge: true);
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"已允许 FishingSpot {CurrentTarget.FishingSpotId} 在风险复核后导出。";
+        LastMessage = $"已允许 FishingSpot {target.FishingSpotId} 在风险复核后导出。";
     }
 
     public void GenerateCurrentReport()
@@ -697,8 +777,9 @@ internal sealed class SpotWorkflowSession
         if (!EnsureCurrentTarget())
             return;
 
-        var analysis = CurrentAnalysis ?? BuildAnalysis(CurrentTarget!);
-        var maintenance = GetCurrentMaintenanceRecord();
+        var target = CurrentTarget!;
+        var analysis = CurrentAnalysis ?? BuildAnalysis(target);
+        var maintenance = GetMaintenanceRecord(target.Key);
         var approachPoints = maintenance?.ApproachPoints
             .OrderBy(point => point.Status)
             .ThenBy(point => point.PointId, StringComparer.Ordinal)
@@ -739,7 +820,7 @@ internal sealed class SpotWorkflowSession
         {
             Key = analysis.Key,
             TerritoryName = SelectedTerritoryName,
-            FishingSpotName = CurrentTarget.Name,
+            FishingSpotName = target.Name,
             Status = analysis.Status,
             CandidateCount = analysis.CandidateCount,
             ConfirmedApproachPointCount = approachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed),
@@ -748,7 +829,7 @@ internal sealed class SpotWorkflowSession
             Evidence = evidence,
         };
         store.SaveReport(report);
-        LastMessage = $"已生成 FishingSpot {CurrentTarget.FishingSpotId} 的验证报告。";
+        LastMessage = $"已生成 FishingSpot {target.FishingSpotId} 的验证报告。";
     }
 
     public void ExportConfirmed()
@@ -788,6 +869,7 @@ internal sealed class SpotWorkflowSession
         if (CurrentTarget?.Key == target.Key)
         {
             CurrentScan = null;
+            CurrentCandidateSelection = null;
             CurrentTargetBlocks = [];
             CurrentAnalysis = BuildAnalysis(target);
             ReplaceAnalysis(CurrentAnalysis);
@@ -1060,13 +1142,14 @@ internal sealed class SpotWorkflowSession
         });
     }
 
-    private bool EnsureRecommendation(out SpotScanDocument scan, out SpotCandidate candidate)
+    private bool EnsureCandidateSelection(out SpotScanDocument scan, out SpotCandidate candidate, bool requireActionable)
     {
         scan = new SpotScanDocument();
         candidate = new SpotCandidate();
         if (!EnsureCurrentTarget())
             return false;
 
+        var target = CurrentTarget!;
         var ensuredScan = EnsureScanForCurrentTarget();
         if (ensuredScan is null)
         {
@@ -1076,16 +1159,23 @@ internal sealed class SpotWorkflowSession
 
         scan = ensuredScan;
         CurrentAnalysis = maintenanceAnalysisBuilder.Analyze(
-            CurrentTarget!,
+            target,
             scan,
-            GetMaintenanceRecord(CurrentTarget.Key),
-            TryLoadLegacyReview(CurrentTarget.Key));
+            GetMaintenanceRecord(target.Key),
+            TryLoadLegacyReview(target.Key));
+        CurrentCandidateSelection = GetOrBuildCandidateSelection(target, scan);
         ReplaceAnalysis(CurrentAnalysis);
 
-        var selectedCandidate = CurrentAnalysis?.RecommendedCandidate;
+        var selectedCandidate = CurrentCandidateSelection?.Candidate;
         if (selectedCandidate is null || string.IsNullOrWhiteSpace(selectedCandidate.CandidateFingerprint))
         {
-            LastMessage = "已选目标没有可用推荐。";
+            LastMessage = "已选目标没有可用候选。";
+            return false;
+        }
+
+        if (requireActionable && !CanUseCandidateSelection(CurrentCandidateSelection))
+        {
+            LastMessage = "当前候选尚未通过可达性检查。";
             return false;
         }
 
@@ -1117,7 +1207,7 @@ internal sealed class SpotWorkflowSession
 
     private SpotMaintenanceRecord? GetCurrentMaintenanceRecord()
     {
-        return CurrentTarget is null ? null : GetMaintenanceRecord(CurrentTarget.Key);
+        return CurrentTarget is { } target ? GetMaintenanceRecord(target.Key) : null;
     }
 
     private SpotMaintenanceRecord? GetMaintenanceRecord(SpotKey key)
@@ -1458,24 +1548,298 @@ internal sealed class SpotWorkflowSession
             TryLoadLegacyReview(target.Key));
     }
 
+    private CandidateSelection? BuildCandidateSelection(
+        FishingSpotTarget target,
+        SpotScanDocument scan,
+        bool forceProbe = false)
+    {
+        if (forceProbe)
+            CancelReachabilityProbe();
+
+        var candidates = GetSelectableCandidatePool(scan, GetMaintenanceRecord(target.Key));
+        if (candidates.Count == 0)
+            return null;
+
+        var playerSnapshot = GetPlayerSnapshot();
+        var canFly = CurrentGameState.IsCurrentTerritoryFlyable();
+        if (canFly)
+        {
+            var candidate = PickDefaultCandidate(candidates);
+            return new CandidateSelection(
+                candidate,
+                CandidateSelectionMode.FlyableDistance,
+                true,
+                null,
+                playerSnapshot is null ? null : candidate.Position.HorizontalDistanceTo(playerSnapshot.Position),
+                candidate.DistanceToTargetCenterMeters,
+                0,
+                "当前区域已解锁飞行，按钓场范围和距中心排序。");
+        }
+
+        if (playerSnapshot is null)
+        {
+            var candidate = PickDefaultCandidate(candidates);
+            return new CandidateSelection(
+                candidate,
+                CandidateSelectionMode.NoPlayerFallback,
+                false,
+                null,
+                null,
+                candidate.DistanceToTargetCenterMeters,
+                0,
+                "当前区域不能飞，但无法读取玩家位置，已退回默认候选排序。");
+        }
+
+        if (!navmeshQuery.IsReady)
+        {
+            var candidate = PickDefaultCandidate(candidates);
+            return new CandidateSelection(
+                candidate,
+                CandidateSelectionMode.NavmeshUnavailableFallback,
+                false,
+                null,
+                candidate.Position.HorizontalDistanceTo(playerSnapshot.Position),
+                candidate.DistanceToTargetCenterMeters,
+                0,
+                "当前区域不能飞，vnavmesh 未就绪，已退回默认候选排序。");
+        }
+
+        var byDistance = candidates
+            .OrderBy(candidate => candidate.Position.HorizontalDistanceTo(playerSnapshot.Position))
+            .ThenByDescending(candidate => candidate.IsWithinTargetSearchRadius)
+            .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
+            .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
+            .Take(32)
+            .ToList();
+        var fallback = PickDefaultCandidate(candidates);
+        StartReachabilityProbe(target.Key, playerSnapshot.Position, byDistance);
+        return new CandidateSelection(
+            fallback,
+            CandidateSelectionMode.WalkReachabilityPending,
+            false,
+            null,
+            fallback.Position.HorizontalDistanceTo(playerSnapshot.Position),
+            fallback.DistanceToTargetCenterMeters,
+            byDistance.Count,
+            $"当前区域不能飞，正在后台检查 {byDistance.Count} 个附近候选的步行可达性，暂用默认候选。");
+    }
+
+    private CandidateSelection? GetOrBuildCandidateSelection(
+        FishingSpotTarget target,
+        SpotScanDocument scan)
+    {
+        if (CurrentCandidateSelection is { } current
+            && current.Candidate.Key == target.Key
+            && scan.Candidates.Any(candidate => string.Equals(
+                candidate.CandidateFingerprint,
+                current.Candidate.CandidateFingerprint,
+                StringComparison.Ordinal)))
+            return current;
+
+        return BuildCandidateSelection(target, scan);
+    }
+
+    private static IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(
+        SpotScanDocument scan,
+        SpotMaintenanceRecord? maintenance)
+    {
+        var excludedFingerprints = GetRecordedCandidateFingerprints(maintenance);
+        var relevant = GetRelevantCandidates(scan);
+        return relevant
+            .Where(IsSelectableCandidate)
+            .Where(candidate => !excludedFingerprints.Contains(candidate.CandidateFingerprint))
+            .ToList();
+    }
+
+    private static SpotCandidate PickDefaultCandidate(IReadOnlyList<SpotCandidate> candidates)
+    {
+        return candidates
+            .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
+            .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
+            .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
+            .First();
+    }
+
+    private static IReadOnlySet<string> GetRecordedCandidateFingerprints(SpotMaintenanceRecord? maintenance)
+    {
+        var excludedFingerprints = maintenance?.ApproachPoints
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(point => point.SourceCandidateFingerprint)
+            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? [];
+
+        foreach (var evidence in maintenance?.Evidence ?? [])
+        {
+            if (evidence.EventType == SpotEvidenceEventType.Reject
+                && !string.IsNullOrWhiteSpace(evidence.CandidateFingerprint))
+                excludedFingerprints.Add(evidence.CandidateFingerprint);
+        }
+
+        return excludedFingerprints;
+    }
+
+    private static IReadOnlyList<SpotCandidate> GetRelevantCandidates(SpotScanDocument scan)
+    {
+        if (scan.Candidates.Count == 0)
+            return [];
+
+        var hasTargetRangeMetadata = scan.Candidates.Any(candidate =>
+            candidate.IsWithinTargetSearchRadius || candidate.DistanceToTargetCenterMeters > 0f);
+        if (!hasTargetRangeMetadata)
+            return scan.Candidates;
+
+        return scan.Candidates
+            .Where(candidate => candidate.IsWithinTargetSearchRadius)
+            .ToList();
+    }
+
+    private static bool IsSelectableCandidate(SpotCandidate candidate)
+    {
+        return candidate.Status is not CandidateStatus.Ignored and not CandidateStatus.Quarantined
+            && !string.IsNullOrWhiteSpace(candidate.CandidateFingerprint);
+    }
+
+    private static bool CanUseCandidateSelection(CandidateSelection? selection)
+    {
+        return selection?.Mode is CandidateSelectionMode.FlyableDistance or CandidateSelectionMode.WalkReachable;
+    }
+
+    private void StartReachabilityProbe(
+        SpotKey targetKey,
+        Point3 playerPosition,
+        IReadOnlyList<SpotCandidate> candidates)
+    {
+        if (candidates.Count == 0)
+            return;
+
+        var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        int requestId;
+        lock (reachabilityLock)
+        {
+            reachabilityCancellation?.Cancel();
+            reachabilityCancellation?.Dispose();
+            reachabilityCancellation = cancellation;
+            requestId = ++reachabilityRequestId;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            var checkedCount = 0;
+            PathQueryResult? firstUnavailable = null;
+            foreach (var candidate in candidates)
+            {
+                if (cancellation.IsCancellationRequested)
+                    break;
+
+                checkedCount++;
+                var result = await navmeshQuery.QueryPathAsync(
+                    playerPosition.ToVector3(),
+                    candidate.Position.ToVector3(),
+                    fly: false,
+                    cancellation.Token).ConfigureAwait(false);
+                if (result.IsReachable)
+                {
+                    ApplyReachabilityProbeResult(
+                        requestId,
+                        targetKey,
+                        new CandidateSelection(
+                            candidate,
+                            CandidateSelectionMode.WalkReachable,
+                            false,
+                            result.PathLengthMeters,
+                            candidate.Position.HorizontalDistanceTo(playerPosition),
+                            candidate.DistanceToTargetCenterMeters,
+                            checkedCount,
+                            $"当前区域不能飞，已选择从角色当前位置可步行到达的候选。路径 {FormatNullableDistance(result.PathLengthMeters)}m。"));
+                    return;
+                }
+
+                if (result.Status == PathQueryStatus.Unavailable)
+                {
+                    firstUnavailable = result;
+                    break;
+                }
+            }
+
+            if (!cancellation.IsCancellationRequested)
+            {
+                var fallback = CurrentCandidateSelection;
+                if (fallback is not null && fallback.Mode == CandidateSelectionMode.WalkReachabilityPending)
+                {
+                    ApplyReachabilityProbeResult(
+                        requestId,
+                        targetKey,
+                        fallback with
+                        {
+                            Mode = firstUnavailable is null
+                                ? CandidateSelectionMode.NoReachableFallback
+                                : CandidateSelectionMode.NavmeshUnavailableFallback,
+                            CheckedCandidateCount = checkedCount,
+                            Note = firstUnavailable is null
+                                ? $"当前区域不能飞，已检查 {checkedCount} 个附近候选但没有可步行到达点，暂用默认候选。"
+                                : $"当前区域不能飞，但可达性检查中断：{firstUnavailable.Message}。已退回默认候选。",
+                        });
+                }
+            }
+        }, cancellation.Token);
+    }
+
+    private void ApplyReachabilityProbeResult(
+        int requestId,
+        SpotKey targetKey,
+        CandidateSelection selection)
+    {
+        _ = DService.Instance().Framework.RunOnTick(() =>
+        {
+            lock (reachabilityLock)
+            {
+                if (requestId != reachabilityRequestId)
+                    return;
+            }
+
+            if (CurrentTarget?.Key != targetKey || CurrentAnalysis is null)
+                return;
+
+            CurrentCandidateSelection = selection;
+            ReplaceAnalysis(CurrentAnalysis);
+        });
+    }
+
+    private void CancelReachabilityProbe()
+    {
+        lock (reachabilityLock)
+        {
+            reachabilityCancellation?.Cancel();
+            reachabilityCancellation?.Dispose();
+            reachabilityCancellation = null;
+            reachabilityRequestId++;
+        }
+    }
+
     private void SyncCurrentAnalysis()
     {
         if (CurrentTarget is null)
         {
             CurrentAnalysis = null;
             CurrentScan = null;
+            CurrentCandidateSelection = null;
             CurrentTargetBlocks = [];
             return;
         }
 
-        CurrentAnalysis = Analyses.FirstOrDefault(analysis => analysis.Key == CurrentTarget.Key);
-        CurrentScan = GetSpotScanForTarget(CurrentTarget, allowLegacyFallback: true);
+        var target = CurrentTarget!;
+        CurrentAnalysis = Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
+        CurrentScan = GetSpotScanForTarget(target, allowLegacyFallback: true);
         CurrentTargetBlocks = CurrentScan is null ? [] : BuildBlocksFromSpotCandidates(CurrentScan.Candidates);
         CurrentAnalysis = maintenanceAnalysisBuilder.Analyze(
-            CurrentTarget,
+            target,
             CurrentScan,
-            GetMaintenanceRecord(CurrentTarget.Key),
-            TryLoadLegacyReview(CurrentTarget.Key));
+            GetMaintenanceRecord(target.Key),
+            TryLoadLegacyReview(target.Key));
+        CurrentCandidateSelection = CurrentScan is null
+            ? null
+            : GetOrBuildCandidateSelection(target, CurrentScan);
         ReplaceAnalysis(CurrentAnalysis);
     }
 
@@ -1502,7 +1866,14 @@ internal sealed class SpotWorkflowSession
 
     private SpotScanDocument? EnsureScanForCurrentTarget()
     {
-        var scan = GetSpotScanForTarget(CurrentTarget!, allowLegacyFallback: true);
+        if (CurrentTarget is null)
+        {
+            CurrentCandidateSelection = null;
+            return null;
+        }
+
+        var target = CurrentTarget!;
+        var scan = GetSpotScanForTarget(target, allowLegacyFallback: true);
         if (scan is not null)
         {
             CurrentScan = scan;
@@ -1510,6 +1881,7 @@ internal sealed class SpotWorkflowSession
             return scan;
         }
 
+        CurrentCandidateSelection = null;
         return null;
     }
 
@@ -1648,6 +2020,7 @@ internal sealed class SpotWorkflowSession
 
     private void ClearCurrentTerritoryRuntimeState()
     {
+        CancelReachabilityProbe();
         CurrentTerritorySurvey = null;
         CurrentTerritoryBlocks = [];
         CurrentTerritoryTargets = [];
@@ -1658,6 +2031,7 @@ internal sealed class SpotWorkflowSession
         CurrentTarget = null;
         CurrentAnalysis = null;
         CurrentScan = null;
+        CurrentCandidateSelection = null;
         CurrentTargetBlocks = [];
         NearbyDebugOverlay = null;
         LastCastPlaceNameId = 0;

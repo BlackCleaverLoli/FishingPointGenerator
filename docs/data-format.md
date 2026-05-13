@@ -38,7 +38,7 @@ data/maintenance/territory_{territoryId}.json
 data/scans/territory_{territoryId}/spot_{fishingSpotId}.scan.json
 ```
 
-用途：旧版 spot 级候选点缓存，仅作为兼容回退。当前主流程使用 `data/generated/territory_{territoryId}.json` 的 Territory 全图缓存按需派生推荐候选，不再把 spot scan 文件作为长期维护数据。
+用途：旧版 spot 级候选点缓存，仅作为回退输入。当前主流程使用 `data/generated/territory_{territoryId}.json` 的 Territory 全图缓存按需派生候选，不再把 spot scan 文件作为长期维护数据。
 
 候选点使用稳定 fingerprint：
 
@@ -47,7 +47,7 @@ hash(territoryId, fishingSpotId, quantized position, quantized rotation)
 ```
 
 其中 position 按 0.5m 量化，rotation 按 0.05 rad 量化。`Position + Rotation` 是下游消费形态。候选点同时保留扫描期 `surfaceGroupId`，表示同一片 fishable 水面连通组件；抛竿自动点亮会优先在 seed 候选点的同一 `surfaceGroupId` 内沿候选点图连锁扩展。
-从全图缓存派生到单个钓场时，候选会记录 `distanceToTargetCenterMeters` 与 `isWithinTargetSearchRadius`。推荐和状态统计只看推荐范围内候选；抛竿自动点亮仍可使用全图候选作为实证兜底。
+从全图缓存派生到单个钓场时，候选会记录 `distanceToTargetCenterMeters` 与 `isWithinTargetSearchRadius`。状态统计和当前候选选择只看目标范围内候选；抛竿自动点亮仍可使用全图候选作为实证兜底。
 
 ## Legacy Label Ledger
 

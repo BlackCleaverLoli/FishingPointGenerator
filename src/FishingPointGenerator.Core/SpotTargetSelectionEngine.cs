@@ -2,7 +2,7 @@ using FishingPointGenerator.Core.Models;
 
 namespace FishingPointGenerator.Core;
 
-public sealed class SpotRecommendationEngine
+public sealed class SpotTargetSelectionEngine
 {
     public SpotAnalysis? PickNext(IEnumerable<SpotAnalysis> analyses)
     {
@@ -16,7 +16,6 @@ public sealed class SpotRecommendationEngine
                 SpotAnalysisStatus.MixedRisk or
                 SpotAnalysisStatus.WeakCoverage)
             .OrderBy(analysis => GetPriority(analysis.Status))
-            .ThenBy(analysis => analysis.RecommendedCandidate?.DistanceToTargetCenterMeters ?? float.MaxValue)
             .ThenBy(analysis => analysis.Key.TerritoryId)
             .ThenBy(analysis => analysis.Key.FishingSpotId)
             .FirstOrDefault();

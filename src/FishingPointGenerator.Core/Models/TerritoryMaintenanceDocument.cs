@@ -30,7 +30,7 @@ public enum ApproachPointStatus
 public enum ApproachPointSourceKind
 {
     Manual,
-    RecommendedCandidate,
+    Candidate,
     AutoCastFill,
     Imported,
 }
@@ -57,7 +57,6 @@ public enum SpotEvidenceEventType
 {
     ManualConfirm,
     AutoCastFill,
-    Mismatch,
     Reject,
     Review,
 }

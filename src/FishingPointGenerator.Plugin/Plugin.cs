@@ -22,14 +22,16 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg next - 选择下一个需要处理的目标\n"
         + "/fpg target <fishingSpotId> - 选择已选领地内的目标\n"
         + "/fpg scan - 扫描当前区域全图并缓存候选点\n"
-        + "/fpg scantarget - 从 Territory 缓存为已选目标派生推荐候选\n"
+        + "/fpg scantarget - 从 Territory 缓存为已选目标派生候选\n"
         + "/fpg debugnear [radius] - 只分析角色附近碰撞面，输出调试日志并显示 Fishable/Walkable overlay\n"
         + "/fpg debugcandidates [radius] [limit] - 输出已选钓场附近候选点、块和点亮范围调试日志\n"
         + "/fpg debugclear - 清除附近碰撞面调试 overlay\n"
         + "/fpg flag - 为已选钓场中心插旗\n"
-        + "/fpg flagstand - 为推荐点位插旗\n"
-        + "/fpg confirm - 确认已选目标的推荐\n"
-        + "/fpg mismatch - 记录此目标与推荐不匹配\n"
+        + "/fpg flagcandidate - 为当前候选插旗\n"
+        + "/fpg flagunrecorded - 为当前未记录候选点插旗\n"
+        + "/fpg refreshcandidate - 刷新当前候选选择\n"
+        + "/fpg confirm - 用玩家当前站位确认已选钓场\n"
+        + "/fpg rejectcandidate - 排除当前候选\n"
         + "/fpg allowweak - 允许已选目标以弱覆盖状态导出\n"
         + "/fpg allowrisk - 允许已选目标在风险复核后导出\n"
         + "/fpg ignore - 忽略已选目标\n"
@@ -209,8 +211,20 @@ public sealed class Plugin : IDalamudPlugin
                 Print(session.LastMessage);
                 break;
 
-            case "flagstand":
-                session.PlaceRecommendedStandingFlag();
+            case "flagcandidate":
+                session.PlaceSelectedCandidateFlag();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "flagunrecorded":
+                session.PlaceNearestUnrecordedCandidateFlag();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "refreshcandidate":
+                session.RefreshCandidateSelection();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;
@@ -247,19 +261,19 @@ public sealed class Plugin : IDalamudPlugin
                 }
 
                 if (session.SelectTarget(fishingSpotId))
-                    session.ConfirmRecommendation();
+                    session.ConfirmCurrentStanding();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;
 
             case "confirm":
-                session.ConfirmRecommendation();
+                session.ConfirmCurrentStanding();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;
 
-            case "mismatch":
-                session.RecordMismatch();
+            case "rejectcandidate":
+                session.RejectSelectedCandidate();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;
