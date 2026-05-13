@@ -404,7 +404,7 @@ internal sealed class SpotWorkflowSession
 
         var lines = new List<string>
         {
-            $"FPG candidate debug: territory={target.TerritoryId} spot={target.FishingSpotId} name=\"{target.Name}\" player=({FormatPoint(playerSnapshot.Position)}) radius={radiusMeters:F1} limit={limit} scanSource={scanSource} candidates={scan.Candidates.Count} relevant={scan.Candidates.Count(candidate => candidate.IsWithinTargetSearchRadius)} blocks={blocks.Count} nearby={nearby.Count} confirmed={confirmedFingerprints.Count} snap={snapDistance:F1} fillRange={fillRange:F1}",
+            $"FPG candidate debug: territory={target.TerritoryId} spot={target.FishingSpotId} name=\"{target.Name}\" player=({FormatPoint(playerSnapshot.Position)}) radius={radiusMeters:F1} limit={limit} scanSource={scanSource} candidates={scan.Candidates.Count} targetRange={scan.Candidates.Count(candidate => candidate.IsWithinTargetSearchRadius)} blocks={blocks.Count} nearby={nearby.Count} confirmed={confirmedFingerprints.Count} snap={snapDistance:F1} fillRange={fillRange:F1}",
         };
 
         if (selection is null)
@@ -1777,7 +1777,7 @@ internal sealed class SpotWorkflowSession
             playerSnapshot is null ? null : candidate.Position.HorizontalDistanceTo(playerSnapshot.Position),
             candidate.DistanceToTargetCenterMeters,
             candidates.Count,
-            "当前候选来自已过滤的领地内存候选。");
+            "当前候选来自领地内存候选；优先钓场范围内点，范围外点作为回退。");
     }
 
     private CandidateSelection? GetOrBuildCandidateSelection(
@@ -1800,8 +1800,7 @@ internal sealed class SpotWorkflowSession
         SpotMaintenanceRecord? maintenance)
     {
         var excludedFingerprints = GetRecordedCandidateFingerprints(maintenance);
-        var relevant = GetRelevantCandidates(scan);
-        return relevant
+        return scan.Candidates
             .Where(IsSelectableCandidate)
             .Where(candidate => !excludedFingerprints.Contains(candidate.CandidateFingerprint))
             .ToList();
@@ -1843,21 +1842,6 @@ internal sealed class SpotWorkflowSession
         }
 
         return excludedFingerprints;
-    }
-
-    private static IReadOnlyList<SpotCandidate> GetRelevantCandidates(SpotScanDocument scan)
-    {
-        if (scan.Candidates.Count == 0)
-            return [];
-
-        var hasTargetRangeMetadata = scan.Candidates.Any(candidate =>
-            candidate.IsWithinTargetSearchRadius || candidate.DistanceToTargetCenterMeters > 0f);
-        if (!hasTargetRangeMetadata)
-            return scan.Candidates;
-
-        return scan.Candidates
-            .Where(candidate => candidate.IsWithinTargetSearchRadius)
-            .ToList();
     }
 
     private static bool IsSelectableCandidate(SpotCandidate candidate)

@@ -33,8 +33,7 @@ public sealed class MaintenanceAnalysisBuilder
         }
 
         var confirmedCount = CountConfirmedPoints(maintenance);
-        var relevantCandidates = GetRelevantCandidates(scan);
-        var candidateCount = relevantCandidates.Count;
+        var candidateCount = scan?.Candidates.Count ?? 0;
         var hasMixedRisk = scan?.Candidates.Any(candidate =>
             candidate.NearbyFishingSpotIds.Any(id => id != 0 && id != target.FishingSpotId)) ?? false;
 
@@ -84,7 +83,7 @@ public sealed class MaintenanceAnalysisBuilder
             {
                 Key = target.Key,
                 Status = SpotAnalysisStatus.NoCandidate,
-                Messages = ["扫描已完成，但没有为此 FishingSpot 生成钓场范围内的候选点。"],
+                Messages = ["扫描已完成，但当前 Territory 内存候选为空。"],
             };
         }
 
@@ -107,20 +106,6 @@ public sealed class MaintenanceAnalysisBuilder
         return (decisions & flag) == flag;
     }
 
-    private static IReadOnlyList<SpotCandidate> GetRelevantCandidates(SpotScanDocument? scan)
-    {
-        if (scan is null || scan.Candidates.Count == 0)
-            return [];
-
-        var hasTargetRangeMetadata = scan.Candidates.Any(candidate =>
-            candidate.IsWithinTargetSearchRadius || candidate.DistanceToTargetCenterMeters > 0f);
-        if (!hasTargetRangeMetadata)
-            return scan.Candidates;
-
-        return scan.Candidates
-            .Where(candidate => candidate.IsWithinTargetSearchRadius)
-            .ToList();
-    }
 }
 
 public sealed record MaintenanceAnalysisOptions
