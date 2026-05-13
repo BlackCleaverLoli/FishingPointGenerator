@@ -42,7 +42,7 @@ internal sealed class LuminaFishingSpotCatalogBuilder
         if (spot.TerritoryType.RowId == 0 || ExcludedTerritoryIds.Contains(spot.TerritoryType.RowId))
             return false;
 
-        return spot.Item.Any(item => item.RowId != 0);
+        return true;
     }
 
     private static FishingSpotTarget? CreateTarget(FishingSpot spot)

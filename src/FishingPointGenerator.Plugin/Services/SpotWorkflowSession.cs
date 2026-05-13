@@ -80,7 +80,7 @@ internal sealed class SpotWorkflowSession
     public int TerritoryCandidateCount => CurrentTerritorySurvey?.Candidates.Count ?? 0;
     public int TerritoryBlockCount => CurrentTerritoryBlocks.Count;
     public int ConfirmedCount => CountStatus(SpotAnalysisStatus.Confirmed);
-    public int NeedsVisitCount => CountStatus(SpotAnalysisStatus.NeedsVisit);
+    public int MaintenanceNeededCount => Analyses.Count(IsMaintenanceStatus);
     public int NoCandidateCount => CountStatus(SpotAnalysisStatus.NoCandidate);
     public int MixedRiskCount => CountStatus(SpotAnalysisStatus.MixedRisk);
     public int IgnoredCount => CountStatus(SpotAnalysisStatus.Ignored);
@@ -1381,49 +1381,54 @@ internal sealed class SpotWorkflowSession
             .GroupBy(target => target.TerritoryId)
             .Select(group =>
             {
-                var targets = group.ToList();
+                var targets = group
+                    .OrderBy(target => target.FishingSpotId)
+                    .ToList();
                 var territoryName = targets.FirstOrDefault(target => !string.IsNullOrWhiteSpace(target.TerritoryName))?.TerritoryName ?? string.Empty;
                 savedMaintenance.TryGetValue(group.Key, out var maintenance);
-                var spots = maintenance?.Spots ?? [];
-                var confirmed = spots.Count(IsConfirmedForSummary);
-                var weak = spots.Count(IsWeakForSummary);
-                var ignored = spots.Count(spot => HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.IgnoreSpot));
-                var risk = spots.Count(spot => HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.NeedsManualReview));
-                var needsVisit = Math.Max(0, targets.Count - confirmed - weak - ignored);
+                var scan = surveyStore.LoadGeneratedSurvey(group.Key);
+                var analyses = targets
+                    .Select(target =>
+                    {
+                        var spot = maintenance?.Spots.FirstOrDefault(spot => spot.FishingSpotId == target.FishingSpotId);
+                        var spotScan = scan.Candidates.Count == 0 ? null : scanService.CreateSpotScan(target, Catalog.Spots, scan);
+                        return maintenanceAnalysisBuilder.Analyze(target, spotScan, spot, null);
+                    })
+                    .ToList();
+                var confirmed = analyses.Count(analysis => analysis.Status == SpotAnalysisStatus.Confirmed);
+                var weak = analyses.Count(analysis => analysis.Status == SpotAnalysisStatus.WeakCoverage);
+                var ignored = analyses.Count(analysis => analysis.Status == SpotAnalysisStatus.Ignored);
+                var risk = analyses.Count(analysis => analysis.Status == SpotAnalysisStatus.MixedRisk);
+                var needsMaintenance = analyses.Count(IsMaintenanceStatus);
 
                 return new TerritoryMaintenanceSummary(
                     group.Key,
                     territoryName,
                     targets.Count,
                     confirmed,
-                    needsVisit,
+                    needsMaintenance,
                     weak,
                     risk,
                     ignored,
-                    File.Exists(surveyStore.GetGeneratedSurveyPath(group.Key)),
+                    scan.Candidates.Count > 0,
                     group.Key == CurrentTerritoryId,
                     group.Key == SelectedTerritoryId);
             })
             .OrderByDescending(summary => summary.IsCurrentTerritory)
             .ThenByDescending(summary => summary.RiskCount)
-            .ThenByDescending(summary => summary.NeedsVisitCount)
+            .ThenByDescending(summary => summary.MaintenanceNeededCount)
             .ThenBy(summary => summary.TerritoryId)
             .ToList();
     }
 
-    private static bool IsConfirmedForSummary(SpotMaintenanceRecord spot)
+    private static bool IsMaintenanceStatus(SpotAnalysis analysis)
     {
-        var confirmed = spot.ApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed);
-        return confirmed >= 2
-            || (confirmed > 0 && HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.AllowWeakCoverageExport));
-    }
-
-    private static bool IsWeakForSummary(SpotMaintenanceRecord spot)
-    {
-        var confirmed = spot.ApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed);
-        return confirmed > 0
-            && confirmed < 2
-            && !HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.AllowWeakCoverageExport);
+        return analysis.Status is
+            SpotAnalysisStatus.NeedsScan or
+            SpotAnalysisStatus.NeedsVisit or
+            SpotAnalysisStatus.NoCandidate or
+            SpotAnalysisStatus.MixedRisk or
+            SpotAnalysisStatus.WeakCoverage;
     }
 
     private static SpotReviewDecision MergeReviewDecision(SpotReviewDecision existing, SpotReviewDecision added)
@@ -1888,7 +1893,7 @@ internal sealed record TerritoryMaintenanceSummary(
     string TerritoryName,
     int SpotCount,
     int ConfirmedCount,
-    int NeedsVisitCount,
+    int MaintenanceNeededCount,
     int WeakCoverageCount,
     int RiskCount,
     int IgnoredCount,

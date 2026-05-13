@@ -107,7 +107,7 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("领地");
         ImGui.TableSetupColumn("钓场");
         ImGui.TableSetupColumn("确认");
-        ImGui.TableSetupColumn("待访");
+        ImGui.TableSetupColumn("需维护");
         ImGui.TableSetupColumn("风险");
         ImGui.TableHeadersRow();
 
@@ -129,7 +129,7 @@ internal sealed class MainWindow : Window, IDisposable
             ImGui.TableNextColumn();
             ImGui.TextColored(summary.ConfirmedCount > 0 ? GoodText : MutedText, summary.ConfirmedCount.ToString());
             ImGui.TableNextColumn();
-            ImGui.TextColored(summary.NeedsVisitCount > 0 ? WarnText : MutedText, summary.NeedsVisitCount.ToString());
+            ImGui.TextColored(summary.MaintenanceNeededCount > 0 ? WarnText : MutedText, summary.MaintenanceNeededCount.ToString());
             ImGui.TableNextColumn();
             var riskCount = summary.RiskCount + summary.WeakCoverageCount;
             ImGui.TextColored(riskCount > 0 ? ErrorText : MutedText, riskCount.ToString());
@@ -356,7 +356,7 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TableNextRow();
         DrawCompactSummary("钓场", session.TargetCount.ToString(), MutedText);
         DrawCompactSummary("确认", session.ConfirmedCount.ToString(), session.ConfirmedCount > 0 ? GoodText : MutedText);
-        DrawCompactSummary("待访", session.NeedsVisitCount.ToString(), session.NeedsVisitCount > 0 ? WarnText : MutedText);
+        DrawCompactSummary("需维护", session.MaintenanceNeededCount.ToString(), session.MaintenanceNeededCount > 0 ? WarnText : MutedText);
         DrawCompactSummary("风险", (session.MixedRiskCount + session.WeakCoverageCount).ToString(),
             session.MixedRiskCount + session.WeakCoverageCount > 0 ? ErrorText : MutedText);
 

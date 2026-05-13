@@ -10,13 +10,13 @@
 data/catalog/fishing_spots.json
 ```
 
-用途：从 Lumina `FishingSpot` 表生成长期目标清单。维护主键是：
+用途：从 Lumina `FishingSpot` 表生成长期目标清单。筛选口径对齐 MissFisher 传送索引：`PlaceName.RowId != 0`、`TerritoryType.RowId > 0`，并排除 territory `900`、`1163`；不要求 `Item` 列表非空。维护主键是：
 
 ```text
 SpotKey = (territoryId, fishingSpotId)
 ```
 
-每个 target 保存 `fishingSpotId`、名称、territory、map/world 坐标、radius、itemIds、catalogVersion 和 sourceGameDataVersion。默认跳过无有效 Item 的钓场，并排除 territory `900`、`1163`。
+每个 target 保存 `fishingSpotId`、名称、territory、map/world 坐标、radius、itemIds、catalogVersion 和 sourceGameDataVersion。`itemIds` 仅用于参考，空列表不影响钓场进入维护目录。
 
 ## Maintenance
 

@@ -7,7 +7,7 @@
 1. 进入需要采集的地图。
 2. 运行 `/fpg catalog` 生成或刷新 Lumina `FishingSpot` 目录。
 3. 运行 `/fpg refresh` 读取当前 territory 的钓场目标。
-4. 在 UI 左侧领地抽屉选择 Territory，再在钓场列表中选择目标；也可运行 `/fpg next` 选择下一个需要维护的钓场。
+4. 在 UI 左侧领地抽屉选择 Territory，再在钓场列表中选择目标；也可运行 `/fpg next` 选择下一个需要维护的钓场。领地抽屉由可维护 FishingSpot 目录按 Territory 推导，`需维护` 统计来自每个钓场的分析状态。
 5. 运行 `/fpg scan` 重扫当前 Territory 全图候选点。
 6. 运行 `/fpg scantarget`，或在 UI 中为已选 `SpotKey` 从 Territory 缓存派生推荐候选。
 7. UI 显示真实可钓点列表、推荐点位、朝向和当前状态；overlay 的短线表示该点位记录的 `Rotation`。
