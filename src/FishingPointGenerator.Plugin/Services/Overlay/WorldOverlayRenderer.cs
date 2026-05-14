@@ -241,11 +241,12 @@ internal sealed unsafe class WorldOverlayRenderer
                 WalkableDebugHatchColor,
                 WalkableDebugTextColor);
 
+        var candidateDrawn = DrawNearbyDebugCandidates(drawList, debug.Candidates, playerPosition, drawDistance, limit);
         if (TryWorldToScreen(debug.PlayerPosition + new Vector3(0f, 3f, 0f), out var screen))
             drawList.AddText(
                 screen,
                 FishableDebugTextColor,
-                $"FPG surfaces water {fishableDrawn}/{debug.FishableTriangles.Count} walk {walkableDrawn}/{debug.WalkableTriangles.Count} r={debug.RadiusMeters:F0}m");
+                $"FPG surfaces water {fishableDrawn}/{debug.FishableTriangles.Count} walk {walkableDrawn}/{debug.WalkableTriangles.Count} cand {candidateDrawn}/{debug.Candidates.Count} r={debug.RadiusMeters:F0}m");
     }
 
     private int DrawSurfaceDebugSet(
@@ -299,6 +300,51 @@ internal sealed unsafe class WorldOverlayRenderer
         }
 
         return triangles.Count;
+    }
+
+    private int DrawNearbyDebugCandidates(
+        ImDrawListPtr drawList,
+        IReadOnlyList<ApproachCandidate> source,
+        Vector3 playerPosition,
+        float drawDistance,
+        int candidateLimit)
+    {
+        if (source.Count == 0)
+            return 0;
+
+        var playerPoint = Point3.From(playerPosition);
+        var candidates = source
+            .Select(candidate => new
+            {
+                Candidate = candidate,
+                Distance = candidate.Position.HorizontalDistanceTo(playerPoint),
+            })
+            .Where(item => item.Distance <= drawDistance)
+            .OrderBy(item => item.Distance)
+            .ThenBy(item => item.Candidate.CandidateId, StringComparer.Ordinal)
+            .Take(candidateLimit)
+            .ToList();
+
+        var labelCount = 0;
+        foreach (var item in candidates)
+        {
+            var candidate = item.Candidate;
+            var standing = ToVector3(candidate.Position);
+            DrawFacingGuide(drawList, standing, candidate.Rotation, WarningColor);
+            DrawWorldPoint(drawList, standing, 3f, WarningColor, true);
+
+            if (labelCount < MaxCandidateLabels)
+            {
+                DrawWorldText(
+                    drawList,
+                    standing + new Vector3(0f, 1.6f, 0f),
+                    $"near {ShortId(candidate.CandidateId)} {ShortBlockId(candidate.BlockId)} {candidate.Status}",
+                    WarningColor);
+                labelCount++;
+            }
+        }
+
+        return candidates.Count;
     }
 
     private void DrawTerritoryCache(

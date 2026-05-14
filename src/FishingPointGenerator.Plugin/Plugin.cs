@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
@@ -9,6 +10,7 @@ using FishingPointGenerator.Plugin.Services.Overlay;
 using FishingPointGenerator.Plugin.Services.Scanning;
 using FishingPointGenerator.Plugin.Windows;
 using OmenTools;
+using System.Text.Json;
 
 namespace FishingPointGenerator.Plugin;
 
@@ -52,6 +54,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly MainWindow mainWindow;
     private readonly SpotWorkflowSession session;
     private readonly FishingCastMonitor castMonitor;
+    private readonly PluginConfiguration configuration;
     private bool disposed;
 
     public Plugin(IDalamudPluginInterface pluginInterface, IPluginLog pluginLog)
@@ -62,7 +65,8 @@ public sealed class Plugin : IDalamudPlugin
         DService.Init(pluginInterface);
 
         var paths = new PluginPaths(pluginInterface);
-        session = new SpotWorkflowSession(paths, new VnavmeshSceneScanner(pluginLog));
+        configuration = LoadConfiguration(paths);
+        session = new SpotWorkflowSession(paths, new VnavmeshSceneScanner(pluginLog), configuration, SaveConfiguration);
         castMonitor = new FishingCastMonitor(session, pluginLog);
         mainWindow = new MainWindow(session);
         mainWindow.IsOpen = true;
@@ -96,12 +100,67 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleMainUi;
         DService.Instance().ClientState.TerritoryChanged -= OnTerritoryChanged;
 
-        session.StopAutoSurvey();
+        session.Dispose();
         castMonitor.Dispose();
         windowSystem.RemoveAllWindows();
         mainWindow.Dispose();
 
         DService.Uninit();
+    }
+
+    private PluginConfiguration LoadConfiguration(PluginPaths paths)
+    {
+        var loaded = pluginInterface.GetPluginConfig() as PluginConfiguration;
+        var legacyConfiguration = loaded is null ? LoadLegacyConfiguration(paths.RootDirectory) : null;
+        var result = loaded ?? legacyConfiguration ?? new PluginConfiguration();
+        if (result.Version < PluginConfiguration.CurrentVersion)
+            result.Version = PluginConfiguration.CurrentVersion;
+
+        if (loaded is null || result.Version != loaded.Version)
+            pluginInterface.SavePluginConfig(result);
+
+        if (loaded is not null || legacyConfiguration is not null)
+            TryDeleteLegacyConfiguration(paths.RootDirectory);
+
+        return result;
+    }
+
+    private static PluginConfiguration? LoadLegacyConfiguration(string rootDirectory)
+    {
+        var legacyPath = Path.Combine(rootDirectory, "ui_settings.json");
+        if (!File.Exists(legacyPath))
+            return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<PluginConfiguration>(
+                File.ReadAllText(legacyPath),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void TryDeleteLegacyConfiguration(string rootDirectory)
+    {
+        var legacyPath = Path.Combine(rootDirectory, "ui_settings.json");
+        if (!File.Exists(legacyPath))
+            return;
+
+        try
+        {
+            File.Delete(legacyPath);
+        }
+        catch
+        {
+        }
+    }
+
+    private void SaveConfiguration()
+    {
+        pluginInterface.SavePluginConfig(configuration);
     }
 
     private void DrawUi()

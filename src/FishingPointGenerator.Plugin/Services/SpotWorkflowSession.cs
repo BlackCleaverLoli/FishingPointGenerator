@@ -8,10 +8,11 @@ using Lumina.Excel.Sheets;
 using OmenTools;
 using System.Numerics;
 using System.Threading;
+using Action = System.Action;
 
 namespace FishingPointGenerator.Plugin.Services;
 
-internal sealed class SpotWorkflowSession
+internal sealed class SpotWorkflowSession : IDisposable
 {
     private const float MinimumCastBlockSnapDistance = 1f;
     private const float MaximumCastBlockSnapDistance = 50f;
@@ -34,14 +35,37 @@ internal sealed class SpotWorkflowSession
     private readonly SurveyBlockBuilder blockBuilder;
     private readonly SpotScanService scanService;
     private readonly VnavmeshQueryService navmeshQuery = new();
+    private readonly PluginConfiguration configuration;
+    private readonly Action saveConfiguration;
     private readonly AutoSurveyRunner autoSurveyRunner;
     private Task<TerritoryScanWorkResult>? territoryScanTask;
     private CancellationTokenSource? territoryScanCancellation;
     private bool territoryScanCancelMessageRequested;
     private int territoryScanGeneration;
+    private bool disposed;
+    private bool autoRecordCastsEnabled = true;
+    private bool overlayEnabled = true;
+    private bool overlayShowCandidates = true;
+    private bool overlayShowTerritoryCache = true;
+    private bool overlayShowTargetRadius = true;
+    private bool overlayShowFishableDebug = true;
+    private bool overlayShowWalkableDebug = true;
+    private float castBlockSnapDistanceMeters = 6f;
+    private float castBlockFillRangeMeters = 120f;
+    private float overlayMaxDistanceMeters = 90f;
+    private int overlayCandidateLimit = 160;
 
-    public SpotWorkflowSession(PluginPaths paths, ICurrentTerritoryScanner scanner)
+    public SpotWorkflowSession(
+        PluginPaths paths,
+        ICurrentTerritoryScanner scanner,
+        PluginConfiguration configuration,
+        Action saveConfiguration)
     {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(saveConfiguration);
+
+        this.configuration = configuration;
+        this.saveConfiguration = saveConfiguration;
         store = new SpotJsonStore(paths.RootDirectory);
         maintenanceStore = new TerritoryMaintenanceStore(paths.RootDirectory);
         blockBuilder = new SurveyBlockBuilder(blockOptions);
@@ -50,6 +74,7 @@ internal sealed class SpotWorkflowSession
         autoSurveyRunner = new AutoSurveyRunner(this, navmeshQuery, new PlayerFishingActionService());
         DataRoot = paths.DataDirectory;
         ScannerName = geometryCache.ScannerName;
+        ApplyUiSettings(configuration);
     }
 
     public string DataRoot { get; }
@@ -69,17 +94,148 @@ internal sealed class SpotWorkflowSession
     public SpotScanDocument? CurrentScan { get; private set; }
     public CandidateSelection? CurrentCandidateSelection { get; private set; }
     public string LastMessage { get; private set; } = "就绪。";
-    public bool AutoRecordCastsEnabled { get; set; } = true;
-    public bool OverlayEnabled { get; set; } = true;
-    public bool OverlayShowCandidates { get; set; } = true;
-    public bool OverlayShowTerritoryCache { get; set; } = true;
-    public bool OverlayShowTargetRadius { get; set; } = true;
-    public bool OverlayShowFishableDebug { get; set; } = true;
-    public bool OverlayShowWalkableDebug { get; set; } = true;
-    public float CastBlockSnapDistanceMeters { get; set; } = 6f;
-    public float CastBlockFillRangeMeters { get; set; } = 120f;
-    public float OverlayMaxDistanceMeters { get; set; } = 90f;
-    public int OverlayCandidateLimit { get; set; } = 160;
+    public bool AutoRecordCastsEnabled
+    {
+        get => autoRecordCastsEnabled;
+        set
+        {
+            if (autoRecordCastsEnabled == value)
+                return;
+
+            autoRecordCastsEnabled = value;
+            PersistUiSettings();
+        }
+    }
+
+    public bool OverlayEnabled
+    {
+        get => overlayEnabled;
+        set
+        {
+            if (overlayEnabled == value)
+                return;
+
+            overlayEnabled = value;
+            PersistUiSettings();
+        }
+    }
+
+    public bool OverlayShowCandidates
+    {
+        get => overlayShowCandidates;
+        set
+        {
+            if (overlayShowCandidates == value)
+                return;
+
+            overlayShowCandidates = value;
+            PersistUiSettings();
+        }
+    }
+
+    public bool OverlayShowTerritoryCache
+    {
+        get => overlayShowTerritoryCache;
+        set
+        {
+            if (overlayShowTerritoryCache == value)
+                return;
+
+            overlayShowTerritoryCache = value;
+            PersistUiSettings();
+        }
+    }
+
+    public bool OverlayShowTargetRadius
+    {
+        get => overlayShowTargetRadius;
+        set
+        {
+            if (overlayShowTargetRadius == value)
+                return;
+
+            overlayShowTargetRadius = value;
+            PersistUiSettings();
+        }
+    }
+
+    public bool OverlayShowFishableDebug
+    {
+        get => overlayShowFishableDebug;
+        set
+        {
+            if (overlayShowFishableDebug == value)
+                return;
+
+            overlayShowFishableDebug = value;
+            PersistUiSettings();
+        }
+    }
+
+    public bool OverlayShowWalkableDebug
+    {
+        get => overlayShowWalkableDebug;
+        set
+        {
+            if (overlayShowWalkableDebug == value)
+                return;
+
+            overlayShowWalkableDebug = value;
+            PersistUiSettings();
+        }
+    }
+
+    public float CastBlockSnapDistanceMeters
+    {
+        get => castBlockSnapDistanceMeters;
+        set
+        {
+            if (castBlockSnapDistanceMeters == value)
+                return;
+
+            castBlockSnapDistanceMeters = value;
+            PersistUiSettings();
+        }
+    }
+
+    public float CastBlockFillRangeMeters
+    {
+        get => castBlockFillRangeMeters;
+        set
+        {
+            if (castBlockFillRangeMeters == value)
+                return;
+
+            castBlockFillRangeMeters = value;
+            PersistUiSettings();
+        }
+    }
+
+    public float OverlayMaxDistanceMeters
+    {
+        get => overlayMaxDistanceMeters;
+        set
+        {
+            if (overlayMaxDistanceMeters == value)
+                return;
+
+            overlayMaxDistanceMeters = value;
+            PersistUiSettings();
+        }
+    }
+
+    public int OverlayCandidateLimit
+    {
+        get => overlayCandidateLimit;
+        set
+        {
+            if (overlayCandidateLimit == value)
+                return;
+
+            overlayCandidateLimit = value;
+            PersistUiSettings();
+        }
+    }
     public uint LastCastPlaceNameId { get; private set; }
     public uint LastCastFishingSpotId { get; private set; }
     public int LastCastRecordedCount { get; private set; }
@@ -117,6 +273,59 @@ internal sealed class SpotWorkflowSession
     public string AutoSurveyStatusText => autoSurveyRunner.StatusText;
     public string AutoSurveyCandidateText => autoSurveyRunner.CurrentCandidateText;
     public int AutoSurveyCompletedRounds => autoSurveyRunner.CompletedRounds;
+
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+
+        disposed = true;
+        autoSurveyRunner.Stop("自动点亮已因插件卸载停止。");
+        ClearCurrentTerritoryRuntimeState();
+        ReleaseTerritoryScanTask();
+        TerritorySummaries = [];
+        Catalog = new();
+    }
+
+    private void ApplyUiSettings(PluginConfiguration settings)
+    {
+        autoRecordCastsEnabled = settings.AutoRecordCastsEnabled;
+        overlayEnabled = settings.OverlayEnabled;
+        overlayShowCandidates = settings.OverlayShowCandidates;
+        overlayShowTerritoryCache = settings.OverlayShowTerritoryCache;
+        overlayShowTargetRadius = settings.OverlayShowTargetRadius;
+        overlayShowFishableDebug = settings.OverlayShowFishableDebug;
+        overlayShowWalkableDebug = settings.OverlayShowWalkableDebug;
+        castBlockSnapDistanceMeters = settings.CastBlockSnapDistanceMeters;
+        castBlockFillRangeMeters = settings.CastBlockFillRangeMeters;
+        overlayMaxDistanceMeters = settings.OverlayMaxDistanceMeters;
+        overlayCandidateLimit = settings.OverlayCandidateLimit;
+    }
+
+    private void PersistUiSettings()
+    {
+        if (disposed)
+            return;
+
+        try
+        {
+            configuration.AutoRecordCastsEnabled = autoRecordCastsEnabled;
+            configuration.OverlayEnabled = overlayEnabled;
+            configuration.OverlayShowCandidates = overlayShowCandidates;
+            configuration.OverlayShowTerritoryCache = overlayShowTerritoryCache;
+            configuration.OverlayShowTargetRadius = overlayShowTargetRadius;
+            configuration.OverlayShowFishableDebug = overlayShowFishableDebug;
+            configuration.OverlayShowWalkableDebug = overlayShowWalkableDebug;
+            configuration.CastBlockSnapDistanceMeters = castBlockSnapDistanceMeters;
+            configuration.CastBlockFillRangeMeters = castBlockFillRangeMeters;
+            configuration.OverlayMaxDistanceMeters = overlayMaxDistanceMeters;
+            configuration.OverlayCandidateLimit = overlayCandidateLimit;
+            saveConfiguration();
+        }
+        catch
+        {
+        }
+    }
 
     public void RefreshCatalog()
     {
@@ -213,6 +422,9 @@ internal sealed class SpotWorkflowSession
 
     public void HandleTerritoryChanged(uint territoryId)
     {
+        if (disposed)
+            return;
+
         autoSurveyRunner.Stop("自动点亮已因切图停止。");
         ClearCurrentTerritoryRuntimeState();
         RefreshCurrentTerritory(selectNext: true);
@@ -321,6 +533,9 @@ internal sealed class SpotWorkflowSession
 
     public void PollBackgroundOperations()
     {
+        if (disposed)
+            return;
+
         var task = territoryScanTask;
         if (task is null || !task.IsCompleted)
         {
@@ -699,6 +914,9 @@ internal sealed class SpotWorkflowSession
 
     public bool RecordCastFill(uint castPlaceNameId)
     {
+        if (disposed)
+            return false;
+
         LastCastPlaceNameId = castPlaceNameId;
         LastCastFishingSpotId = 0;
         LastCastRecordedCount = 0;
@@ -1795,7 +2013,10 @@ internal sealed class SpotWorkflowSession
 
             var rawCandidates = scannedSurvey.Candidates.Count;
             progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {rawCandidates} 个候选构建块。"));
-            var blocks = blockBuilder.BuildBlocks(scannedSurvey.Candidates);
+            var blocks = blockBuilder.BuildBlocks(
+                scannedSurvey.Candidates,
+                CreateBlockBuildProgressAdapter(progress, "分块", "初次分块："),
+                cancellationToken);
             var blockedSurvey = scannedSurvey with
             {
                 Candidates = blocks.SelectMany(block => block.Candidates).ToList(),
@@ -1814,14 +2035,22 @@ internal sealed class SpotWorkflowSession
                 return new TerritoryScanWorkResult(false, null, [], reachability.Message);
 
             cancellationToken.ThrowIfCancellationRequested();
-            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {reachability.Survey.Candidates.Count} 个可用候选重建块。"));
-            var filteredBlocks = blockBuilder.BuildBlocks(reachability.Survey.Candidates);
+            var filteredCandidateLabel = reachability.Survey.ReachabilityMode == SurveyReachabilityMode.NotChecked
+                ? "缓存候选"
+                : "可用候选";
+            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {reachability.Survey.Candidates.Count} 个{filteredCandidateLabel}重建块。"));
+            var filteredBlocks = blockBuilder.BuildBlocks(
+                reachability.Survey.Candidates,
+                CreateBlockBuildProgressAdapter(progress, "分块", $"{filteredCandidateLabel}重分块："),
+                cancellationToken);
             var finalSurvey = reachability.Survey with
             {
                 Candidates = filteredBlocks.SelectMany(block => block.Candidates).ToList(),
-                ReachableCandidateCount = filteredBlocks.Sum(block => block.Candidates.Count),
+                ReachableCandidateCount = reachability.Survey.ReachabilityMode == SurveyReachabilityMode.NotChecked
+                    ? reachability.Survey.ReachableCandidateCount
+                    : filteredBlocks.Sum(block => block.Candidates.Count),
             };
-            var message = $"已扫描区域 {finalSurvey.TerritoryId}：原始 {finalSurvey.RawCandidateCount} 个，可用 {finalSurvey.Candidates.Count} 个，丢弃不可达 {finalSurvey.UnreachableCandidateCount} 个，{filteredBlocks.Count} 个块。{finalSurvey.ReachabilityNote}";
+            var message = $"已扫描区域 {finalSurvey.TerritoryId}：原始 {finalSurvey.RawCandidateCount} 个，缓存 {finalSurvey.Candidates.Count} 个，丢弃不可达 {finalSurvey.UnreachableCandidateCount} 个，{filteredBlocks.Count} 个块。{finalSurvey.ReachabilityNote}";
             progress.Report(new TerritoryScanProgress("完成", 1, 1, message));
             return new TerritoryScanWorkResult(true, finalSurvey, filteredBlocks, message);
         }
@@ -1832,6 +2061,29 @@ internal sealed class SpotWorkflowSession
         catch (Exception ex)
         {
             return new TerritoryScanWorkResult(false, null, [], $"扫描当前区域失败：{ex.Message}");
+        }
+    }
+
+    private static IProgress<SurveyBlockBuildProgress> CreateBlockBuildProgressAdapter(
+        IProgress<TerritoryScanProgress> progress,
+        string stage,
+        string prefix)
+    {
+        return new BlockBuildProgressAdapter(progress, stage, prefix);
+    }
+
+    private sealed class BlockBuildProgressAdapter(
+        IProgress<TerritoryScanProgress> progress,
+        string stage,
+        string prefix) : IProgress<SurveyBlockBuildProgress>
+    {
+        public void Report(SurveyBlockBuildProgress value)
+        {
+            progress.Report(new TerritoryScanProgress(
+                stage,
+                value.Current,
+                value.Total,
+                $"{prefix}{value.Message}"));
         }
     }
 
@@ -1907,6 +2159,12 @@ internal sealed class SpotWorkflowSession
             if (unavailable1 > 0)
                 return new TerritoryReachabilityResult(false, null, $"当前区域可飞，mesh 可达性检查中有 {unavailable1} 个候选无法查询；为避免保留不完整候选，本次扫描未更新内存候选。");
 
+            if (reachable1.Count == 0)
+                return CreateUncheckedReachabilityFallback(
+                    survey,
+                    rawCandidateCount,
+                    $"当前区域已解锁飞行，但 vnavmesh reachable mesh 检查没有保留任何候选；已保留几何扫描候选 {survey.Candidates.Count} 个，后续按人工抛竿确认。");
+
             progress.Report(new TerritoryScanProgress("可达性", survey.Candidates.Count, survey.Candidates.Count, $"飞行落点 mesh 检查完成，保留 {reachable1.Count} 个候选。"));
             return new TerritoryReachabilityResult(
                 true,
@@ -1967,6 +2225,12 @@ internal sealed class SpotWorkflowSession
         if (unavailable > 0)
             return new TerritoryReachabilityResult(false, null, $"当前区域不能飞，可达性检查中有 {unavailable} 个候选无法查询；为避免保留不完整候选，本次扫描未更新内存候选。");
 
+        if (reachable.Count == 0)
+            return CreateUncheckedReachabilityFallback(
+                survey,
+                rawCandidateCount,
+                $"当前区域不能飞，但从角色当前位置未找到可达候选；已保留几何扫描候选 {survey.Candidates.Count} 个，后续按人工抛竿确认。");
+
         progress.Report(new TerritoryScanProgress("可达性", survey.Candidates.Count, survey.Candidates.Count, $"步行可达性检查完成，保留 {reachable.Count} 个候选。"));
         return new TerritoryReachabilityResult(
             true,
@@ -1979,6 +2243,31 @@ internal sealed class SpotWorkflowSession
                 UnreachableCandidateCount = unreachable,
                 ReachabilityNote = $"当前区域不能飞，已从角色位置检查步行路径，保留可达候选 {reachable.Count} 个。",
                 Candidates = reachable,
+            },
+            string.Empty);
+    }
+
+    private static TerritoryReachabilityResult CreateUncheckedReachabilityFallback(
+        TerritorySurveyDocument survey,
+        int rawCandidateCount,
+        string note)
+    {
+        return new TerritoryReachabilityResult(
+            true,
+            survey with
+            {
+                ReachabilityMode = SurveyReachabilityMode.NotChecked,
+                RawCandidateCount = rawCandidateCount,
+                ReachableCandidateCount = 0,
+                UnreachableCandidateCount = 0,
+                ReachabilityNote = note,
+                Candidates = survey.Candidates
+                    .Select(candidate => candidate with
+                    {
+                        Reachability = CandidateReachability.Unknown,
+                        PathLengthMeters = null,
+                    })
+                    .ToList(),
             },
             string.Empty);
     }
@@ -2535,6 +2824,45 @@ internal sealed class SpotWorkflowSession
         TerritoryScanProgress = new TerritoryScanProgress("取消", 0, 1, "正在取消后台扫描。");
         if (setMessage)
             LastMessage = "正在取消后台扫描。";
+    }
+
+    private void ReleaseTerritoryScanTask()
+    {
+        var task = territoryScanTask;
+        var cancellation = territoryScanCancellation;
+
+        territoryScanTask = null;
+        territoryScanCancellation = null;
+        territoryScanCancelMessageRequested = false;
+        TerritoryScanProgress = null;
+        Interlocked.Increment(ref territoryScanGeneration);
+
+        if (task is null)
+        {
+            cancellation?.Dispose();
+            return;
+        }
+
+        if (task.IsCompleted)
+        {
+            if (task.IsFaulted)
+                _ = task.Exception;
+
+            cancellation?.Dispose();
+            return;
+        }
+
+        _ = task.ContinueWith(
+            completed =>
+            {
+                if (completed.IsFaulted)
+                    _ = completed.Exception;
+
+                cancellation?.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private void SetCurrentTerritorySurvey(TerritorySurveyDocument? survey)
