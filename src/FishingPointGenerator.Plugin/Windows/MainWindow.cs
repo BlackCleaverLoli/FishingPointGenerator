@@ -508,6 +508,8 @@ internal sealed class MainWindow : Window, IDisposable
             session.ScanCurrentTarget();
         if (FlowActionButton("刷新候选", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
             session.RefreshCandidateSelection();
+        if (FlowActionButton("传送水晶", !hasTarget, ref actionLine))
+            session.TeleportToCurrentTargetAetheryte();
         if (FlowActionButton("插旗钓场", !hasTarget || !sameTerritory, ref actionLine))
             session.PlaceCurrentTargetFlag();
         if (FlowActionButton("插旗候选", !actionableCandidateSelection || !sameTerritory, ref actionLine))

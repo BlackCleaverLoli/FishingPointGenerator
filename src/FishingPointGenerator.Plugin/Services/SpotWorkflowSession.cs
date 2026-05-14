@@ -606,6 +606,23 @@ internal sealed class SpotWorkflowSession
         LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的钓场中心插旗。";
     }
 
+    public void TeleportToCurrentTargetAetheryte()
+    {
+        if (!EnsureCurrentTarget())
+            return;
+
+        var target = CurrentTarget!;
+        if (!AetheryteTeleporter.TryTeleportToNearestAetheryte(target, out var destination, out var error))
+        {
+            LastMessage = error;
+            return;
+        }
+
+        LastMessage =
+            $"已发起传送到 FishingSpot {target.FishingSpotId} 附近以太之光："
+            + $"{destination.AetheryteId} {destination.Name}，地图距离约 {destination.MapDistance:F1}。";
+    }
+
     public void PlaceSelectedCandidateFlag()
     {
         if (!EnsureCandidateSelection(out _, out var candidate, requireActionable: true))

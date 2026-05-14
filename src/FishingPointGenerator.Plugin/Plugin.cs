@@ -27,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg debugcandidates [radius] [limit] - 输出已选钓场附近候选点、块和点亮范围调试日志\n"
         + "/fpg debugclear - 清除附近碰撞面调试 overlay\n"
         + "/fpg flag - 为已选钓场中心插旗\n"
+        + "/fpg tp - 传送到已选钓场附近已共鸣以太之光\n"
         + "/fpg flagcandidate - 为当前候选插旗\n"
         + "/fpg flagunrecorded - 为当前未记录候选点插旗\n"
         + "/fpg refreshcandidate - 刷新当前候选选择\n"
@@ -215,6 +216,13 @@ public sealed class Plugin : IDalamudPlugin
 
             case "flag":
                 session.PlaceCurrentTargetFlag();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "tp":
+            case "teleport":
+                session.TeleportToCurrentTargetAetheryte();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;

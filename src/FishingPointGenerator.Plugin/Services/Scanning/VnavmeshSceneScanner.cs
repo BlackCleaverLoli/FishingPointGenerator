@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Plugin.Services;
 using FishingPointGenerator.Core.Geometry;
@@ -14,7 +15,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float MaximumCandidateDistanceFromFishableSurface = 2f;
     private const float FishableCoverageSatisfiedDistance = 2f;
     private const float FishableCoverageTargetKeyCellSize = 0.5f;
-    private const float OpenWalkableClearanceMeters = 5f;
+    private const float WalkableStandingClearanceMeters = 2.2f;
+    private const float OpenFishableClearanceMeters = 5f;
     private const float WalkableFishableMinimumVerticalDelta = 0.05f;
     private const float ProbeCacheCellSize = 0.25f;
     private const float CandidateCoverageCellSize = 2f;
@@ -31,6 +33,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float FacingDirectionDedupeRadians = 0.05f;
     private const float CandidateSightStartHeight = 1.2f;
     private const float CandidateSightTargetHeight = 0.05f;
+    private const float SightLineBlockerHorizontalBuffer = 1f;
     private const float SightLineIntersectionEpsilon = 0.001f;
     private const float SightLineCacheCellSize = 0.05f;
     private const float DebugCellSize = 10f;
@@ -238,7 +241,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         }
 
         progress?.Report(new TerritoryScanProgress("生成候选", 2, 4, $"fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} blockers={sightLineBlockerTriangles.Count}，正在生成候选。"));
-        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles, progress, cancellationToken);
+        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles, progress, cancellationToken, pluginLog);
         cancellationToken.ThrowIfCancellationRequested();
         pluginLog.Information(
             "FPG 场景扫描完成。Territory={TerritoryId}, fishableTriangles={FishableCount}, walkableTriangles={WalkableCount}, sightLineBlockers={SightLineBlockers}, candidates={CandidateCount}",
@@ -275,21 +278,28 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> sightLineBlockerTriangles,
         IProgress<TerritoryScanProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IPluginLog? log = null)
     {
+        var totalStopwatch = Stopwatch.StartNew();
+        var diagnostics = log is null
+            ? null
+            : new CandidateGenerationDiagnostics(log, territoryId, fishableTriangles.Count, walkableTriangles.Count, sightLineBlockerTriangles.Count);
         var candidateKeys = new HashSet<CandidateKey>();
         var candidates = new List<CandidateScratch>();
 
-        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles, candidateKeys, candidates, progress, cancellationToken);
+        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles, candidateKeys, candidates, progress, cancellationToken, diagnostics);
 
-        return candidates
+        var orderStopwatch = Stopwatch.StartNew();
+        var orderedCandidates = candidates
             .OrderBy(candidate => candidate.Position.X)
             .ThenBy(candidate => candidate.Position.Z)
             .ThenBy(candidate => candidate.Rotation)
             .Take(MaxCandidates)
-            .OrderBy(candidate => candidate.Position.X)
-            .ThenBy(candidate => candidate.Position.Z)
-            .ThenBy(candidate => candidate.Rotation)
+            .ToList();
+        diagnostics?.LogStep("order-candidates", orderStopwatch, $"input={candidates.Count} output={orderedCandidates.Count}");
+
+        var result = orderedCandidates
             .Select((candidate, index) => new ApproachCandidate
             {
                 CandidateId = $"scene_{territoryId}_{index + 1:D5}",
@@ -300,6 +310,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 Status = CandidateStatus.Unlabeled,
             })
             .ToList();
+        diagnostics?.LogSummary(totalStopwatch, result.Count);
+        return result;
     }
 
     private static Dictionary<EdgeKey, BoundaryEdgeBucket> BuildEdgeBuckets(
@@ -354,18 +366,38 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         HashSet<CandidateKey> candidateKeys,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CandidateGenerationDiagnostics? diagnostics)
     {
+        var stepStopwatch = Stopwatch.StartNew();
         var walkableSurfaces = walkableTriangles
             .Where(triangle => triangle.Area >= MinimumWalkableSurfaceArea)
             .ToList();
+        diagnostics?.LogStep("filter-walkable-surfaces", stepStopwatch, $"input={walkableTriangles.Count} output={walkableSurfaces.Count}");
         if (walkableSurfaces.Count == 0)
             return;
 
+        stepStopwatch.Restart();
         var fishableBlocks = BuildFishableSurfaceBlocks(territoryId, fishableTriangles);
-        var walkableIndex = new TriangleIndex(walkableSurfaces, SurfaceIndexCellSize);
+        diagnostics?.LogStep("build-fishable-blocks", stepStopwatch, $"blocks={fishableBlocks.Count}");
+
+        stepStopwatch.Restart();
         var fishableIndex = new TriangleIndex(fishableTriangles, SurfaceIndexCellSize);
-        var sightLineBlockerIndex = new TriangleIndex(sightLineBlockerTriangles, SurfaceIndexCellSize);
+        diagnostics?.LogStep("build-fishable-index", stepStopwatch, $"triangles={fishableTriangles.Count} cells={fishableIndex.CellCount} entries={fishableIndex.EntryCount}");
+
+        stepStopwatch.Restart();
+        var walkableIndex = new TriangleIndex(walkableSurfaces, SurfaceIndexCellSize);
+        diagnostics?.LogStep("build-walkable-index", stepStopwatch, $"triangles={walkableSurfaces.Count} cells={walkableIndex.CellCount} entries={walkableIndex.EntryCount}");
+
+        stepStopwatch.Restart();
+        var relevantSightLineBlockers = FilterRelevantSightLineBlockers(fishableTriangles, sightLineBlockerTriangles);
+        diagnostics?.LogStep("filter-sightline-blockers", stepStopwatch, $"input={sightLineBlockerTriangles.Count} output={relevantSightLineBlockers.Count}");
+
+        stepStopwatch.Restart();
+        var sightLineBlockerIndex = new TriangleIndex(relevantSightLineBlockers, SurfaceIndexCellSize);
+        diagnostics?.LogStep("build-sightline-blocker-index", stepStopwatch, $"triangles={relevantSightLineBlockers.Count} cells={sightLineBlockerIndex.CellCount} entries={sightLineBlockerIndex.EntryCount}");
+
+        stepStopwatch.Restart();
         AddCoverageDrivenCandidates(
             fishableBlocks,
             walkableIndex,
@@ -374,7 +406,29 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             candidateKeys,
             candidates,
             progress,
-            cancellationToken);
+            cancellationToken,
+            diagnostics);
+        diagnostics?.LogStep("coverage-total", stepStopwatch, $"candidates={candidates.Count}");
+    }
+
+    private static IReadOnlyList<ExtractedSceneTriangle> FilterRelevantSightLineBlockers(
+        IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
+        IReadOnlyList<ExtractedSceneTriangle> sightLineBlockerTriangles)
+    {
+        if (fishableTriangles.Count == 0 || sightLineBlockerTriangles.Count == 0)
+            return [];
+
+        var bounds = CalculateHorizontalBounds(fishableTriangles);
+        var buffer = MaximumCandidateDistanceFromFishableSurface
+            + FacingProbeMaxDistance
+            + FacingProbeLateralRadius
+            + SightLineBlockerHorizontalBuffer;
+        var cells = BuildBufferedHorizontalCells(fishableTriangles, buffer, SurfaceIndexCellSize);
+        return sightLineBlockerTriangles
+            .Where(triangle =>
+                TriangleOverlapsHorizontalBounds(triangle, bounds, buffer)
+                && TriangleOverlapsAnyCell(triangle, cells, SurfaceIndexCellSize))
+            .ToList();
     }
 
     private static int CountNearbySurfaceMatches(
@@ -401,6 +455,98 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         }
 
         return count;
+    }
+
+    private static (float MinX, float MaxX, float MinZ, float MaxZ) CalculateHorizontalBounds(
+        IReadOnlyList<ExtractedSceneTriangle> triangles)
+    {
+        var minX = float.MaxValue;
+        var maxX = float.MinValue;
+        var minZ = float.MaxValue;
+        var maxZ = float.MinValue;
+
+        foreach (var triangle in triangles)
+        {
+            minX = MathF.Min(minX, triangle.A.X);
+            minX = MathF.Min(minX, triangle.B.X);
+            minX = MathF.Min(minX, triangle.C.X);
+            maxX = MathF.Max(maxX, triangle.A.X);
+            maxX = MathF.Max(maxX, triangle.B.X);
+            maxX = MathF.Max(maxX, triangle.C.X);
+            minZ = MathF.Min(minZ, triangle.A.Z);
+            minZ = MathF.Min(minZ, triangle.B.Z);
+            minZ = MathF.Min(minZ, triangle.C.Z);
+            maxZ = MathF.Max(maxZ, triangle.A.Z);
+            maxZ = MathF.Max(maxZ, triangle.B.Z);
+            maxZ = MathF.Max(maxZ, triangle.C.Z);
+        }
+
+        return (minX, maxX, minZ, maxZ);
+    }
+
+    private static bool TriangleOverlapsHorizontalBounds(
+        ExtractedSceneTriangle triangle,
+        (float MinX, float MaxX, float MinZ, float MaxZ) bounds,
+        float buffer)
+    {
+        var triangleMinX = MathF.Min(triangle.A.X, MathF.Min(triangle.B.X, triangle.C.X));
+        var triangleMaxX = MathF.Max(triangle.A.X, MathF.Max(triangle.B.X, triangle.C.X));
+        var triangleMinZ = MathF.Min(triangle.A.Z, MathF.Min(triangle.B.Z, triangle.C.Z));
+        var triangleMaxZ = MathF.Max(triangle.A.Z, MathF.Max(triangle.B.Z, triangle.C.Z));
+
+        return triangleMaxX >= bounds.MinX - buffer
+            && triangleMinX <= bounds.MaxX + buffer
+            && triangleMaxZ >= bounds.MinZ - buffer
+            && triangleMinZ <= bounds.MaxZ + buffer;
+    }
+
+    private static HashSet<GridCell> BuildBufferedHorizontalCells(
+        IReadOnlyList<ExtractedSceneTriangle> triangles,
+        float buffer,
+        float cellSize)
+    {
+        var cells = new HashSet<GridCell>();
+        foreach (var triangle in triangles)
+        {
+            var minX = MathF.Min(triangle.A.X, MathF.Min(triangle.B.X, triangle.C.X)) - buffer;
+            var maxX = MathF.Max(triangle.A.X, MathF.Max(triangle.B.X, triangle.C.X)) + buffer;
+            var minZ = MathF.Min(triangle.A.Z, MathF.Min(triangle.B.Z, triangle.C.Z)) - buffer;
+            var maxZ = MathF.Max(triangle.A.Z, MathF.Max(triangle.B.Z, triangle.C.Z)) + buffer;
+            var minCell = GridCell.From(minX, minZ, cellSize);
+            var maxCell = GridCell.From(maxX, maxZ, cellSize);
+
+            for (var x = minCell.X; x <= maxCell.X; x++)
+            {
+                for (var z = minCell.Z; z <= maxCell.Z; z++)
+                    cells.Add(new GridCell(x, z));
+            }
+        }
+
+        return cells;
+    }
+
+    private static bool TriangleOverlapsAnyCell(
+        ExtractedSceneTriangle triangle,
+        IReadOnlySet<GridCell> cells,
+        float cellSize)
+    {
+        var minX = MathF.Min(triangle.A.X, MathF.Min(triangle.B.X, triangle.C.X));
+        var maxX = MathF.Max(triangle.A.X, MathF.Max(triangle.B.X, triangle.C.X));
+        var minZ = MathF.Min(triangle.A.Z, MathF.Min(triangle.B.Z, triangle.C.Z));
+        var maxZ = MathF.Max(triangle.A.Z, MathF.Max(triangle.B.Z, triangle.C.Z));
+        var minCell = GridCell.From(minX, minZ, cellSize);
+        var maxCell = GridCell.From(maxX, maxZ, cellSize);
+
+        for (var x = minCell.X; x <= maxCell.X; x++)
+        {
+            for (var z = minCell.Z; z <= maxCell.Z; z++)
+            {
+                if (cells.Contains(new GridCell(x, z)))
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private static IReadOnlyList<BoundaryEdge> BuildEdges(IReadOnlyList<ExtractedSceneTriangle> triangles)
@@ -702,16 +848,20 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         HashSet<CandidateKey> candidateKeys,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CandidateGenerationDiagnostics? diagnostics)
     {
-        var queryCache = new ScanQueryCache(walkableIndex, fishableIndex, sightLineBlockerIndex);
+        var queryCache = new ScanQueryCache(walkableIndex, fishableIndex, sightLineBlockerIndex, diagnostics);
         var coverageIndex = new CandidateCoverageIndex(candidates);
         for (var roundIndex = 0; roundIndex < FishableCoverageRounds.Length; roundIndex++)
         {
             var round = FishableCoverageRounds[roundIndex];
+            var targetStopwatch = Stopwatch.StartNew();
             var targets = EnumerateFishableCoverageTargets(fishableBlocks, round.TargetSpacing).ToList();
+            diagnostics?.LogStep($"coverage-targets-{round.Name}", targetStopwatch, $"targets={targets.Count} spacing={round.TargetSpacing:F1} directions={round.DirectionCount}");
             var additionsBeforeRound = candidates.Count;
             var progressTotal = Math.Max(1, targets.Count);
+            var roundStopwatch = Stopwatch.StartNew();
             for (var targetIndex = 0; targetIndex < targets.Count; targetIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -726,24 +876,48 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         $"{round.Name} fishable 覆盖：{targetIndex}/{targets.Count}，已生成 {candidates.Count} 个。"));
 
                 var target = targets[targetIndex];
+                if (diagnostics is not null)
+                    diagnostics.CoverageTargets++;
                 if (coverageIndex.IsCovered(target, queryCache))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.CoverageHits++;
                     continue;
+                }
 
+                if (diagnostics is not null)
+                    diagnostics.CandidateCreateAttempts++;
                 if (!TryCreateCandidateForFishableTarget(
                         target,
                         round,
                         queryCache,
                         candidateKeys,
-                        out var candidate))
+                        out var candidate,
+                        diagnostics))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.CandidateCreateFailures++;
                     continue;
+                }
 
                 var key = CandidateKey.From(candidate.Position, candidate.Rotation);
                 if (!candidateKeys.Add(key))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.CandidateDedupeRejects++;
                     continue;
+                }
 
                 candidates.Add(candidate);
+                if (diagnostics is not null)
+                    diagnostics.CandidateCreates++;
                 coverageIndex.Add(candidate);
             }
+
+            diagnostics?.LogStep(
+                $"coverage-loop-{round.Name}",
+                roundStopwatch,
+                $"targets={targets.Count} added={candidates.Count - additionsBeforeRound} total={candidates.Count}");
 
             if (roundIndex > 0 && candidates.Count == additionsBeforeRound)
                 break;
@@ -803,27 +977,56 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         FishableCoverageRound round,
         ScanQueryCache queryCache,
         IReadOnlySet<CandidateKey> candidateKeys,
-        out CandidateScratch candidate)
+        out CandidateScratch candidate,
+        CandidateGenerationDiagnostics? diagnostics)
     {
         candidate = default;
         foreach (var probe in EnumerateCandidateSearchProbes(target.Point, round.DirectionCount))
         {
-            if (!TryFindCandidateWalkablePoint(target, probe, queryCache, out var position))
-                continue;
+            if (diagnostics is not null)
+                diagnostics.ProbeAttempts++;
 
-            if (!TryResolveLegalFacingRotation(
-                    position,
-                    target,
-                    queryCache,
-                    out var rotation))
+            var walkablePoints = queryCache.GetCandidateWalkablePoints(probe);
+            if (walkablePoints.Count == 0)
+            {
+                if (diagnostics is not null)
+                    diagnostics.WalkableMisses++;
                 continue;
+            }
 
-            var candidateScratch = new CandidateScratch(position, rotation, target.Block.SurfaceGroupId);
-            if (candidateKeys.Contains(CandidateKey.From(candidateScratch.Position, candidateScratch.Rotation)))
-                continue;
+            foreach (var position in OrderCandidateWalkablePoints(target.Point, walkablePoints))
+            {
+                if (diagnostics is not null)
+                    diagnostics.WalkableLayerAttempts++;
+                if (!IsCandidateWalkablePoint(target, position, queryCache))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.WalkableRejects++;
+                    continue;
+                }
 
-            candidate = candidateScratch;
-            return true;
+                if (!TryResolveLegalFacingRotation(
+                        position,
+                        target,
+                        queryCache,
+                        out var rotation))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.FacingRejects++;
+                    continue;
+                }
+
+                var candidateScratch = new CandidateScratch(position, rotation, target.Block.SurfaceGroupId);
+                if (candidateKeys.Contains(CandidateKey.From(candidateScratch.Position, candidateScratch.Rotation)))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.CandidateDedupeRejects++;
+                    continue;
+                }
+
+                candidate = candidateScratch;
+                return true;
+            }
         }
 
         return false;
@@ -852,22 +1055,22 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         }
     }
 
-    private static bool TryFindCandidateWalkablePoint(
-        FishableCoverageTarget target,
-        Vector3 probe,
-        ScanQueryCache queryCache,
-        out Vector3 walkablePoint)
+    private static IEnumerable<Vector3> OrderCandidateWalkablePoints(
+        Vector3 targetFishablePoint,
+        IReadOnlyList<Vector3> walkablePoints)
     {
-        walkablePoint = default;
-        if (!queryCache.TryFindHighestWalkable(probe, out var candidatePoint))
-            return false;
+        return walkablePoints
+            .OrderBy(point => MathF.Abs(point.Y - targetFishablePoint.Y))
+            .ThenByDescending(point => point.Y);
+    }
 
-        if (!queryCache.IsOpenWalkable(candidatePoint)
-            || !IsCandidateFishableForWalkablePoint(candidatePoint, target.Point))
-            return false;
-
-        walkablePoint = candidatePoint;
-        return true;
+    private static bool IsCandidateWalkablePoint(
+        FishableCoverageTarget target,
+        Vector3 candidatePoint,
+        ScanQueryCache queryCache)
+    {
+        return queryCache.HasStandingClearance(candidatePoint)
+            && IsCandidateFishableForWalkablePoint(candidatePoint, target.Point);
     }
 
     private static bool TryResolveLegalFacingRotation(
@@ -981,13 +1184,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 || Vector2.Dot(fishableDirection, direction) <= 0f)
                 continue;
 
-            if (!IsCandidateFishableForWalkablePoint(position, fishablePoint))
-                continue;
-
-            if (queryCache.IsFishableCoveredByWalkable(fishablePoint))
-                continue;
-
-            if (!queryCache.HasClearFishableSightLine(position, fishablePoint))
+            if (!IsCandidateFishableForWalkablePoint(position, fishablePoint)
+                || queryCache.IsFishableCoveredByWalkable(fishablePoint)
+                || !queryCache.HasClearFishableSightLine(position, fishablePoint))
                 continue;
 
             return true;
@@ -1406,6 +1605,102 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return counts;
     }
 
+    private sealed class CandidateGenerationDiagnostics
+    {
+        private readonly IPluginLog log;
+        private readonly uint territoryId;
+        private readonly int fishableTriangles;
+        private readonly int walkableTriangles;
+        private readonly int sightLineBlockerTriangles;
+
+        public CandidateGenerationDiagnostics(
+            IPluginLog log,
+            uint territoryId,
+            int fishableTriangles,
+            int walkableTriangles,
+            int sightLineBlockerTriangles)
+        {
+            this.log = log;
+            this.territoryId = territoryId;
+            this.fishableTriangles = fishableTriangles;
+            this.walkableTriangles = walkableTriangles;
+            this.sightLineBlockerTriangles = sightLineBlockerTriangles;
+        }
+
+        public long CoverageTargets { get; set; }
+        public long CoverageHits { get; set; }
+        public long CandidateCreateAttempts { get; set; }
+        public long CandidateCreates { get; set; }
+        public long CandidateCreateFailures { get; set; }
+        public long CandidateDedupeRejects { get; set; }
+        public long ProbeAttempts { get; set; }
+        public long WalkableLayerAttempts { get; set; }
+        public long WalkableMisses { get; set; }
+        public long WalkableRejects { get; set; }
+        public long FacingRejects { get; set; }
+        public long WalkableStackQueries { get; set; }
+        public long WalkableStackCacheHits { get; set; }
+        public long StandingClearanceQueries { get; set; }
+        public long StandingClearanceCacheHits { get; set; }
+        public long FacingFishableQueries { get; set; }
+        public long FacingFishableCacheHits { get; set; }
+        public long FacingFishableHits { get; set; }
+        public long FishableCoveredQueries { get; set; }
+        public long FishableCoveredCacheHits { get; set; }
+        public long FishableCoveredHits { get; set; }
+        public long SightLineQueries { get; set; }
+        public long SightLineCacheHits { get; set; }
+        public long SightLineBlocked { get; set; }
+
+        public void LogStep(string step, Stopwatch stopwatch, string details)
+        {
+            stopwatch.Stop();
+            log.Information(
+                "FPG candidate timing: territory={TerritoryId} step={Step} elapsedMs={ElapsedMs:F1} {Details}",
+                territoryId,
+                step,
+                stopwatch.Elapsed.TotalMilliseconds,
+                details);
+        }
+
+        public void LogSummary(Stopwatch stopwatch, int candidateCount)
+        {
+            stopwatch.Stop();
+            log.Information(
+                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} blockerTriangles={BlockerTriangles} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} sightLineQueries={SightLineQueries} sightLineCacheHits={SightLineCacheHits} sightLineBlocked={SightLineBlocked}",
+                territoryId,
+                stopwatch.Elapsed.TotalMilliseconds,
+                fishableTriangles,
+                walkableTriangles,
+                sightLineBlockerTriangles,
+                candidateCount,
+                CoverageTargets,
+                CoverageHits,
+                CandidateCreateAttempts,
+                CandidateCreates,
+                CandidateCreateFailures,
+                CandidateDedupeRejects,
+                ProbeAttempts,
+                WalkableLayerAttempts,
+                WalkableMisses,
+                WalkableRejects,
+                FacingRejects,
+                WalkableStackQueries,
+                WalkableStackCacheHits,
+                StandingClearanceQueries,
+                StandingClearanceCacheHits,
+                FacingFishableQueries,
+                FacingFishableCacheHits,
+                FacingFishableHits,
+                FishableCoveredQueries,
+                FishableCoveredCacheHits,
+                FishableCoveredHits,
+                SightLineQueries,
+                SightLineCacheHits,
+                SightLineBlocked);
+        }
+    }
+
     private sealed class CandidateCoverageIndex
     {
         private readonly Dictionary<CandidateCoverageCellKey, List<CandidateScratch>> cells = [];
@@ -1475,10 +1770,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     continue;
 
                 if (!IsCandidateFishableForWalkablePoint(position, fishablePoint)
-                    || queryCache.IsFishableCoveredByWalkable(fishablePoint))
-                    continue;
-
-                if (!queryCache.HasClearFishableSightLine(position, fishablePoint))
+                    || queryCache.IsFishableCoveredByWalkable(fishablePoint)
+                    || !queryCache.HasClearFishableSightLine(position, fishablePoint))
                     continue;
 
                 return true;
@@ -1493,43 +1786,61 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         private readonly TriangleIndex walkableIndex;
         private readonly TriangleIndex fishableIndex;
         private readonly TriangleIndex sightLineBlockerIndex;
-        private readonly Dictionary<HorizontalProbeKey, CachedVector3Result> highestWalkable = [];
-        private readonly Dictionary<ProbePointKey, bool> openWalkable = [];
-        private readonly Dictionary<ProbePointKey, bool> fishableCovered = [];
+        private readonly CandidateGenerationDiagnostics? diagnostics;
+        private readonly Dictionary<HorizontalProbeKey, IReadOnlyList<Vector3>> walkableStacks = [];
         private readonly Dictionary<HorizontalProbeKey, CachedVector3Result> facingFishable = [];
+        private readonly Dictionary<ProbePointKey, bool> standingClearance = [];
+        private readonly Dictionary<ProbePointKey, bool> fishableCovered = [];
         private readonly Dictionary<SightLineKey, bool> clearFishableSightLines = [];
 
-        public ScanQueryCache(TriangleIndex walkableIndex, TriangleIndex fishableIndex, TriangleIndex sightLineBlockerIndex)
+        public ScanQueryCache(
+            TriangleIndex walkableIndex,
+            TriangleIndex fishableIndex,
+            TriangleIndex sightLineBlockerIndex,
+            CandidateGenerationDiagnostics? diagnostics)
         {
             this.walkableIndex = walkableIndex;
             this.fishableIndex = fishableIndex;
             this.sightLineBlockerIndex = sightLineBlockerIndex;
+            this.diagnostics = diagnostics;
         }
 
-        public bool TryFindHighestWalkable(Vector3 probe, out Vector3 walkablePoint)
+        public IReadOnlyList<Vector3> GetCandidateWalkablePoints(Vector3 probe)
         {
             var key = HorizontalProbeKey.From(probe);
-            if (!highestWalkable.TryGetValue(key, out var cached))
+            if (!walkableStacks.TryGetValue(key, out var points))
             {
-                var found = walkableIndex.TryFindHighestContainingPoint(probe, out _, out var point);
-                cached = new CachedVector3Result(found, point);
-                highestWalkable[key] = cached;
+                if (diagnostics is not null)
+                    diagnostics.WalkableStackQueries++;
+                points = walkableIndex.FindContainingPoints(probe);
+                walkableStacks[key] = points;
+            }
+            else
+            {
+                if (diagnostics is not null)
+                    diagnostics.WalkableStackCacheHits++;
             }
 
-            walkablePoint = cached.Point;
-            return cached.Found;
+            return points;
         }
 
-        public bool IsOpenWalkable(Vector3 walkablePoint)
+        public bool HasStandingClearance(Vector3 walkablePoint)
         {
             var key = ProbePointKey.From(walkablePoint);
-            if (!openWalkable.TryGetValue(key, out var result))
+            if (!standingClearance.TryGetValue(key, out var result))
             {
+                if (diagnostics is not null)
+                    diagnostics.StandingClearanceQueries++;
                 result = !walkableIndex.HasContainingPointAboveWithinVerticalRange(
                     walkablePoint,
                     WalkableFishableMinimumVerticalDelta,
-                    OpenWalkableClearanceMeters);
-                openWalkable[key] = result;
+                    WalkableStandingClearanceMeters);
+                standingClearance[key] = result;
+            }
+            else
+            {
+                if (diagnostics is not null)
+                    diagnostics.StandingClearanceCacheHits++;
             }
 
             return result;
@@ -1537,21 +1848,27 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         public bool TryFindFacingFishable(Vector3 probe, out Vector3 fishablePoint)
         {
+            if (diagnostics is not null)
+                diagnostics.FacingFishableQueries++;
             var key = HorizontalProbeKey.From(probe);
-            if (!facingFishable.TryGetValue(key, out var cached))
+            if (facingFishable.TryGetValue(key, out var cached))
             {
-                var found = fishableIndex.TryFindNearest(
-                    probe,
-                    FacingProbeLateralRadius,
-                    out _,
-                    out var point,
-                    out _);
-                cached = new CachedVector3Result(found, point);
-                facingFishable[key] = cached;
+                if (diagnostics is not null)
+                    diagnostics.FacingFishableCacheHits++;
+                fishablePoint = cached.Point;
+                return cached.Found;
             }
 
-            fishablePoint = cached.Point;
-            return cached.Found;
+            var found = fishableIndex.TryFindNearest(
+                probe,
+                FacingProbeLateralRadius,
+                out _,
+                out fishablePoint,
+                out _);
+            facingFishable[key] = new CachedVector3Result(found, fishablePoint);
+            if (found && diagnostics is not null)
+                diagnostics.FacingFishableHits++;
+            return found;
         }
 
         public bool HasClearFishableSightLine(Vector3 walkablePoint, Vector3 fishablePoint)
@@ -1561,9 +1878,19 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             var key = SightLineKey.From(start, end);
             if (!clearFishableSightLines.TryGetValue(key, out var result))
             {
+                if (diagnostics is not null)
+                    diagnostics.SightLineQueries++;
                 result = !sightLineBlockerIndex.IntersectsSegment(start, end);
                 clearFishableSightLines[key] = result;
             }
+            else
+            {
+                if (diagnostics is not null)
+                    diagnostics.SightLineCacheHits++;
+            }
+
+            if (!result && diagnostics is not null)
+                diagnostics.SightLineBlocked++;
 
             return result;
         }
@@ -1573,10 +1900,22 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             var key = ProbePointKey.From(fishablePoint);
             if (!fishableCovered.TryGetValue(key, out var result))
             {
-                result = TryFindHighestWalkable(fishablePoint, out var walkablePoint)
-                    && walkablePoint.Y >= fishablePoint.Y + WalkableFishableMinimumVerticalDelta;
+                if (diagnostics is not null)
+                    diagnostics.FishableCoveredQueries++;
+                result = walkableIndex.HasContainingPointAboveWithinVerticalRange(
+                    fishablePoint,
+                    WalkableFishableMinimumVerticalDelta,
+                    OpenFishableClearanceMeters);
                 fishableCovered[key] = result;
             }
+            else
+            {
+                if (diagnostics is not null)
+                    diagnostics.FishableCoveredCacheHits++;
+            }
+
+            if (result && diagnostics is not null)
+                diagnostics.FishableCoveredHits++;
 
             return result;
         }
@@ -1593,6 +1932,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             foreach (var triangle in triangles)
                 Add(triangle);
         }
+
+        public int CellCount => cells.Count;
+        public int EntryCount { get; private set; }
 
         public bool ContainsPoint(Vector3 point)
         {
@@ -1614,19 +1956,15 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             return false;
         }
 
-        public bool TryFindHighestContainingPoint(
-            Vector3 point,
-            out ExtractedSceneTriangle triangle,
-            out Vector3 containingPoint)
+        public IReadOnlyList<Vector3> FindContainingPoints(Vector3 point)
         {
-            triangle = default;
-            containingPoint = default;
             var cell = GridCell.From(point.X, point.Z, cellSize);
             if (!cells.TryGetValue(cell, out var triangles))
-                return false;
+                return [];
 
             var point2 = new Vector2(point.X, point.Z);
-            var bestY = float.MinValue;
+            var points = new List<Vector3>();
+            var seenY = new HashSet<int>();
             foreach (var candidate in triangles)
             {
                 if (!PointInTriangle(
@@ -1635,15 +1973,14 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         new Vector2(candidate.B.X, candidate.B.Z),
                         new Vector2(candidate.C.X, candidate.C.Z))
                     || !TryProjectYOnTriangleXz(candidate, point.X, point.Z, out var candidateY)
-                    || candidateY <= bestY)
+                    || !seenY.Add(QuantizeStackY(candidateY)))
                     continue;
 
-                bestY = candidateY;
-                triangle = candidate;
-                containingPoint = new Vector3(point.X, candidateY, point.Z);
+                points.Add(new Vector3(point.X, candidateY, point.Z));
             }
 
-            return bestY > float.MinValue;
+            points.Sort((left, right) => right.Y.CompareTo(left.Y));
+            return points;
         }
 
         public bool HasContainingPointAboveWithinVerticalRange(
@@ -1774,9 +2111,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     }
 
                     list.Add(triangle);
+                    EntryCount++;
                 }
             }
         }
+
+        private static int QuantizeStackY(float value) =>
+            (int)MathF.Round(value / ProbeCacheCellSize, MidpointRounding.AwayFromZero);
     }
 
     private sealed class BoundaryEdgeBucket
