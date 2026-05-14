@@ -1,5 +1,6 @@
 using FishingPointGenerator.Core;
 using FishingPointGenerator.Core.Models;
+using FishingPointGenerator.Plugin.Services.AutoSurvey;
 using FishingPointGenerator.Plugin.Services.GameInteraction;
 using FishingPointGenerator.Plugin.Services.Catalog;
 using FishingPointGenerator.Plugin.Services.Scanning;
@@ -33,6 +34,7 @@ internal sealed class SpotWorkflowSession
     private readonly SurveyBlockBuilder blockBuilder;
     private readonly SpotScanService scanService;
     private readonly VnavmeshQueryService navmeshQuery = new();
+    private readonly AutoSurveyRunner autoSurveyRunner;
     private Task<TerritoryScanWorkResult>? territoryScanTask;
     private CancellationTokenSource? territoryScanCancellation;
     private bool territoryScanCancelMessageRequested;
@@ -45,6 +47,7 @@ internal sealed class SpotWorkflowSession
         blockBuilder = new SurveyBlockBuilder(blockOptions);
         var geometryCache = new TerritoryGeometryCache(scanner);
         scanService = new SpotScanService(geometryCache);
+        autoSurveyRunner = new AutoSurveyRunner(this, navmeshQuery, new PlayerFishingActionService());
         DataRoot = paths.DataDirectory;
         ScannerName = geometryCache.ScannerName;
     }
@@ -80,6 +83,7 @@ internal sealed class SpotWorkflowSession
     public uint LastCastPlaceNameId { get; private set; }
     public uint LastCastFishingSpotId { get; private set; }
     public int LastCastRecordedCount { get; private set; }
+    public int CastRecordVersion { get; private set; }
     public NearbyScanDebugResult? NearbyDebugOverlay { get; private set; }
     public TerritoryScanProgress? TerritoryScanProgress { get; private set; }
 
@@ -109,6 +113,10 @@ internal sealed class SpotWorkflowSession
     public string CurrentTargetDisplayName => CurrentTarget is null
         ? string.Empty
         : $"{CurrentTarget.FishingSpotId} {CurrentTarget.Name}";
+    public bool AutoSurveyRunning => autoSurveyRunner.IsRunning;
+    public string AutoSurveyStatusText => autoSurveyRunner.StatusText;
+    public string AutoSurveyCandidateText => autoSurveyRunner.CurrentCandidateText;
+    public int AutoSurveyCompletedRounds => autoSurveyRunner.CompletedRounds;
 
     public void RefreshCatalog()
     {
@@ -205,6 +213,7 @@ internal sealed class SpotWorkflowSession
 
     public void HandleTerritoryChanged(uint territoryId)
     {
+        autoSurveyRunner.Stop("自动点亮已因切图停止。");
         ClearCurrentTerritoryRuntimeState();
         RefreshCurrentTerritory(selectNext: true);
         LastMessage = $"已切换区域 {territoryId}：已清空上一张图的内存扫描状态。{LastMessage}";
@@ -314,7 +323,10 @@ internal sealed class SpotWorkflowSession
     {
         var task = territoryScanTask;
         if (task is null || !task.IsCompleted)
+        {
+            autoSurveyRunner.Poll();
             return;
+        }
 
         territoryScanTask = null;
         Interlocked.Increment(ref territoryScanGeneration);
@@ -364,6 +376,7 @@ internal sealed class SpotWorkflowSession
         RebuildAnalyses();
         SyncCurrentAnalysis();
         LastMessage = result.Message;
+        autoSurveyRunner.Poll();
     }
 
     public void ScanCurrentTarget()
@@ -406,6 +419,26 @@ internal sealed class SpotWorkflowSession
         LastMessage = CurrentCandidateSelection is null
             ? $"FishingSpot {target.FishingSpotId} 没有可用候选。"
             : $"已刷新 FishingSpot {target.FishingSpotId} 的候选选择：{CurrentCandidateSelection.ModeText}。";
+    }
+
+    public void StartAutoSurveyOnce()
+    {
+        AutoRecordCastsEnabled = true;
+        autoSurveyRunner.StartOnce();
+        LastMessage = "已启动自动点亮一次。";
+    }
+
+    public void StartAutoSurveyLoop()
+    {
+        AutoRecordCastsEnabled = true;
+        autoSurveyRunner.StartLoop();
+        LastMessage = "已启动循环自动点亮。";
+    }
+
+    public void StopAutoSurvey()
+    {
+        autoSurveyRunner.Stop();
+        LastMessage = autoSurveyRunner.StatusText;
     }
 
     public void DebugScanNearby(float radiusMeters)
@@ -656,6 +689,7 @@ internal sealed class SpotWorkflowSession
         if (!AutoRecordCastsEnabled)
             return false;
 
+        CastRecordVersion++;
         if (castPlaceNameId == 0)
         {
             LastMessage = "检测到抛竿，但日志中没有有效 PlaceName.RowId。";

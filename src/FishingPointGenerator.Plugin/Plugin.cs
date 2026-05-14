@@ -30,6 +30,9 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg flagcandidate - 为当前候选插旗\n"
         + "/fpg flagunrecorded - 为当前未记录候选点插旗\n"
         + "/fpg refreshcandidate - 刷新当前候选选择\n"
+        + "/fpg autoonce - 自动移动到当前候选并抛竿一次\n"
+        + "/fpg autoloop - 循环自动移动到当前候选并抛竿\n"
+        + "/fpg autostop - 停止自动点亮\n"
         + "/fpg confirm - 用玩家当前站位确认已选钓场\n"
         + "/fpg rejectcandidate - 排除当前候选\n"
         + "/fpg clearspotmaintenance - 清除当前钓场维护数据\n"
@@ -92,6 +95,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenConfigUi -= ToggleMainUi;
         DService.Instance().ClientState.TerritoryChanged -= OnTerritoryChanged;
 
+        session.StopAutoSurvey();
         castMonitor.Dispose();
         windowSystem.RemoveAllWindows();
         mainWindow.Dispose();
@@ -229,6 +233,24 @@ public sealed class Plugin : IDalamudPlugin
 
             case "refreshcandidate":
                 session.RefreshCandidateSelection();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "autoonce":
+                session.StartAutoSurveyOnce();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "autoloop":
+                session.StartAutoSurveyLoop();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "autostop":
+                session.StopAutoSurvey();
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;

@@ -224,6 +224,7 @@ internal sealed class MainWindow : Window, IDisposable
     private void DrawSpotDetail()
     {
         DrawSectionTitle("维护");
+        DrawAutoSurvey();
 
         var target = session.CurrentTarget;
         if (target is null)
@@ -329,6 +330,29 @@ internal sealed class MainWindow : Window, IDisposable
         DrawSummaryRow("说明", string.IsNullOrWhiteSpace(selection.Note) ? "-" : selection.Note);
 
         ImGui.EndTable();
+    }
+
+    private void DrawAutoSurvey()
+    {
+        ImGui.Spacing();
+        ImGui.TextColored(AccentText, "自动点亮");
+        if (ImGui.BeginTable("##fpg_auto_survey", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            DrawSummaryRow("状态", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
+            DrawSummaryRow("候选", session.AutoSurveyCandidateText);
+            DrawSummaryRow("完成", session.AutoSurveyCompletedRounds.ToString());
+            ImGui.EndTable();
+        }
+
+        var hasCurrentTerritory = session.CurrentTerritoryId != 0;
+        if (ActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory))
+            session.StartAutoSurveyOnce();
+        ImGui.SameLine();
+        if (ActionButton("循环点亮", session.AutoSurveyRunning || !hasCurrentTerritory))
+            session.StartAutoSurveyLoop();
+        ImGui.SameLine();
+        if (ActionButton("停止自动", !session.AutoSurveyRunning))
+            session.StopAutoSurvey();
     }
 
     private void DrawTargetActions(SpotAnalysis? analysis)

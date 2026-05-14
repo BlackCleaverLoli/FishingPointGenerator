@@ -14,8 +14,17 @@ internal sealed class VnavmeshQueryService
         new("vnavmesh.Nav.PathfindCancelable", () => null!);
     private readonly IPCSubscriber<Vector3, float, float, Vector3?> meshNearestPointReachable =
         new("vnavmesh.Query.Mesh.NearestPointReachable", () => (Vector3?)null);
+    private readonly IPCSubscriber<Vector3, bool, float, bool> pathfindAndMoveCloseTo =
+        new("vnavmesh.SimpleMove.PathfindAndMoveCloseTo", () => false);
+    private readonly IPCSubscriber<bool> pathIsRunning = new("vnavmesh.Path.IsRunning", () => false);
+    private readonly IPCSubscriber<bool> pathfindInProgress = new("vnavmesh.SimpleMove.PathfindInProgress", () => false);
+    private readonly IPCSubscriber<float> pathDistance = new("vnavmesh.Path.GetDistance", () => 0f);
+    private readonly IPCSubscriber<object> pathStop = new("vnavmesh.Path.Stop", () => null!);
 
     public bool IsReady => navIsReady.TryInvokeFunc();
+    public bool IsPathRunning => pathIsRunning.TryInvokeFunc();
+    public bool IsPathfindInProgress => pathfindInProgress.TryInvokeFunc();
+    public float PathLeftDistance => pathDistance.TryInvokeFunc();
 
     public MeshPointQueryResult QueryNearestReachablePoint(Vector3 point, float halfExtentXZ, float halfExtentY)
     {
@@ -60,6 +69,35 @@ internal sealed class VnavmeshQueryService
         catch (Exception ex)
         {
             return PathQueryResult.Unavailable(ex.Message);
+        }
+    }
+
+    public MoveCommandResult MoveCloseTo(Vector3 destination, bool fly, float range)
+    {
+        if (!IsReady)
+            return MoveCommandResult.Unavailable("vnavmesh not ready");
+
+        try
+        {
+            return pathfindAndMoveCloseTo.TryInvokeFunc(destination, fly, range)
+                ? MoveCommandResult.Started()
+                : MoveCommandResult.Unavailable("vnavmesh move IPC unavailable or rejected");
+        }
+        catch (Exception ex)
+        {
+            return MoveCommandResult.Unavailable(ex.Message);
+        }
+    }
+
+    public void StopMovement()
+    {
+        try
+        {
+            pathStop.TryInvokeAction();
+        }
+        catch
+        {
+            // vnavmesh may disappear while the user is stopping automation.
         }
     }
 
@@ -120,4 +158,17 @@ internal sealed record PathQueryResult(
 
     public static PathQueryResult Unavailable(string message) =>
         new(PathQueryStatus.Unavailable, float.MaxValue, 0, message);
+}
+
+internal sealed record MoveCommandResult(
+    PathQueryStatus Status,
+    string Message)
+{
+    public bool IsStarted => Status == PathQueryStatus.Reachable;
+
+    public static MoveCommandResult Started() =>
+        new(PathQueryStatus.Reachable, string.Empty);
+
+    public static MoveCommandResult Unavailable(string message) =>
+        new(PathQueryStatus.Unavailable, message);
 }
