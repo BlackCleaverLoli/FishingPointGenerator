@@ -16,6 +16,7 @@ internal sealed class MainWindow : Window, IDisposable
     private const float MaximumOverlayDistance = 1000f;
     private const int MinimumOverlayCandidateLimit = 10;
     private const int MaximumOverlayCandidateLimit = 5000;
+    private const float CompactListBreakpoint = 560f;
 
     private static readonly Vector4 MutedText = new(0.72f, 0.72f, 0.72f, 1f);
     private static readonly Vector4 GoodText = new(0.35f, 0.86f, 0.52f, 1f);
@@ -27,6 +28,15 @@ internal sealed class MainWindow : Window, IDisposable
     private string territoryFilterText = string.Empty;
     private string targetFilterText = string.Empty;
     private string targetIdText = string.Empty;
+    private MainTab activeTab = MainTab.Territories;
+
+    private enum MainTab
+    {
+        Territories,
+        Spots,
+        Maintenance,
+        Tools,
+    }
 
     public MainWindow(SpotWorkflowSession session)
         : base("FishingPointGenerator###FishingPointGeneratorMainWindow")
@@ -38,7 +48,7 @@ internal sealed class MainWindow : Window, IDisposable
 
     public override void PreDraw()
     {
-        ImGui.SetNextWindowSize(new Vector2(1160f, 760f), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new Vector2(920f, 760f), ImGuiCond.FirstUseEver);
         base.PreDraw();
     }
 
@@ -47,27 +57,42 @@ internal sealed class MainWindow : Window, IDisposable
         DrawHeader();
         ImGui.Separator();
 
-        if (ImGui.BeginTable("##fpg_main_layout", 3, ImGuiTableFlags.Resizable | ImGuiTableFlags.BordersInnerV))
-        {
-            ImGui.TableSetupColumn("Territories", ImGuiTableColumnFlags.WidthFixed, 280f);
-            ImGui.TableSetupColumn("Spots", ImGuiTableColumnFlags.WidthFixed, 390f);
-            ImGui.TableSetupColumn("Maintenance", ImGuiTableColumnFlags.WidthStretch);
-
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn();
-            DrawTerritoryDrawer();
-            ImGui.TableNextColumn();
-            DrawSpotList();
-            ImGui.TableNextColumn();
-            DrawSpotDetail();
-
-            ImGui.EndTable();
-        }
-
+        DrawMainTabs();
         ImGui.Separator();
-        DrawDataCleanup();
-        DrawDebugOptions();
-        DrawPaths();
+
+        switch (activeTab)
+        {
+            case MainTab.Territories:
+                DrawTerritoryDrawer();
+                break;
+            case MainTab.Spots:
+                DrawSpotList();
+                break;
+            case MainTab.Maintenance:
+                DrawSpotDetail();
+                break;
+            case MainTab.Tools:
+                DrawDataCleanup();
+                DrawDebugOptions();
+                DrawPaths();
+                break;
+        }
+    }
+
+    private void DrawMainTabs()
+    {
+        var tabLine = 0f;
+        DrawMainTabButton("领地", MainTab.Territories, ref tabLine);
+        DrawMainTabButton("钓场", MainTab.Spots, ref tabLine);
+        DrawMainTabButton("维护", MainTab.Maintenance, ref tabLine);
+        DrawMainTabButton("工具", MainTab.Tools, ref tabLine);
+    }
+
+    private void DrawMainTabButton(string label, MainTab tab, ref float tabLine)
+    {
+        var tabLabel = activeTab == tab ? $"[{label}]" : label;
+        if (FlowActionButton(tabLabel, false, ref tabLine))
+            activeTab = tab;
     }
 
     private void DrawHeader()
@@ -75,10 +100,11 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(AccentText, "FishingPointGenerator");
         ImGui.SameLine();
         DrawStatusBadge();
-        ImGui.SameLine();
+
         ImGui.TextColored(MutedText, $"游戏区域: {session.CurrentTerritoryId}");
-        ImGui.SameLine();
         ImGui.TextColored(MutedText, $"已选领地: {FormatTerritoryTitle(session.SelectedTerritoryId, session.SelectedTerritoryName)}");
+        if (session.CurrentTarget is not null)
+            ImGui.TextColored(MutedText, $"已选钓场: {session.CurrentTargetDisplayName}");
 
         ImGui.PushTextWrapPos();
         ImGui.TextColored(GetMessageColor(), session.LastMessage);
@@ -96,80 +122,128 @@ internal sealed class MainWindow : Window, IDisposable
     {
         DrawSectionTitle("领地");
 
-        if (ActionButton("刷新目录"))
+        var actionLine = 0f;
+        if (FlowActionButton("刷新目录", false, ref actionLine))
             session.RefreshCatalog();
-        ImGui.SameLine();
-        if (ActionButton("当前区域"))
+        if (FlowActionButton("当前区域", false, ref actionLine))
             session.RefreshCurrentTerritory(selectNext: false);
-        ImGui.SameLine();
-        if (ActionButton("扫描当前", session.TerritoryScanInProgress))
+        if (FlowActionButton("扫描当前", session.TerritoryScanInProgress, ref actionLine))
             session.ScanCurrentTerritory();
-        if (session.TerritoryScanInProgress)
+        if (FlowActionButton("取消扫描", !session.TerritoryScanInProgress, ref actionLine))
+            session.CancelTerritoryScan();
+
+        DrawFilterInput("过滤", "##territory_filter", ref territoryFilterText);
+
+        var visible = GetVisibleTerritories().ToList();
+        DrawListCount(visible.Count, session.TerritorySummaries.Count);
+        var height = Math.Max(320f, ImGui.GetContentRegionAvail().Y - 4f);
+        if (ImGui.BeginChild("##fpg_territory_list", new Vector2(0f, height), true, ImGuiWindowFlags.None))
         {
-            ImGui.SameLine();
-            if (ActionButton("取消扫描"))
-                session.CancelTerritoryScan();
+            var width = ImGui.GetContentRegionAvail().X;
+            if (width < CompactListBreakpoint)
+                DrawTerritoryRowsCompact(visible);
+            else
+                DrawTerritoryRowsWide(visible, width);
         }
 
-        ImGui.SetNextItemWidth(-1f);
-        ImGui.InputText("##territory_filter", ref territoryFilterText, 64);
+        ImGui.EndChild();
+    }
 
-        if (!ImGui.BeginTable("##fpg_territory_list", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Borders, new Vector2(0f, 560f)))
-            return;
+    private void DrawTerritoryRowsWide(IReadOnlyList<TerritoryMaintenanceSummary> territories, float width)
+    {
+        const float spotWidth = 44f;
+        const float confirmedWidth = 44f;
+        const float maintenanceWidth = 58f;
+        const float riskWidth = 44f;
+        const float gap = 10f;
+        var titleWidth = Math.Max(180f, width - spotWidth - confirmedWidth - maintenanceWidth - riskWidth - (gap * 4f));
+        var x = ImGui.GetCursorPosX();
 
-        ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("领地");
-        ImGui.TableSetupColumn("钓场");
-        ImGui.TableSetupColumn("确认");
-        ImGui.TableSetupColumn("需维护");
-        ImGui.TableSetupColumn("风险");
-        ImGui.TableHeadersRow();
+        DrawPseudoHeader("领地", titleWidth);
+        DrawPseudoHeaderCell(x, titleWidth + gap, spotWidth, "钓场");
+        DrawPseudoHeaderCell(x, titleWidth + spotWidth + (gap * 2f), confirmedWidth, "确认");
+        DrawPseudoHeaderCell(x, titleWidth + spotWidth + confirmedWidth + (gap * 3f), maintenanceWidth, "需维护");
+        DrawPseudoHeaderCell(x, titleWidth + spotWidth + confirmedWidth + maintenanceWidth + (gap * 4f), riskWidth, "风险");
+        ImGui.Separator();
 
-        foreach (var summary in GetVisibleTerritories())
+        foreach (var summary in territories)
         {
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn();
             var title = FormatTerritoryTitle(summary.TerritoryId, summary.TerritoryName);
-            if (ImGui.Selectable($"{title}##territory_{summary.TerritoryId}", summary.IsSelected, ImGuiSelectableFlags.SpanAllColumns))
-                session.SelectTerritory(summary.TerritoryId, selectNext: false);
             if (summary.IsCurrentTerritory)
+                title += "  当前";
+
+            if (ImGui.Selectable(
+                    $"{FitTextToWidth(title, titleWidth)}##territory_{summary.TerritoryId}",
+                    summary.IsSelected,
+                    ImGuiSelectableFlags.None,
+                    new Vector2(titleWidth, 0f)))
             {
-                ImGui.SameLine();
-                ImGui.TextColored(AccentText, "当前");
+                session.SelectTerritory(summary.TerritoryId, selectNext: false);
+                activeTab = MainTab.Spots;
             }
 
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(summary.SpotCount.ToString());
-            ImGui.TableNextColumn();
-            ImGui.TextColored(summary.ConfirmedCount > 0 ? GoodText : MutedText, summary.ConfirmedCount.ToString());
-            ImGui.TableNextColumn();
-            ImGui.TextColored(summary.MaintenanceNeededCount > 0 ? WarnText : MutedText, summary.MaintenanceNeededCount.ToString());
-            ImGui.TableNextColumn();
             var riskCount = summary.RiskCount + summary.WeakCoverageCount;
-            ImGui.TextColored(riskCount > 0 ? ErrorText : MutedText, riskCount.ToString());
+            DrawPseudoCell(x, titleWidth + gap, spotWidth, summary.SpotCount.ToString());
+            DrawPseudoCell(x, titleWidth + spotWidth + (gap * 2f), confirmedWidth, summary.ConfirmedCount.ToString(), summary.ConfirmedCount > 0 ? GoodText : MutedText);
+            DrawPseudoCell(
+                x,
+                titleWidth + spotWidth + confirmedWidth + (gap * 3f),
+                maintenanceWidth,
+                summary.MaintenanceNeededCount.ToString(),
+                summary.MaintenanceNeededCount > 0 ? WarnText : MutedText);
+            DrawPseudoCell(x, titleWidth + spotWidth + confirmedWidth + maintenanceWidth + (gap * 4f), riskWidth, riskCount.ToString(), riskCount > 0 ? ErrorText : MutedText);
         }
+    }
 
-        ImGui.EndTable();
+    private void DrawTerritoryRowsCompact(IReadOnlyList<TerritoryMaintenanceSummary> territories)
+    {
+        foreach (var summary in territories)
+        {
+            var title = FormatTerritoryTitle(summary.TerritoryId, summary.TerritoryName);
+            if (summary.IsCurrentTerritory)
+                title += "  当前";
+
+            if (ImGui.Selectable($"{FitTextToWidth(title, ImGui.GetContentRegionAvail().X)}##territory_{summary.TerritoryId}", summary.IsSelected))
+            {
+                session.SelectTerritory(summary.TerritoryId, selectNext: false);
+                activeTab = MainTab.Spots;
+            }
+
+            var riskCount = summary.RiskCount + summary.WeakCoverageCount;
+            var metricLine = 0f;
+            DrawInlineMetric("钓场", summary.SpotCount.ToString(), MutedText, ref metricLine);
+            DrawInlineMetric("确认", summary.ConfirmedCount.ToString(), summary.ConfirmedCount > 0 ? GoodText : MutedText, ref metricLine);
+            DrawInlineMetric("需维护", summary.MaintenanceNeededCount.ToString(), summary.MaintenanceNeededCount > 0 ? WarnText : MutedText, ref metricLine);
+            DrawInlineMetric("风险", riskCount.ToString(), riskCount > 0 ? ErrorText : MutedText, ref metricLine);
+        }
     }
 
     private void DrawSpotList()
     {
         DrawSectionTitle("钓场");
 
+        ImGui.TextColored(MutedText, "RowId");
+        ImGui.SameLine();
         ImGui.SetNextItemWidth(110f);
-        ImGui.InputText("RowId", ref targetIdText, 16);
+        ImGui.InputText("##target_id", ref targetIdText, 16);
         ImGui.SameLine();
         if (ActionButton("选择"))
         {
             if (uint.TryParse(targetIdText.Trim(), out var targetId))
+            {
                 session.SelectTarget(targetId);
+                activeTab = MainTab.Maintenance;
+            }
         }
-        ImGui.SameLine();
-        if (ActionButton("下一个", session.TargetCount == 0))
-            session.SelectNextTarget();
 
-        ImGui.SetNextItemWidth(-1f);
-        ImGui.InputText("##spot_filter", ref targetFilterText, 64);
+        SameLineIfFits("下一个");
+        if (ActionButton("下一个", session.TargetCount == 0))
+        {
+            session.SelectNextTarget();
+            activeTab = MainTab.Maintenance;
+        }
+
+        DrawFilterInput("过滤", "##spot_filter", ref targetFilterText);
 
         DrawTerritoryOverview();
 
@@ -179,46 +253,97 @@ internal sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        if (!ImGui.BeginTable("##fpg_spot_list", 7, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Borders, new Vector2(0f, 440f)))
-            return;
+        var visible = GetVisibleTargets().Take(300).ToList();
+        DrawListCount(visible.Count, session.CurrentTerritoryTargets.Count);
+        var height = Math.Max(360f, ImGui.GetContentRegionAvail().Y - 4f);
+        if (ImGui.BeginChild("##fpg_spot_list", new Vector2(0f, height), true, ImGuiWindowFlags.None))
+        {
+            var width = ImGui.GetContentRegionAvail().X;
+            if (width < CompactListBreakpoint)
+                DrawSpotRowsCompact(visible);
+            else
+                DrawSpotRowsWide(visible, width);
+        }
 
-        ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("RowId");
-        ImGui.TableSetupColumn("状态");
-        ImGui.TableSetupColumn("名称");
-        ImGui.TableSetupColumn("点");
-        ImGui.TableSetupColumn("候选");
-        ImGui.TableSetupColumn("地图");
-        ImGui.TableSetupColumn("维护");
-        ImGui.TableHeadersRow();
+        ImGui.EndChild();
+    }
+
+    private void DrawSpotRowsWide(IReadOnlyList<FishingSpotTarget> targets, float width)
+    {
+        const float statusWidth = 68f;
+        const float pointsWidth = 34f;
+        const float candidateWidth = 44f;
+        const float mapWidth = 82f;
+        const float actionWidth = 38f;
+        const float gap = 10f;
+        var nameWidth = Math.Max(190f, width - statusWidth - pointsWidth - candidateWidth - mapWidth - actionWidth - (gap * 5f));
+        var x = ImGui.GetCursorPosX();
+
+        DrawPseudoHeader("钓场", nameWidth);
+        DrawPseudoHeaderCell(x, nameWidth + gap, statusWidth, "状态");
+        DrawPseudoHeaderCell(x, nameWidth + statusWidth + (gap * 2f), pointsWidth, "点");
+        DrawPseudoHeaderCell(x, nameWidth + statusWidth + pointsWidth + (gap * 3f), candidateWidth, "候选");
+        DrawPseudoHeaderCell(x, nameWidth + statusWidth + pointsWidth + candidateWidth + (gap * 4f), mapWidth, "地图");
+        DrawPseudoHeaderCell(x, nameWidth + statusWidth + pointsWidth + candidateWidth + mapWidth + (gap * 5f), actionWidth, "维护");
+        ImGui.Separator();
 
         var ctrlDown = ImGui.GetIO().KeyCtrl;
-        foreach (var target in GetVisibleTargets().Take(300))
+        foreach (var target in targets)
         {
             var analysis = session.Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
             var selected = session.CurrentTarget?.Key == target.Key;
+            var title = $"{target.FishingSpotId} {target.Name}";
 
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn();
-            if (ImGui.Selectable($"{target.FishingSpotId}##spot_{target.FishingSpotId}", selected, ImGuiSelectableFlags.SpanAllColumns))
+            if (ImGui.Selectable($"{FitTextToWidth(title, nameWidth)}##spot_{target.FishingSpotId}", selected, ImGuiSelectableFlags.None, new Vector2(nameWidth, 0f)))
+            {
                 session.SelectTarget(target.FishingSpotId);
+                activeTab = MainTab.Maintenance;
+            }
 
-            ImGui.TableNextColumn();
-            ImGui.TextColored(GetStatusColor(analysis?.Status), FormatStatus(analysis?.Status));
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(target.Name);
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted((analysis?.ConfirmedApproachPointCount ?? 0).ToString());
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted((analysis?.CandidateCount ?? 0).ToString());
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted($"{target.MapX:F1}, {target.MapY:F1}");
-            ImGui.TableNextColumn();
-            if (ActionButton($"清##spot_maintenance_clear_{target.FishingSpotId}", !ctrlDown))
+            DrawPseudoCell(x, nameWidth + gap, statusWidth, FormatStatus(analysis?.Status), GetStatusColor(analysis?.Status));
+            DrawPseudoCell(x, nameWidth + statusWidth + (gap * 2f), pointsWidth, (analysis?.ConfirmedApproachPointCount ?? 0).ToString());
+            DrawPseudoCell(x, nameWidth + statusWidth + pointsWidth + (gap * 3f), candidateWidth, (analysis?.CandidateCount ?? 0).ToString());
+            DrawPseudoCell(x, nameWidth + statusWidth + pointsWidth + candidateWidth + (gap * 4f), mapWidth, $"{target.MapX:F1}, {target.MapY:F1}");
+            if (ctrlDown)
+            {
+                ImGui.SameLine(x + nameWidth + statusWidth + pointsWidth + candidateWidth + mapWidth + (gap * 5f));
+                if (ActionButton($"清##spot_maintenance_clear_{target.FishingSpotId}"))
+                    session.ClearSpotMaintenance(target.FishingSpotId);
+            }
+            else
+            {
+                DrawPseudoCell(
+                    x,
+                    nameWidth + statusWidth + pointsWidth + candidateWidth + mapWidth + (gap * 5f),
+                    actionWidth,
+                    "-");
+            }
+        }
+    }
+
+    private void DrawSpotRowsCompact(IReadOnlyList<FishingSpotTarget> targets)
+    {
+        var ctrlDown = ImGui.GetIO().KeyCtrl;
+        foreach (var target in targets)
+        {
+            var analysis = session.Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
+            var selected = session.CurrentTarget?.Key == target.Key;
+            var title = $"{target.FishingSpotId} {target.Name}";
+            if (ImGui.Selectable($"{FitTextToWidth(title, ImGui.GetContentRegionAvail().X)}##spot_{target.FishingSpotId}", selected))
+            {
+                session.SelectTarget(target.FishingSpotId);
+                activeTab = MainTab.Maintenance;
+            }
+
+            var metricLine = 0f;
+            DrawInlineMetric("状态", FormatStatus(analysis?.Status), GetStatusColor(analysis?.Status), ref metricLine);
+            DrawInlineMetric("点", (analysis?.ConfirmedApproachPointCount ?? 0).ToString(), MutedText, ref metricLine);
+            DrawInlineMetric("候选", (analysis?.CandidateCount ?? 0).ToString(), MutedText, ref metricLine);
+            DrawInlineMetric("地图", $"{target.MapX:F1}, {target.MapY:F1}", MutedText, ref metricLine);
+
+            if (ctrlDown && ImGui.SmallButton($"清维护##spot_maintenance_clear_{target.FishingSpotId}"))
                 session.ClearSpotMaintenance(target.FishingSpotId);
         }
-
-        ImGui.EndTable();
     }
 
     private void DrawSpotDetail()
@@ -242,9 +367,6 @@ internal sealed class MainWindow : Window, IDisposable
     private void DrawSelectedSpotSummary(FishingSpotTarget target)
     {
         var analysis = session.CurrentAnalysis;
-        if (!ImGui.BeginTable("##fpg_spot_summary", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
-            return;
-
         DrawSummaryRow("RowId", target.FishingSpotId.ToString());
         DrawSummaryRow("名称", target.Name);
         DrawSummaryRow("领地", FormatTerritoryTitle(target.TerritoryId, target.TerritoryName));
@@ -254,8 +376,6 @@ internal sealed class MainWindow : Window, IDisposable
         DrawSummaryRow("候选点", (analysis?.CandidateCount ?? 0).ToString());
         DrawSummaryRow("鱼类物品", target.ItemIds.Count == 0 ? "-" : string.Join(", ", target.ItemIds));
         DrawSummaryRow("半径", target.Radius.ToString("F1"));
-
-        ImGui.EndTable();
     }
 
     private void DrawApproachPoints()
@@ -268,36 +388,65 @@ internal sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        if (!ImGui.BeginTable("##fpg_approach_points", 6, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY, new Vector2(0f, 150f)))
-            return;
+        if (ImGui.BeginChild("##fpg_approach_points", new Vector2(0f, 150f), true, ImGuiWindowFlags.None))
+        {
+            var width = ImGui.GetContentRegionAvail().X;
+            if (width < CompactListBreakpoint)
+                DrawApproachPointRowsCompact();
+            else
+                DrawApproachPointRowsWide(width);
+        }
 
-        ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("状态");
-        ImGui.TableSetupColumn("点位");
-        ImGui.TableSetupColumn("朝向");
-        ImGui.TableSetupColumn("来源");
-        ImGui.TableSetupColumn("水系");
-        ImGui.TableSetupColumn("证据");
-        ImGui.TableHeadersRow();
+        ImGui.EndChild();
+    }
+
+    private void DrawApproachPointRowsWide(float width)
+    {
+        const float statusWidth = 50f;
+        const float pointWidth = 150f;
+        const float rotationWidth = 62f;
+        const float sourceWidth = 78f;
+        const float evidenceWidth = 36f;
+        const float gap = 10f;
+        var surfaceWidth = Math.Max(70f, width - statusWidth - pointWidth - rotationWidth - sourceWidth - evidenceWidth - (gap * 5f));
+        var x = ImGui.GetCursorPosX();
+
+        DrawPseudoHeader("状态", statusWidth);
+        DrawPseudoHeaderCell(x, statusWidth + gap, pointWidth, "点位");
+        DrawPseudoHeaderCell(x, statusWidth + pointWidth + (gap * 2f), rotationWidth, "朝向");
+        DrawPseudoHeaderCell(x, statusWidth + pointWidth + rotationWidth + (gap * 3f), sourceWidth, "来源");
+        DrawPseudoHeaderCell(x, statusWidth + pointWidth + rotationWidth + sourceWidth + (gap * 4f), surfaceWidth, "水系");
+        DrawPseudoHeaderCell(x, statusWidth + pointWidth + rotationWidth + sourceWidth + surfaceWidth + (gap * 5f), evidenceWidth, "证据");
+        ImGui.Separator();
 
         foreach (var point in session.CurrentApproachPoints.OrderBy(point => point.PointId, StringComparer.Ordinal))
         {
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn();
             ImGui.TextColored(point.Status == ApproachPointStatus.Confirmed ? GoodText : MutedText, FormatApproachPointStatus(point.Status));
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(FormatPoint(point.Position));
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(point.Rotation.ToString("F3"));
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(FormatSource(point.SourceKind));
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(string.IsNullOrWhiteSpace(point.SourceSurfaceGroupId) ? "-" : point.SourceSurfaceGroupId);
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(point.EvidenceIds.Count.ToString());
+            DrawPseudoCell(x, statusWidth + gap, pointWidth, FormatPoint(point.Position));
+            DrawPseudoCell(x, statusWidth + pointWidth + (gap * 2f), rotationWidth, point.Rotation.ToString("F3"));
+            DrawPseudoCell(x, statusWidth + pointWidth + rotationWidth + (gap * 3f), sourceWidth, FormatSource(point.SourceKind));
+            DrawPseudoCell(
+                x,
+                statusWidth + pointWidth + rotationWidth + sourceWidth + (gap * 4f),
+                surfaceWidth,
+                string.IsNullOrWhiteSpace(point.SourceSurfaceGroupId) ? "-" : point.SourceSurfaceGroupId);
+            DrawPseudoCell(x, statusWidth + pointWidth + rotationWidth + sourceWidth + surfaceWidth + (gap * 5f), evidenceWidth, point.EvidenceIds.Count.ToString());
         }
+    }
 
-        ImGui.EndTable();
+    private void DrawApproachPointRowsCompact()
+    {
+        foreach (var point in session.CurrentApproachPoints.OrderBy(point => point.PointId, StringComparer.Ordinal))
+        {
+            ImGui.TextColored(point.Status == ApproachPointStatus.Confirmed ? GoodText : MutedText, FormatApproachPointStatus(point.Status));
+            ImGui.SameLine();
+            ImGui.TextUnformatted(FitTextToWidth(FormatPoint(point.Position), ImGui.GetContentRegionAvail().X));
+            var metricLine = 0f;
+            DrawInlineMetric("朝向", point.Rotation.ToString("F3"), MutedText, ref metricLine);
+            DrawInlineMetric("来源", FormatSource(point.SourceKind), MutedText, ref metricLine);
+            DrawInlineMetric("水系", string.IsNullOrWhiteSpace(point.SourceSurfaceGroupId) ? "-" : point.SourceSurfaceGroupId, MutedText, ref metricLine);
+            DrawInlineMetric("证据", point.EvidenceIds.Count.ToString(), MutedText, ref metricLine);
+        }
     }
 
     private void DrawCandidateSelection()
@@ -309,8 +458,6 @@ internal sealed class MainWindow : Window, IDisposable
         var candidate = selection.Candidate;
         ImGui.Spacing();
         ImGui.TextColored(AccentText, "当前候选");
-        if (!ImGui.BeginTable("##fpg_candidate_selection", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
-            return;
 
         DrawSummaryRow("状态", selection.ModeText);
         DrawSummaryRow(
@@ -328,30 +475,23 @@ internal sealed class MainWindow : Window, IDisposable
         DrawSummaryRow("Block", string.IsNullOrWhiteSpace(candidate.BlockId) ? "-" : candidate.BlockId);
         DrawSummaryRow("Fingerprint", candidate.CandidateFingerprint);
         DrawSummaryRow("说明", string.IsNullOrWhiteSpace(selection.Note) ? "-" : selection.Note);
-
-        ImGui.EndTable();
     }
 
     private void DrawAutoSurvey()
     {
         ImGui.Spacing();
         ImGui.TextColored(AccentText, "自动点亮");
-        if (ImGui.BeginTable("##fpg_auto_survey", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
-        {
-            DrawSummaryRow("状态", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
-            DrawSummaryRow("候选", session.AutoSurveyCandidateText);
-            DrawSummaryRow("完成", session.AutoSurveyCompletedRounds.ToString());
-            ImGui.EndTable();
-        }
+        DrawSummaryRow("状态", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
+        DrawSummaryRow("候选", session.AutoSurveyCandidateText);
+        DrawSummaryRow("完成", session.AutoSurveyCompletedRounds.ToString());
 
         var hasCurrentTerritory = session.CurrentTerritoryId != 0;
-        if (ActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory))
+        var actionLine = 0f;
+        if (FlowActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
             session.StartAutoSurveyOnce();
-        ImGui.SameLine();
-        if (ActionButton("循环点亮", session.AutoSurveyRunning || !hasCurrentTerritory))
+        if (FlowActionButton("循环点亮", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
             session.StartAutoSurveyLoop();
-        ImGui.SameLine();
-        if (ActionButton("停止自动", !session.AutoSurveyRunning))
+        if (FlowActionButton("停止自动", !session.AutoSurveyRunning, ref actionLine))
             session.StopAutoSurvey();
     }
 
@@ -363,65 +503,41 @@ internal sealed class MainWindow : Window, IDisposable
         var sameTerritory = session.SelectedTerritoryIsCurrent;
 
         ImGui.Spacing();
-        if (ActionButton("派生候选", !hasTarget || session.TerritoryCandidateCount == 0))
+        var actionLine = 0f;
+        if (FlowActionButton("派生候选", !hasTarget || session.TerritoryCandidateCount == 0, ref actionLine))
             session.ScanCurrentTarget();
-
-        ImGui.SameLine();
-        if (ActionButton("刷新候选", !hasTarget || !sameTerritory || session.CurrentScan is null))
+        if (FlowActionButton("刷新候选", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
             session.RefreshCandidateSelection();
-
-        ImGui.SameLine();
-        if (ActionButton("插旗钓场", !hasTarget || !sameTerritory))
+        if (FlowActionButton("插旗钓场", !hasTarget || !sameTerritory, ref actionLine))
             session.PlaceCurrentTargetFlag();
-
-        ImGui.SameLine();
-        if (ActionButton("插旗候选", !actionableCandidateSelection || !sameTerritory))
+        if (FlowActionButton("插旗候选", !actionableCandidateSelection || !sameTerritory, ref actionLine))
             session.PlaceSelectedCandidateFlag();
-
-        ImGui.SameLine();
-        if (ActionButton("插旗未记录", !hasTarget || !sameTerritory || session.CurrentScan is null))
+        if (FlowActionButton("插旗未记录", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
             session.PlaceNearestUnrecordedCandidateFlag();
-
-        if (ActionButton("确认当前站位", !hasTarget || !sameTerritory))
+        if (FlowActionButton("确认当前站位", !hasTarget || !sameTerritory, ref actionLine))
             session.ConfirmCurrentStanding();
-
-        ImGui.SameLine();
-        if (ActionButton("排除此候选", !hasCandidateSelection || !sameTerritory))
+        if (FlowActionButton("排除此候选", !hasCandidateSelection || !sameTerritory, ref actionLine))
             session.RejectSelectedCandidate();
-
-        ImGui.SameLine();
-        if (ActionButton("允许弱覆盖导出", analysis?.Status != SpotAnalysisStatus.WeakCoverage))
+        if (FlowActionButton("允许弱覆盖导出", analysis?.Status != SpotAnalysisStatus.WeakCoverage, ref actionLine))
             session.AllowWeakCoverageExport();
-
-        ImGui.SameLine();
-        if (ActionButton("允许风险导出", analysis?.Status != SpotAnalysisStatus.MixedRisk))
+        if (FlowActionButton("允许风险导出", analysis?.Status != SpotAnalysisStatus.MixedRisk, ref actionLine))
             session.AllowRiskExport();
-
-        ImGui.SameLine();
-        if (ActionButton("忽略钓场", !hasTarget))
+        if (FlowActionButton("忽略钓场", !hasTarget, ref actionLine))
             session.IgnoreCurrentTarget();
-
-        if (ActionButton("生成报告", !hasTarget))
+        if (FlowActionButton("生成报告", !hasTarget, ref actionLine))
             session.GenerateCurrentReport();
-
-        ImGui.SameLine();
-        if (ActionButton("导出已确认"))
+        if (FlowActionButton("导出已确认", false, ref actionLine))
             session.ExportConfirmed();
     }
 
     private void DrawTerritoryOverview()
     {
-        if (!ImGui.BeginTable("##fpg_territory_overview", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
-            return;
-
-        ImGui.TableNextRow();
-        DrawCompactSummary("钓场", session.TargetCount.ToString(), MutedText);
-        DrawCompactSummary("确认", session.ConfirmedCount.ToString(), session.ConfirmedCount > 0 ? GoodText : MutedText);
-        DrawCompactSummary("需维护", session.MaintenanceNeededCount.ToString(), session.MaintenanceNeededCount > 0 ? WarnText : MutedText);
-        DrawCompactSummary("风险", (session.MixedRiskCount + session.WeakCoverageCount).ToString(),
-            session.MixedRiskCount + session.WeakCoverageCount > 0 ? ErrorText : MutedText);
-
-        ImGui.EndTable();
+        var riskCount = session.MixedRiskCount + session.WeakCoverageCount;
+        var metricLine = 0f;
+        DrawInlineMetric("钓场", session.TargetCount.ToString(), MutedText, ref metricLine);
+        DrawInlineMetric("确认", session.ConfirmedCount.ToString(), session.ConfirmedCount > 0 ? GoodText : MutedText, ref metricLine);
+        DrawInlineMetric("需维护", session.MaintenanceNeededCount.ToString(), session.MaintenanceNeededCount > 0 ? WarnText : MutedText, ref metricLine);
+        DrawInlineMetric("风险", riskCount.ToString(), riskCount > 0 ? ErrorText : MutedText, ref metricLine);
     }
 
     private void DrawDebugOptions()
@@ -433,17 +549,14 @@ internal sealed class MainWindow : Window, IDisposable
         if (ImGui.Checkbox("自动记录抛竿", ref autoRecord))
             session.AutoRecordCastsEnabled = autoRecord;
 
-        ImGui.SameLine();
         var overlayEnabled = session.OverlayEnabled;
         if (ImGui.Checkbox("显示 overlay", ref overlayEnabled))
             session.OverlayEnabled = overlayEnabled;
 
-        ImGui.SameLine();
         var showCandidates = session.OverlayShowCandidates;
         if (ImGui.Checkbox("显示候选点", ref showCandidates))
             session.OverlayShowCandidates = showCandidates;
 
-        ImGui.SameLine();
         var showTerritoryCache = session.OverlayShowTerritoryCache;
         if (ImGui.Checkbox("显示领地内存候选", ref showTerritoryCache))
             session.OverlayShowTerritoryCache = showTerritoryCache;
@@ -452,22 +565,31 @@ internal sealed class MainWindow : Window, IDisposable
         if (ImGui.Checkbox("显示钓场半径", ref showRadius))
             session.OverlayShowTargetRadius = showRadius;
 
-        ImGui.SameLine();
         var showFishableDebug = session.OverlayShowFishableDebug;
         if (ImGui.Checkbox("显示 Fishable 水面", ref showFishableDebug))
             session.OverlayShowFishableDebug = showFishableDebug;
 
-        ImGui.SameLine();
         var showWalkableDebug = session.OverlayShowWalkableDebug;
         if (ImGui.Checkbox("显示 Walkable 可走面", ref showWalkableDebug))
             session.OverlayShowWalkableDebug = showWalkableDebug;
 
-        DrawFloatInput("抛竿块选择距离(m)", session.CastBlockSnapDistanceMeters, MinimumCastBlockSnapDistance, MaximumCastBlockSnapDistance, value => session.CastBlockSnapDistanceMeters = value);
-        ImGui.SameLine();
+        DrawFloatInput(
+            "抛竿块选择距离(m)",
+            session.CastBlockSnapDistanceMeters,
+            MinimumCastBlockSnapDistance,
+            MaximumCastBlockSnapDistance,
+            value => session.CastBlockSnapDistanceMeters = value);
         DrawFloatInput("一次点亮水系范围(m)", session.CastBlockFillRangeMeters, MinimumCastBlockFillRange, MaximumCastBlockFillRange, value => session.CastBlockFillRangeMeters = value);
 
-        DrawFloatInput("overlay 距离(m)", session.OverlayMaxDistanceMeters, MinimumOverlayDistance, MaximumOverlayDistance, value => session.OverlayMaxDistanceMeters = value, 10f, 50f, "%.0f");
-        ImGui.SameLine();
+        DrawFloatInput(
+            "overlay 距离(m)",
+            session.OverlayMaxDistanceMeters,
+            MinimumOverlayDistance,
+            MaximumOverlayDistance,
+            value => session.OverlayMaxDistanceMeters = value,
+            10f,
+            50f,
+            "%.0f");
         DrawIntInput("overlay 点数上限", session.OverlayCandidateLimit, MinimumOverlayCandidateLimit, MaximumOverlayCandidateLimit, value => session.OverlayCandidateLimit = value);
     }
 
@@ -481,15 +603,12 @@ internal sealed class MainWindow : Window, IDisposable
         var hasTerritory = session.SelectedTerritoryId != 0;
 
         ImGui.TextColored(WarnText, "按住 Ctrl 启用清理按钮。");
-        if (ActionButton("清当前钓场维护", !ctrlDown || !hasTarget))
+        var actionLine = 0f;
+        if (FlowActionButton("清当前钓场维护", !ctrlDown || !hasTarget, ref actionLine))
             session.ClearCurrentSpotMaintenance();
-
-        ImGui.SameLine();
-        if (ActionButton("清当前领地维护", !ctrlDown || !hasTerritory))
+        if (FlowActionButton("清当前领地维护", !ctrlDown || !hasTerritory, ref actionLine))
             session.ClearCurrentTerritoryMaintenance();
-
-        ImGui.SameLine();
-        if (ActionButton("清当前领地内存候选", !ctrlDown || !hasTerritory))
+        if (FlowActionButton("清当前领地内存候选", !ctrlDown || !hasTerritory, ref actionLine))
             session.ClearCurrentTerritoryCandidates();
     }
 
@@ -498,16 +617,11 @@ internal sealed class MainWindow : Window, IDisposable
         if (!ImGui.CollapsingHeader("文件"))
             return;
 
-        if (!ImGui.BeginTable("##fpg_paths", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
-            return;
-
         DrawSummaryRow("数据", session.DataRoot);
         DrawSummaryRow("目录", session.CatalogPath);
         DrawSummaryRow("维护", string.IsNullOrWhiteSpace(session.MaintenancePath) ? "-" : session.MaintenancePath);
         DrawSummaryRow("内存候选", session.TerritoryCandidateCount.ToString());
         DrawSummaryRow("导出", session.ExportPath);
-
-        ImGui.EndTable();
     }
 
     private IEnumerable<TerritoryMaintenanceSummary> GetVisibleTerritories()
@@ -673,22 +787,30 @@ internal sealed class MainWindow : Window, IDisposable
 
     private static void DrawSummaryRow(string label, string value, Vector4? valueColor)
     {
-        ImGui.TableNextRow();
-        ImGui.TableNextColumn();
+        var rowStart = ImGui.GetCursorPosX();
+        var labelWidth = Math.Clamp(ImGui.GetContentRegionAvail().X * 0.28f, 72f, 132f);
         ImGui.TextColored(MutedText, label);
-        ImGui.TableNextColumn();
+        ImGui.SameLine(rowStart + labelWidth);
+        ImGui.PushTextWrapPos();
         if (valueColor is { } color)
             ImGui.TextColored(color, value);
         else
             ImGui.TextUnformatted(value);
+        ImGui.PopTextWrapPos();
     }
 
-    private static void DrawCompactSummary(string label, string value, Vector4 color)
+    private static void DrawInlineMetric(string label, string value, Vector4 color, ref float lineWidth)
     {
-        ImGui.TableNextColumn();
+        var width = ImGui.CalcTextSize($"{label} {value}").X + 14f;
+        if (lineWidth > 0f && lineWidth + width <= ImGui.GetContentRegionAvail().X)
+            ImGui.SameLine();
+        else if (lineWidth > 0f)
+            lineWidth = 0f;
+
         ImGui.TextColored(MutedText, label);
         ImGui.SameLine();
         ImGui.TextColored(color, value);
+        lineWidth += width;
     }
 
     private static void DrawSectionTitle(string title)
@@ -702,6 +824,82 @@ internal sealed class MainWindow : Window, IDisposable
         var clicked = ImGui.Button(label);
         ImGui.EndDisabled();
         return clicked && !disabled;
+    }
+
+    private static bool FlowActionButton(string label, bool disabled, ref float lineWidth)
+    {
+        var width = ImGui.CalcTextSize(label).X + 24f;
+        if (lineWidth > 0f && lineWidth + width <= ImGui.GetContentRegionAvail().X)
+            ImGui.SameLine();
+        else if (lineWidth > 0f)
+            lineWidth = 0f;
+
+        var clicked = ActionButton(label, disabled);
+        lineWidth += width;
+        return clicked;
+    }
+
+    private static void DrawFilterInput(string label, string id, ref string text)
+    {
+        ImGui.TextColored(MutedText, label);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(-1f);
+        ImGui.InputText(id, ref text, 64);
+    }
+
+    private static void DrawListCount(int visibleCount, int totalCount)
+    {
+        if (visibleCount == totalCount)
+            ImGui.TextColored(MutedText, $"{totalCount} 项");
+        else
+            ImGui.TextColored(MutedText, $"{visibleCount} / {totalCount} 项");
+    }
+
+    private static void DrawPseudoHeader(string label, float width)
+    {
+        ImGui.TextColored(MutedText, FitTextToWidth(label, width));
+    }
+
+    private static void DrawPseudoHeaderCell(float rowStartX, float offsetX, float width, string label)
+    {
+        ImGui.SameLine(rowStartX + offsetX);
+        ImGui.TextColored(MutedText, FitTextToWidth(label, width));
+    }
+
+    private static void DrawPseudoCell(float rowStartX, float offsetX, float width, string value)
+    {
+        DrawPseudoCell(rowStartX, offsetX, width, value, null);
+    }
+
+    private static void DrawPseudoCell(float rowStartX, float offsetX, float width, string value, Vector4? color)
+    {
+        ImGui.SameLine(rowStartX + offsetX);
+        var text = FitTextToWidth(value, width);
+        if (color is { } textColor)
+            ImGui.TextColored(textColor, text);
+        else
+            ImGui.TextUnformatted(text);
+    }
+
+    private static void SameLineIfFits(string nextLabel)
+    {
+        var width = ImGui.CalcTextSize(nextLabel).X + 24f;
+        if (width <= ImGui.GetContentRegionAvail().X)
+            ImGui.SameLine();
+    }
+
+    private static string FitTextToWidth(string text, float width)
+    {
+        if (width <= 16f || ImGui.CalcTextSize(text).X <= width)
+            return text;
+
+        const string ellipsis = "...";
+        var usableWidth = Math.Max(0f, width - ImGui.CalcTextSize(ellipsis).X);
+        var length = text.Length;
+        while (length > 0 && ImGui.CalcTextSize(text[..length]).X > usableWidth)
+            length--;
+
+        return length <= 0 ? ellipsis : text[..length] + ellipsis;
     }
 
     private static void DrawFloatInput(
