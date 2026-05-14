@@ -15,6 +15,8 @@ internal sealed class SpotWorkflowSession
     private const float MaximumCastBlockSnapDistance = 50f;
     private const float MinimumCastBlockFillRange = 1f;
     private const float MaximumCastBlockFillRange = 1000f;
+    private const float CastWaterSystemLinkDistanceMeters = 8f;
+    private const float CastWaterSystemHeightToleranceMeters = 3f;
 
     private readonly SpotJsonStore store;
     private readonly TerritoryMaintenanceStore maintenanceStore;
@@ -67,7 +69,7 @@ internal sealed class SpotWorkflowSession
     public bool OverlayShowFishableDebug { get; set; } = true;
     public bool OverlayShowWalkableDebug { get; set; } = true;
     public float CastBlockSnapDistanceMeters { get; set; } = 6f;
-    public float CastBlockFillRangeMeters { get; set; } = 30f;
+    public float CastBlockFillRangeMeters { get; set; } = 120f;
     public float OverlayMaxDistanceMeters { get; set; } = 90f;
     public int OverlayCandidateLimit { get; set; } = 160;
     public uint LastCastPlaceNameId { get; private set; }
@@ -516,7 +518,7 @@ internal sealed class SpotWorkflowSession
             blockCandidateById.TryGetValue(fingerprint, out var blockCandidate);
             var linkCount = block is not null && blockCandidate is not null
                 ? block.Candidates.Count(next => !string.Equals(next.CandidateId, fingerprint, StringComparison.Ordinal)
-                    && ShouldLinkBlockPortion(blockCandidate, next))
+                    && ShouldLinkCastWaterSystem(blockCandidate, next))
                 : 0;
             var pathDistance = fillDistances.TryGetValue(fingerprint, out var distance)
                 ? distance
@@ -719,6 +721,11 @@ internal sealed class SpotWorkflowSession
             .Select(candidate => candidate!)
             .OrderBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .ToList();
+        if (candidates.Count == 0)
+        {
+            LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿 Surface {FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 的本次水系范围没有可写候选点。";
+            return true;
+        }
 
         var existingFingerprints = GetMaintenanceRecord(target.Key)?.ApproachPoints
             .Where(point => point.Status == ApproachPointStatus.Confirmed)
@@ -726,22 +733,17 @@ internal sealed class SpotWorkflowSession
             .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
             .ToHashSet(StringComparer.Ordinal)
             ?? [];
-        var note = $"autoFillFromCast placeName={castPlaceNameId} player={FormatPoint(playerSnapshot.Position)} surface={FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={fillRange:F1}";
+        var note = $"autoFillFromCast placeName={castPlaceNameId} player={FormatPoint(playerSnapshot.Position)} waterSystem={FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={fillRange:F1} repeatEvidence=true";
         var newCandidates = candidates
-            .Where(candidate => existingFingerprints.Add(candidate.CandidateFingerprint))
+            .Where(candidate => !existingFingerprints.Contains(candidate.CandidateFingerprint))
             .ToList();
+        var repeatedCandidates = candidates.Count - newCandidates.Count;
 
-        if (newCandidates.Count == 0)
-        {
-            LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿 Surface {FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 的本次连锁范围已覆盖 {candidates.Count}/{fillDistances.Count} 个候选点，无新增记录。";
-            return true;
-        }
-
-        UpsertAutoCastFillApproachPoints(target, scan, newCandidates, note);
-        LastCastRecordedCount = newCandidates.Count;
+        UpsertAutoCastFillApproachPoints(target, scan, candidates, note);
+        LastCastRecordedCount = candidates.Count;
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿连锁点亮：Surface {FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 新增 {newCandidates.Count}/{candidates.Count} 个候选点（连锁图 {fillDistances.Count}，seed 块 {selection.Block.BlockId}）。";
+        LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿水系点亮：{FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 新增 {newCandidates.Count} 个点，重复证据 {repeatedCandidates} 个（本次 {candidates.Count}/{fillDistances.Count}，seed 块 {selection.Block.BlockId}）。";
         return true;
     }
 
@@ -1056,6 +1058,7 @@ internal sealed class SpotWorkflowSession
                     Position = candidate.Position,
                     Rotation = candidate.Rotation,
                     CandidateFingerprint = candidate.CandidateFingerprint,
+                    SourceSurfaceGroupId = candidate.SurfaceGroupId,
                     SourceScanId = scan.ScanId,
                     SourceScannerVersion = scan.ScannerVersion,
                     Note = note,
@@ -1108,6 +1111,7 @@ internal sealed class SpotWorkflowSession
                 Position = position,
                 Rotation = rotation,
                 CandidateFingerprint = candidate.CandidateFingerprint,
+                SourceSurfaceGroupId = candidate.SurfaceGroupId,
                 SourceScanId = scan.ScanId,
                 SourceScannerVersion = scan.ScannerVersion,
                 Note = note,
@@ -1202,6 +1206,7 @@ internal sealed class SpotWorkflowSession
                 SourceKind = sourceKind,
                 SourceCandidateFingerprint = candidate.CandidateFingerprint,
                 SourceCandidateId = candidate.SourceCandidateId,
+                SourceSurfaceGroupId = candidate.SurfaceGroupId,
                 SourceBlockId = candidate.BlockId,
                 SourceScanId = scan.ScanId,
                 SourceScannerVersion = scan.ScannerVersion,
@@ -1225,6 +1230,28 @@ internal sealed class SpotWorkflowSession
             points[existingIndex] = existing with
             {
                 Status = ApproachPointStatus.Confirmed,
+                SourceKind = existing.SourceKind == ApproachPointSourceKind.Manual
+                    && source.SourceKind != ApproachPointSourceKind.Manual
+                        ? source.SourceKind
+                        : existing.SourceKind,
+                SourceCandidateFingerprint = string.IsNullOrWhiteSpace(existing.SourceCandidateFingerprint)
+                    ? source.SourceCandidateFingerprint
+                    : existing.SourceCandidateFingerprint,
+                SourceCandidateId = string.IsNullOrWhiteSpace(existing.SourceCandidateId)
+                    ? source.SourceCandidateId
+                    : existing.SourceCandidateId,
+                SourceSurfaceGroupId = string.IsNullOrWhiteSpace(existing.SourceSurfaceGroupId)
+                    ? source.SourceSurfaceGroupId
+                    : existing.SourceSurfaceGroupId,
+                SourceBlockId = string.IsNullOrWhiteSpace(existing.SourceBlockId)
+                    ? source.SourceBlockId
+                    : existing.SourceBlockId,
+                SourceScanId = string.IsNullOrWhiteSpace(existing.SourceScanId)
+                    ? source.SourceScanId
+                    : existing.SourceScanId,
+                SourceScannerVersion = string.IsNullOrWhiteSpace(existing.SourceScannerVersion)
+                    ? source.SourceScannerVersion
+                    : existing.SourceScannerVersion,
                 EvidenceIds = existing.EvidenceIds
                     .Append(evidenceId)
                     .Where(id => !string.IsNullOrWhiteSpace(id))
@@ -1245,6 +1272,7 @@ internal sealed class SpotWorkflowSession
             SourceKind = source.SourceKind,
             SourceCandidateFingerprint = source.SourceCandidateFingerprint,
             SourceCandidateId = source.SourceCandidateId,
+            SourceSurfaceGroupId = source.SourceSurfaceGroupId,
             SourceBlockId = source.SourceBlockId,
             SourceScanId = source.SourceScanId,
             SourceScannerVersion = source.SourceScannerVersion,
@@ -1641,7 +1669,11 @@ internal sealed class SpotWorkflowSession
                         var spotScan = CurrentTerritorySurvey?.TerritoryId == target.TerritoryId
                             ? scanService.CreateSpotScan(target, Catalog.Spots, CurrentTerritorySurvey)
                             : null;
-                        return maintenanceAnalysisBuilder.Analyze(target, spotScan, spot, null);
+                        return ApplyMaintenanceMixedRisk(
+                            target,
+                            maintenanceAnalysisBuilder.Analyze(target, spotScan, spot, null),
+                            maintenance,
+                            spot?.ReviewDecision ?? SpotReviewDecision.None);
                     })
                     .ToList();
                 var confirmed = analyses.Count(analysis => analysis.Status == SpotAnalysisStatus.Confirmed);
@@ -1866,12 +1898,13 @@ internal sealed class SpotWorkflowSession
                             ? SpotAnalysisStatus.Confirmed
                             : SpotAnalysisStatus.WeakCoverage;
 
-                return new SpotAnalysis
+                var analysis = new SpotAnalysis
                 {
                     Key = target.Key,
                     Status = status,
                     ConfirmedApproachPointCount = confirmedCount,
                 };
+                return ApplyMaintenanceMixedRisk(target, analysis, document, reviewDecision);
             })
             .ToList();
     }
@@ -1896,11 +1929,79 @@ internal sealed class SpotWorkflowSession
 
     private SpotAnalysis BuildAnalysis(FishingSpotTarget target)
     {
-        return maintenanceAnalysisBuilder.Analyze(
+        var maintenance = GetMaintenanceRecord(target.Key);
+        return ApplyMaintenanceMixedRisk(
             target,
-            GetSpotScanForTarget(target),
-            GetMaintenanceRecord(target.Key),
-            TryLoadLegacyReview(target.Key));
+            maintenanceAnalysisBuilder.Analyze(
+                target,
+                GetSpotScanForTarget(target),
+                maintenance,
+                TryLoadLegacyReview(target.Key)),
+            CurrentTerritoryMaintenance,
+            maintenance?.ReviewDecision ?? SpotReviewDecision.None);
+    }
+
+    private static SpotAnalysis ApplyMaintenanceMixedRisk(
+        FishingSpotTarget target,
+        SpotAnalysis analysis,
+        TerritoryMaintenanceDocument? maintenanceDocument,
+        SpotReviewDecision reviewDecision)
+    {
+        if (analysis.Status == SpotAnalysisStatus.Ignored)
+            return analysis;
+
+        var relatedSpotIds = FindMaintenanceMixedRiskSpotIds(target.Key, maintenanceDocument);
+        if (relatedSpotIds.Count == 0)
+            return analysis;
+
+        var messages = analysis.Messages.ToList();
+        messages.Add($"已确认候选或水系也被 FishingSpot {string.Join(", ", relatedSpotIds)} 记录。");
+        return analysis with
+        {
+            Status = HasReviewDecision(reviewDecision, SpotReviewDecision.AllowRiskExport)
+                ? analysis.Status
+                : SpotAnalysisStatus.MixedRisk,
+            HasMixedRisk = true,
+            Messages = messages
+                .Distinct(StringComparer.Ordinal)
+                .ToList(),
+        };
+    }
+
+    private static IReadOnlyList<uint> FindMaintenanceMixedRiskSpotIds(
+        SpotKey key,
+        TerritoryMaintenanceDocument? maintenanceDocument)
+    {
+        var current = maintenanceDocument?.Spots.FirstOrDefault(spot => spot.FishingSpotId == key.FishingSpotId);
+        if (current is null)
+            return [];
+
+        var sourceCandidateIds = current.ApproachPoints
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(point => point.SourceCandidateId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
+        var sourceSurfaceGroupIds = current.ApproachPoints
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(point => point.SourceSurfaceGroupId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
+        if (sourceCandidateIds.Count == 0 && sourceSurfaceGroupIds.Count == 0)
+            return [];
+
+        return maintenanceDocument!.Spots
+            .Where(spot => spot.FishingSpotId != key.FishingSpotId)
+            .Where(spot => spot.ApproachPoints
+                .Where(point => point.Status == ApproachPointStatus.Confirmed)
+                .Any(point =>
+                    (!string.IsNullOrWhiteSpace(point.SourceCandidateId)
+                        && sourceCandidateIds.Contains(point.SourceCandidateId))
+                    || (!string.IsNullOrWhiteSpace(point.SourceSurfaceGroupId)
+                        && sourceSurfaceGroupIds.Contains(point.SourceSurfaceGroupId))))
+            .Select(spot => spot.FishingSpotId)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
     }
 
     private CandidateSelection? BuildCandidateSelection(
@@ -2015,11 +2116,16 @@ internal sealed class SpotWorkflowSession
         CurrentAnalysis = Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
         CurrentScan = GetSpotScanForTarget(target);
         CurrentTargetBlocks = CurrentScan is null ? [] : BuildBlocksFromSpotCandidates(CurrentScan.Candidates);
-        CurrentAnalysis = maintenanceAnalysisBuilder.Analyze(
+        var maintenance = GetMaintenanceRecord(target.Key);
+        CurrentAnalysis = ApplyMaintenanceMixedRisk(
             target,
-            CurrentScan,
-            GetMaintenanceRecord(target.Key),
-            TryLoadLegacyReview(target.Key));
+            maintenanceAnalysisBuilder.Analyze(
+                target,
+                CurrentScan,
+                maintenance,
+                TryLoadLegacyReview(target.Key)),
+            CurrentTerritoryMaintenance,
+            maintenance?.ReviewDecision ?? SpotReviewDecision.None);
         CurrentCandidateSelection = CurrentScan is null
             ? null
             : GetOrBuildCandidateSelection(target, CurrentScan);
@@ -2182,7 +2288,7 @@ internal sealed class SpotWorkflowSession
 
             foreach (var next in candidates)
             {
-                if (visited.Contains(next.CandidateId) || !ShouldLinkBlockPortion(current, next))
+                if (visited.Contains(next.CandidateId) || !ShouldLinkCastWaterSystem(current, next))
                     continue;
 
                 var edgeDistance = Math.Max(0.1f, current.Position.HorizontalDistanceTo(next.Position));
@@ -2195,10 +2301,18 @@ internal sealed class SpotWorkflowSession
         return distances;
     }
 
-    private bool ShouldLinkBlockPortion(ApproachCandidate left, ApproachCandidate right)
+    private bool ShouldLinkCastWaterSystem(ApproachCandidate left, ApproachCandidate right)
     {
-        return MathF.Abs(left.Position.Y - right.Position.Y) <= blockOptions.BlockHeightToleranceMeters
-            && left.Position.HorizontalDistanceTo(right.Position) <= blockOptions.BlockLinkDistanceMeters;
+        var sameWaterSystem = !string.IsNullOrWhiteSpace(left.SurfaceGroupId)
+            && string.Equals(left.SurfaceGroupId, right.SurfaceGroupId, StringComparison.Ordinal);
+        var linkDistance = sameWaterSystem
+            ? CastWaterSystemLinkDistanceMeters
+            : blockOptions.BlockLinkDistanceMeters;
+        var heightTolerance = sameWaterSystem
+            ? CastWaterSystemHeightToleranceMeters
+            : blockOptions.BlockHeightToleranceMeters;
+        return MathF.Abs(left.Position.Y - right.Position.Y) <= heightTolerance
+            && left.Position.HorizontalDistanceTo(right.Position) <= linkDistance;
     }
 
     private void ClearCurrentTerritoryRuntimeState()

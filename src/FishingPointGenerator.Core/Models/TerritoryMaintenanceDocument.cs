@@ -44,6 +44,7 @@ public sealed record ApproachPoint
     public ApproachPointSourceKind SourceKind { get; init; } = ApproachPointSourceKind.Manual;
     public string SourceCandidateFingerprint { get; init; } = string.Empty;
     public string SourceCandidateId { get; init; } = string.Empty;
+    public string SourceSurfaceGroupId { get; init; } = string.Empty;
     public string SourceBlockId { get; init; } = string.Empty;
     public string SourceScanId { get; init; } = string.Empty;
     public string SourceScannerVersion { get; init; } = string.Empty;
@@ -68,6 +69,7 @@ public sealed record SpotEvidenceEvent
     public Point3? Position { get; init; }
     public float? Rotation { get; init; }
     public string CandidateFingerprint { get; init; } = string.Empty;
+    public string SourceSurfaceGroupId { get; init; } = string.Empty;
     public string SourceScanId { get; init; } = string.Empty;
     public string SourceScannerVersion { get; init; } = string.Empty;
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;

@@ -262,7 +262,7 @@ internal sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        if (!ImGui.BeginTable("##fpg_approach_points", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY, new Vector2(0f, 150f)))
+        if (!ImGui.BeginTable("##fpg_approach_points", 6, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY, new Vector2(0f, 150f)))
             return;
 
         ImGui.TableSetupScrollFreeze(0, 1);
@@ -270,6 +270,7 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("点位");
         ImGui.TableSetupColumn("朝向");
         ImGui.TableSetupColumn("来源");
+        ImGui.TableSetupColumn("水系");
         ImGui.TableSetupColumn("证据");
         ImGui.TableHeadersRow();
 
@@ -284,6 +285,8 @@ internal sealed class MainWindow : Window, IDisposable
             ImGui.TextUnformatted(point.Rotation.ToString("F3"));
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(FormatSource(point.SourceKind));
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(string.IsNullOrWhiteSpace(point.SourceSurfaceGroupId) ? "-" : point.SourceSurfaceGroupId);
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(point.EvidenceIds.Count.ToString());
         }
@@ -432,7 +435,7 @@ internal sealed class MainWindow : Window, IDisposable
 
         DrawFloatInput("抛竿块选择距离(m)", session.CastBlockSnapDistanceMeters, MinimumCastBlockSnapDistance, MaximumCastBlockSnapDistance, value => session.CastBlockSnapDistanceMeters = value);
         ImGui.SameLine();
-        DrawFloatInput("一次点亮块内范围(m)", session.CastBlockFillRangeMeters, MinimumCastBlockFillRange, MaximumCastBlockFillRange, value => session.CastBlockFillRangeMeters = value);
+        DrawFloatInput("一次点亮水系范围(m)", session.CastBlockFillRangeMeters, MinimumCastBlockFillRange, MaximumCastBlockFillRange, value => session.CastBlockFillRangeMeters = value);
 
         DrawFloatInput("overlay 距离(m)", session.OverlayMaxDistanceMeters, MinimumOverlayDistance, MaximumOverlayDistance, value => session.OverlayMaxDistanceMeters = value, 10f, 50f, "%.0f");
         ImGui.SameLine();
