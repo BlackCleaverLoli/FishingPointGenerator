@@ -179,7 +179,7 @@ internal sealed class MainWindow : Window, IDisposable
             return;
         }
 
-        if (!ImGui.BeginTable("##fpg_spot_list", 6, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Borders, new Vector2(0f, 440f)))
+        if (!ImGui.BeginTable("##fpg_spot_list", 7, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Borders, new Vector2(0f, 440f)))
             return;
 
         ImGui.TableSetupScrollFreeze(0, 1);
@@ -189,8 +189,10 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("点");
         ImGui.TableSetupColumn("候选");
         ImGui.TableSetupColumn("地图");
+        ImGui.TableSetupColumn("维护");
         ImGui.TableHeadersRow();
 
+        var ctrlDown = ImGui.GetIO().KeyCtrl;
         foreach (var target in GetVisibleTargets().Take(300))
         {
             var analysis = session.Analyses.FirstOrDefault(analysis => analysis.Key == target.Key);
@@ -211,6 +213,9 @@ internal sealed class MainWindow : Window, IDisposable
             ImGui.TextUnformatted((analysis?.CandidateCount ?? 0).ToString());
             ImGui.TableNextColumn();
             ImGui.TextUnformatted($"{target.MapX:F1}, {target.MapY:F1}");
+            ImGui.TableNextColumn();
+            if (ActionButton($"清##spot_maintenance_clear_{target.FishingSpotId}", !ctrlDown))
+                session.ClearSpotMaintenance(target.FishingSpotId);
         }
 
         ImGui.EndTable();

@@ -12,8 +12,28 @@ internal sealed class VnavmeshQueryService
         new("vnavmesh.Nav.Pathfind", () => null!);
     private readonly IPCSubscriber<Vector3, Vector3, bool, CancellationToken, Task<List<Vector3>>> navPathfindCancelable =
         new("vnavmesh.Nav.PathfindCancelable", () => null!);
+    private readonly IPCSubscriber<Vector3, float, float, Vector3?> meshNearestPointReachable =
+        new("vnavmesh.Query.Mesh.NearestPointReachable", () => (Vector3?)null);
 
     public bool IsReady => navIsReady.TryInvokeFunc();
+
+    public MeshPointQueryResult QueryNearestReachablePoint(Vector3 point, float halfExtentXZ, float halfExtentY)
+    {
+        if (!IsReady)
+            return MeshPointQueryResult.Unavailable("vnavmesh not ready");
+
+        try
+        {
+            var nearest = meshNearestPointReachable.TryInvokeFunc(point, halfExtentXZ, halfExtentY);
+            return nearest is { } reachablePoint
+                ? MeshPointQueryResult.Reachable(reachablePoint)
+                : MeshPointQueryResult.Unreachable("no nearby reachable mesh point");
+        }
+        catch (Exception ex)
+        {
+            return MeshPointQueryResult.Unavailable(ex.Message);
+        }
+    }
 
     public async Task<PathQueryResult> QueryPathAsync(Vector3 from, Vector3 to, bool fly, CancellationToken cancellationToken)
     {
@@ -58,6 +78,23 @@ internal sealed class VnavmeshQueryService
 
         return length;
     }
+}
+
+internal sealed record MeshPointQueryResult(
+    PathQueryStatus Status,
+    Vector3 Point,
+    string Message)
+{
+    public bool IsReachable => Status == PathQueryStatus.Reachable;
+
+    public static MeshPointQueryResult Reachable(Vector3 point) =>
+        new(PathQueryStatus.Reachable, point, string.Empty);
+
+    public static MeshPointQueryResult Unreachable(string message) =>
+        new(PathQueryStatus.Unreachable, default, message);
+
+    public static MeshPointQueryResult Unavailable(string message) =>
+        new(PathQueryStatus.Unavailable, default, message);
 }
 
 internal enum PathQueryStatus

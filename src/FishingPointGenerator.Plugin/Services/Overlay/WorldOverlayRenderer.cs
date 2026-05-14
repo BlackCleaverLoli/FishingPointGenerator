@@ -122,11 +122,8 @@ internal sealed unsafe class WorldOverlayRenderer
             return;
 
         var selectedCandidateFingerprint = session.CurrentCandidateSelection?.Candidate.CandidateFingerprint;
-        var confirmedFingerprints = session.CurrentApproachPoints
-            .Where(point => point.Status == ApproachPointStatus.Confirmed)
-            .Select(point => point.SourceCandidateFingerprint)
-            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
-            .ToHashSet(StringComparer.Ordinal);
+        var recordedCandidateIds = session.CurrentTerritoryRecordedCandidateIds;
+        var recordedCandidateFingerprints = session.CurrentTerritoryRecordedCandidateFingerprints;
 
         var candidates = scan.Candidates
             .Select(candidate => new
@@ -147,7 +144,7 @@ internal sealed unsafe class WorldOverlayRenderer
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
             var isSelectedCandidate = string.Equals(candidate.CandidateFingerprint, selectedCandidateFingerprint, StringComparison.Ordinal);
-            var isConfirmed = confirmedFingerprints.Contains(candidate.CandidateFingerprint);
+            var isConfirmed = IsRecordedCandidate(candidate, recordedCandidateIds, recordedCandidateFingerprints);
             var color = isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor;
             var pointRadius = isSelectedCandidate ? 5f : isConfirmed ? 4f : 3f;
             var lineThickness = isSelectedCandidate ? 2 : 1;
@@ -160,7 +157,7 @@ internal sealed unsafe class WorldOverlayRenderer
                 DrawWorldText(
                     drawList,
                     standing + new Vector3(0f, 1.6f, 0f),
-                    BuildCandidateLabel(session, candidate, item.Distance, isSelectedCandidate, isConfirmed, selection),
+                    BuildCandidateLabel(candidate, item.Distance, isSelectedCandidate, isConfirmed, selection),
                     isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor);
                 labelCount++;
             }
@@ -169,11 +166,10 @@ internal sealed unsafe class WorldOverlayRenderer
         if (scan.Candidates.Count > candidates.Count && TryWorldToScreen(playerPosition + new Vector3(0f, 2.5f, 0f), out var screen))
             drawList.AddText(screen, WarningColor, $"FPG overlay {candidates.Count}/{scan.Candidates.Count}");
 
-        DrawTargetBlockLabels(drawList, session, playerPosition, drawDistance, confirmedFingerprints);
+        DrawTargetBlockLabels(drawList, session, playerPosition, drawDistance, recordedCandidateIds);
     }
 
     private static string BuildCandidateLabel(
-        SpotWorkflowSession session,
         SpotCandidate candidate,
         float distanceToPlayer,
         bool isSelectedCandidate,
@@ -188,10 +184,20 @@ internal sealed unsafe class WorldOverlayRenderer
         var path = isSelectedCandidate && selection?.PathLengthMeters is { } pathLength
             ? $" path={pathLength:F1}m"
             : string.Empty;
-        var target = string.IsNullOrWhiteSpace(session.CurrentTargetDisplayName)
-            ? $"spot {candidate.Key.FishingSpotId}"
-            : session.CurrentTargetDisplayName;
-        return $"{target} {status} p={distanceToPlayer:F1}m c={candidate.DistanceToTargetCenterMeters:F1}m{path} b={ShortBlockId(candidate.BlockId)}";
+        return $"候选 {status} p={distanceToPlayer:F1}m c={candidate.DistanceToTargetCenterMeters:F1}m{path} b={ShortBlockId(candidate.BlockId)}";
+    }
+
+    private static bool IsRecordedCandidate(
+        SpotCandidate candidate,
+        IReadOnlySet<string> recordedCandidateIds,
+        IReadOnlySet<string> recordedCandidateFingerprints)
+    {
+        var candidateId = !string.IsNullOrWhiteSpace(candidate.SourceCandidateId)
+            ? candidate.SourceCandidateId
+            : candidate.CandidateFingerprint;
+        return (!string.IsNullOrWhiteSpace(candidateId) && recordedCandidateIds.Contains(candidateId))
+            || (!string.IsNullOrWhiteSpace(candidate.CandidateFingerprint)
+                && recordedCandidateFingerprints.Contains(candidate.CandidateFingerprint));
     }
 
     private void DrawSurfaceDebug(
@@ -306,11 +312,14 @@ internal sealed unsafe class WorldOverlayRenderer
         if (blocks.Count == 0)
             return;
 
-        var selectedSourceIds = session.CurrentScan?.Candidates
-            .Select(candidate => candidate.SourceCandidateId)
-            .Where(id => !string.IsNullOrWhiteSpace(id))
-            .ToHashSet(StringComparer.Ordinal)
-            ?? [];
+        IReadOnlySet<string> selectedSourceIds = session.OverlayShowCandidates
+            ? (session.CurrentScan?.Candidates
+                .Select(candidate => candidate.SourceCandidateId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.Ordinal)
+                ?? [])
+            : [];
+        var recordedCandidateIds = session.CurrentTerritoryRecordedCandidateIds;
         var playerPoint = Point3.From(playerPosition);
         var candidates = blocks
             .SelectMany(block => block.Candidates)
@@ -330,8 +339,10 @@ internal sealed unsafe class WorldOverlayRenderer
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            DrawFacingGuide(drawList, standing, candidate.Rotation, TerritoryCandidateColor);
-            DrawWorldPoint(drawList, standing, 2f, TerritoryCandidateColor, true);
+            var isConfirmed = recordedCandidateIds.Contains(candidate.CandidateId);
+            var color = isConfirmed ? ConfirmedColor : TerritoryCandidateColor;
+            DrawFacingGuide(drawList, standing, candidate.Rotation, color);
+            DrawWorldPoint(drawList, standing, isConfirmed ? 3f : 2f, color, true);
         }
     }
 
@@ -340,7 +351,7 @@ internal sealed unsafe class WorldOverlayRenderer
         SpotWorkflowSession session,
         Vector3 playerPosition,
         float drawDistance,
-        IReadOnlySet<string> confirmedFingerprints)
+        IReadOnlySet<string> recordedCandidateIds)
     {
         if (session.CurrentTargetBlocks.Count == 0)
             return;
@@ -358,7 +369,7 @@ internal sealed unsafe class WorldOverlayRenderer
             .ThenBy(item => item.Block.BlockId, StringComparer.Ordinal)
             .Take(32))
         {
-            var confirmedCount = item.Block.Candidates.Count(candidate => confirmedFingerprints.Contains(candidate.CandidateId));
+            var confirmedCount = item.Block.Candidates.Count(candidate => recordedCandidateIds.Contains(candidate.CandidateId));
             var label = $"{ShortBlockId(item.Block.BlockId)} {confirmedCount}/{item.Block.Candidates.Count}";
             DrawWorldText(drawList, ToVector3(item.Center) + new Vector3(0f, 2f, 0f), label, BlockLabelColor);
         }

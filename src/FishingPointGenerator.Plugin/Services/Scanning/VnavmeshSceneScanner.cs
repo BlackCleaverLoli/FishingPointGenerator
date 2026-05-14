@@ -29,6 +29,10 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float FacingProbeMaxDistance = 2f;
     private const float FacingProbeLateralRadius = 0.75f;
     private const float FacingDirectionDedupeRadians = 0.05f;
+    private const float CandidateSightStartHeight = 1.2f;
+    private const float CandidateSightTargetHeight = 0.05f;
+    private const float SightLineIntersectionEpsilon = 0.001f;
+    private const float SightLineCacheCellSize = 0.05f;
     private const float DebugCellSize = 10f;
     private const int MaxCandidates = 99999;
     private const int MaxDebugCells = 18;
@@ -126,6 +130,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var walkableTriangles = nearbyTriangles
             .Where(triangle => triangle.IsWalkable && triangle.Area > 0.05f)
             .ToList();
+        var sightLineBlockerTriangles = nearbyTriangles
+            .Where(IsSightLineBlocker)
+            .ToList();
 
         var buckets = BuildEdgeBuckets(fishableTriangles, walkableTriangles);
         var sharedBuckets = buckets.Values.Count(bucket => bucket.FishableEdges.Count > 0 && bucket.WalkableEdges.Count > 0);
@@ -136,13 +143,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var nearbySurfaceMatches = CountNearbySurfaceMatches(
             fishableOuterEdges.Count > 0 ? fishableOuterEdges : fishableEdges,
             walkableTriangles);
-        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles)
+        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles)
             .Where(candidate => HorizontalDistance(candidate.Position.ToVector3(), playerPosition) <= radius)
             .ToList();
         var waterSummary = CreateWaterSurfaceSummary(playerPosition, fishableTriangles);
 
         pluginLog.Information(
-            "FPG nearby scan: territory={TerritoryId} player=({PlayerX:F2},{PlayerY:F2},{PlayerZ:F2}) radius={Radius:F1} allTriangles={AllTriangles} nearbyTriangles={NearbyTriangles} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} fishableEdges={FishableEdges} walkableEdges={WalkableEdges} fishableOuterEdges={FishableOuterEdges} walkableOuterEdges={WalkableOuterEdges} sharedEdgeBuckets={SharedEdgeBuckets} nearbySurfaceMatches={NearbySurfaceMatches} candidates={Candidates} water={WaterSummary}",
+            "FPG nearby scan: territory={TerritoryId} player=({PlayerX:F2},{PlayerY:F2},{PlayerZ:F2}) radius={Radius:F1} allTriangles={AllTriangles} nearbyTriangles={NearbyTriangles} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} sightLineBlockers={SightLineBlockers} fishableEdges={FishableEdges} walkableEdges={WalkableEdges} fishableOuterEdges={FishableOuterEdges} walkableOuterEdges={WalkableOuterEdges} sharedEdgeBuckets={SharedEdgeBuckets} nearbySurfaceMatches={NearbySurfaceMatches} candidates={Candidates} water={WaterSummary}",
             territoryId,
             playerPosition.X,
             playerPosition.Y,
@@ -152,6 +159,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             nearbyTriangles.Count,
             fishableTriangles.Count,
             walkableTriangles.Count,
+            sightLineBlockerTriangles.Count,
             fishableEdges.Count,
             walkableEdges.Count,
             fishableOuterEdges.Count,
@@ -166,7 +174,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         return new NearbyScanDebugResult
         {
-            Message = $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbySurfaces={nearbySurfaceMatches} candidates={candidates.Count}。详情见 Dalamud log；Fishable/Walkable 面已送入 overlay 调试层。",
+            Message = $"附近扫描 {radius:F1}m：fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} blockers={sightLineBlockerTriangles.Count} water={FormatWaterSummary(waterSummary)} sharedBuckets={sharedBuckets} fishableOuterEdges={fishableOuterEdges.Count} nearbySurfaces={nearbySurfaceMatches} candidates={candidates.Count}。详情见 Dalamud log；Fishable/Walkable 面已送入 overlay 调试层。",
             TerritoryId = territoryId,
             PlayerPosition = playerPosition,
             RadiusMeters = radius,
@@ -214,6 +222,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var walkableTriangles = triangles
             .Where(triangle => triangle.IsWalkable && triangle.Area > 0.05f)
             .ToList();
+        var sightLineBlockerTriangles = triangles
+            .Where(IsSightLineBlocker)
+            .ToList();
         cancellationToken.ThrowIfCancellationRequested();
 
         if (fishableTriangles.Count == 0 || walkableTriangles.Count == 0)
@@ -226,14 +237,15 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             return Empty(territoryId, capture.TerritoryName);
         }
 
-        progress?.Report(new TerritoryScanProgress("生成候选", 2, 4, $"fishable={fishableTriangles.Count} walkable={walkableTriangles.Count}，正在生成候选。"));
-        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, progress, cancellationToken);
+        progress?.Report(new TerritoryScanProgress("生成候选", 2, 4, $"fishable={fishableTriangles.Count} walkable={walkableTriangles.Count} blockers={sightLineBlockerTriangles.Count}，正在生成候选。"));
+        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles, progress, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         pluginLog.Information(
-            "FPG 场景扫描完成。Territory={TerritoryId}, fishableTriangles={FishableCount}, walkableTriangles={WalkableCount}, candidates={CandidateCount}",
+            "FPG 场景扫描完成。Territory={TerritoryId}, fishableTriangles={FishableCount}, walkableTriangles={WalkableCount}, sightLineBlockers={SightLineBlockers}, candidates={CandidateCount}",
             territoryId,
             fishableTriangles.Count,
             walkableTriangles.Count,
+            sightLineBlockerTriangles.Count,
             candidates.Count);
 
         progress?.Report(new TerritoryScanProgress("生成候选", 4, 4, $"已生成 {candidates.Count} 个候选。"));
@@ -261,13 +273,14 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         uint territoryId,
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
+        IReadOnlyList<ExtractedSceneTriangle> sightLineBlockerTriangles,
         IProgress<TerritoryScanProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         var candidateKeys = new HashSet<CandidateKey>();
         var candidates = new List<CandidateScratch>();
 
-        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, candidateKeys, candidates, progress, cancellationToken);
+        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, sightLineBlockerTriangles, candidateKeys, candidates, progress, cancellationToken);
 
         return candidates
             .OrderBy(candidate => candidate.Position.X)
@@ -337,6 +350,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         uint territoryId,
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
+        IReadOnlyList<ExtractedSceneTriangle> sightLineBlockerTriangles,
         HashSet<CandidateKey> candidateKeys,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
@@ -351,10 +365,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var fishableBlocks = BuildFishableSurfaceBlocks(territoryId, fishableTriangles);
         var walkableIndex = new TriangleIndex(walkableSurfaces, SurfaceIndexCellSize);
         var fishableIndex = new TriangleIndex(fishableTriangles, SurfaceIndexCellSize);
+        var sightLineBlockerIndex = new TriangleIndex(sightLineBlockerTriangles, SurfaceIndexCellSize);
         AddCoverageDrivenCandidates(
             fishableBlocks,
             walkableIndex,
             fishableIndex,
+            sightLineBlockerIndex,
             candidateKeys,
             candidates,
             progress,
@@ -682,12 +698,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<FishableSurfaceBlock> fishableBlocks,
         TriangleIndex walkableIndex,
         TriangleIndex fishableIndex,
+        TriangleIndex sightLineBlockerIndex,
         HashSet<CandidateKey> candidateKeys,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var queryCache = new ScanQueryCache(walkableIndex, fishableIndex);
+        var queryCache = new ScanQueryCache(walkableIndex, fishableIndex, sightLineBlockerIndex);
         var coverageIndex = new CandidateCoverageIndex(candidates);
         for (var roundIndex = 0; roundIndex < FishableCoverageRounds.Length; roundIndex++)
         {
@@ -970,6 +987,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             if (queryCache.IsFishableCoveredByWalkable(fishablePoint))
                 continue;
 
+            if (!queryCache.HasClearFishableSightLine(position, fishablePoint))
+                continue;
+
             return true;
         }
 
@@ -984,6 +1004,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         var walkableHeightAboveFishable = walkablePoint.Y - fishablePoint.Y;
         return walkableHeightAboveFishable >= WalkableFishableMinimumVerticalDelta;
+    }
+
+    private static bool IsSightLineBlocker(ExtractedSceneTriangle triangle)
+    {
+        return triangle.Area > 0.05f
+            && !triangle.IsFishable
+            && !triangle.Flags.HasFlag(ScenePrimitiveFlags.FlyThrough);
     }
 
     private static void TryAddBaseDirection(List<Vector2> directions, Vector3 vector)
@@ -1121,6 +1148,59 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static float Cross(Vector2 left, Vector2 right)
     {
         return (left.X * right.Y) - (left.Y * right.X);
+    }
+
+    private static bool SegmentAabbMayIntersectTriangle(
+        Vector3 start,
+        Vector3 end,
+        ExtractedSceneTriangle triangle)
+    {
+        var segmentMinX = MathF.Min(start.X, end.X) - SightLineIntersectionEpsilon;
+        var segmentMaxX = MathF.Max(start.X, end.X) + SightLineIntersectionEpsilon;
+        var segmentMinY = MathF.Min(start.Y, end.Y) - SightLineIntersectionEpsilon;
+        var segmentMaxY = MathF.Max(start.Y, end.Y) + SightLineIntersectionEpsilon;
+        var segmentMinZ = MathF.Min(start.Z, end.Z) - SightLineIntersectionEpsilon;
+        var segmentMaxZ = MathF.Max(start.Z, end.Z) + SightLineIntersectionEpsilon;
+
+        var triangleMinX = MathF.Min(triangle.A.X, MathF.Min(triangle.B.X, triangle.C.X));
+        var triangleMaxX = MathF.Max(triangle.A.X, MathF.Max(triangle.B.X, triangle.C.X));
+        var triangleMinZ = MathF.Min(triangle.A.Z, MathF.Min(triangle.B.Z, triangle.C.Z));
+        var triangleMaxZ = MathF.Max(triangle.A.Z, MathF.Max(triangle.B.Z, triangle.C.Z));
+
+        return segmentMaxX >= triangleMinX
+            && segmentMinX <= triangleMaxX
+            && segmentMaxY >= TriangleMinY(triangle)
+            && segmentMinY <= TriangleMaxY(triangle)
+            && segmentMaxZ >= triangleMinZ
+            && segmentMinZ <= triangleMaxZ;
+    }
+
+    private static bool SegmentIntersectsTriangle(
+        Vector3 start,
+        Vector3 end,
+        ExtractedSceneTriangle triangle)
+    {
+        var direction = end - start;
+        var edge1 = triangle.B - triangle.A;
+        var edge2 = triangle.C - triangle.A;
+        var pVector = Vector3.Cross(direction, edge2);
+        var determinant = Vector3.Dot(edge1, pVector);
+        if (MathF.Abs(determinant) <= SightLineIntersectionEpsilon)
+            return false;
+
+        var inverseDeterminant = 1f / determinant;
+        var tVector = start - triangle.A;
+        var u = Vector3.Dot(tVector, pVector) * inverseDeterminant;
+        if (u < -SightLineIntersectionEpsilon || u > 1f + SightLineIntersectionEpsilon)
+            return false;
+
+        var qVector = Vector3.Cross(tVector, edge1);
+        var v = Vector3.Dot(direction, qVector) * inverseDeterminant;
+        if (v < -SightLineIntersectionEpsilon || u + v > 1f + SightLineIntersectionEpsilon)
+            return false;
+
+        var t = Vector3.Dot(edge2, qVector) * inverseDeterminant;
+        return t > SightLineIntersectionEpsilon && t < 1f - SightLineIntersectionEpsilon;
     }
 
     private void LogDebugCells(
@@ -1398,6 +1478,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     || queryCache.IsFishableCoveredByWalkable(fishablePoint))
                     continue;
 
+                if (!queryCache.HasClearFishableSightLine(position, fishablePoint))
+                    continue;
+
                 return true;
             }
 
@@ -1409,15 +1492,18 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     {
         private readonly TriangleIndex walkableIndex;
         private readonly TriangleIndex fishableIndex;
+        private readonly TriangleIndex sightLineBlockerIndex;
         private readonly Dictionary<HorizontalProbeKey, CachedVector3Result> highestWalkable = [];
         private readonly Dictionary<ProbePointKey, bool> openWalkable = [];
         private readonly Dictionary<ProbePointKey, bool> fishableCovered = [];
         private readonly Dictionary<HorizontalProbeKey, CachedVector3Result> facingFishable = [];
+        private readonly Dictionary<SightLineKey, bool> clearFishableSightLines = [];
 
-        public ScanQueryCache(TriangleIndex walkableIndex, TriangleIndex fishableIndex)
+        public ScanQueryCache(TriangleIndex walkableIndex, TriangleIndex fishableIndex, TriangleIndex sightLineBlockerIndex)
         {
             this.walkableIndex = walkableIndex;
             this.fishableIndex = fishableIndex;
+            this.sightLineBlockerIndex = sightLineBlockerIndex;
         }
 
         public bool TryFindHighestWalkable(Vector3 probe, out Vector3 walkablePoint)
@@ -1466,6 +1552,20 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
             fishablePoint = cached.Point;
             return cached.Found;
+        }
+
+        public bool HasClearFishableSightLine(Vector3 walkablePoint, Vector3 fishablePoint)
+        {
+            var start = walkablePoint + new Vector3(0f, CandidateSightStartHeight, 0f);
+            var end = fishablePoint + new Vector3(0f, CandidateSightTargetHeight, 0f);
+            var key = SightLineKey.From(start, end);
+            if (!clearFishableSightLines.TryGetValue(key, out var result))
+            {
+                result = !sightLineBlockerIndex.IntersectsSegment(start, end);
+                clearFishableSightLines[key] = result;
+            }
+
+            return result;
         }
 
         public bool IsFishableCoveredByWalkable(Vector3 fishablePoint)
@@ -1569,6 +1669,34 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 var deltaY = candidateY - point.Y;
                 if (deltaY >= minimumDeltaY && deltaY <= maximumDeltaY)
                     return true;
+            }
+
+            return false;
+        }
+
+        public bool IntersectsSegment(Vector3 start, Vector3 end)
+        {
+            var minX = MathF.Min(start.X, end.X);
+            var maxX = MathF.Max(start.X, end.X);
+            var minZ = MathF.Min(start.Z, end.Z);
+            var maxZ = MathF.Max(start.Z, end.Z);
+            var minCell = GridCell.From(minX, minZ, cellSize);
+            var maxCell = GridCell.From(maxX, maxZ, cellSize);
+
+            for (var x = minCell.X; x <= maxCell.X; x++)
+            {
+                for (var z = minCell.Z; z <= maxCell.Z; z++)
+                {
+                    if (!cells.TryGetValue(new GridCell(x, z), out var triangles))
+                        continue;
+
+                    foreach (var candidate in triangles)
+                    {
+                        if (SegmentAabbMayIntersectTriangle(start, end, candidate)
+                            && SegmentIntersectsTriangle(start, end, candidate))
+                            return true;
+                    }
+                }
             }
 
             return false;
@@ -1730,6 +1858,19 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             Quantize(point.Z));
 
         private static int Quantize(float value) => (int)MathF.Floor(value / ProbeCacheCellSize);
+    }
+
+    private readonly record struct SightLineKey(int StartX, int StartY, int StartZ, int EndX, int EndY, int EndZ)
+    {
+        public static SightLineKey From(Vector3 start, Vector3 end) => new(
+            Quantize(start.X),
+            Quantize(start.Y),
+            Quantize(start.Z),
+            Quantize(end.X),
+            Quantize(end.Y),
+            Quantize(end.Z));
+
+        private static int Quantize(float value) => (int)MathF.Floor(value / SightLineCacheCellSize);
     }
 
     private readonly record struct CachedVector3Result(bool Found, Vector3 Point);

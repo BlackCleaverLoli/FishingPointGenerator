@@ -5,6 +5,7 @@ using FishingPointGenerator.Plugin.Services.Catalog;
 using FishingPointGenerator.Plugin.Services.Scanning;
 using Lumina.Excel.Sheets;
 using OmenTools;
+using System.Numerics;
 using System.Threading;
 
 namespace FishingPointGenerator.Plugin.Services;
@@ -17,6 +18,10 @@ internal sealed class SpotWorkflowSession
     private const float MaximumCastBlockFillRange = 1000f;
     private const float CastWaterSystemLinkDistanceMeters = 8f;
     private const float CastWaterSystemHeightToleranceMeters = 3f;
+    private const float FlyableMeshProbeHalfExtentXZ = 1f;
+    private const float FlyableMeshProbeHalfExtentY = 1.5f;
+    private const float FlyableMeshMaximumHorizontalSnap = 0.75f;
+    private const float FlyableMeshMaximumVerticalSnap = 1.25f;
 
     private readonly SpotJsonStore store;
     private readonly TerritoryMaintenanceStore maintenanceStore;
@@ -98,6 +103,8 @@ internal sealed class SpotWorkflowSession
     public SpotReviewDecision CurrentReviewDecision => GetCurrentMaintenanceRecord()?.ReviewDecision ?? SpotReviewDecision.None;
     public string CurrentReviewNote => GetCurrentMaintenanceRecord()?.ReviewNote ?? string.Empty;
     public IReadOnlyList<ApproachPoint> CurrentApproachPoints => GetCurrentMaintenanceRecord()?.ApproachPoints ?? [];
+    public IReadOnlySet<string> CurrentTerritoryRecordedCandidateIds => GetRecordedCandidateIds(CurrentTerritoryMaintenance);
+    public IReadOnlySet<string> CurrentTerritoryRecordedCandidateFingerprints => GetRecordedCandidateFingerprints(CurrentTerritoryMaintenance);
     public IReadOnlyList<SpotEvidenceEvent> CurrentEvidence => GetCurrentMaintenanceRecord()?.Evidence ?? [];
     public string CurrentTargetDisplayName => CurrentTarget is null
         ? string.Empty
@@ -446,12 +453,8 @@ internal sealed class SpotWorkflowSession
         }
 
         var blocks = BuildBlocksFromSpotCandidates(scan.Candidates);
-        var confirmedFingerprints = GetMaintenanceRecord(target.Key)?.ApproachPoints
-            .Where(point => point.Status == ApproachPointStatus.Confirmed)
-            .Select(point => point.SourceCandidateFingerprint)
-            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
-            .ToHashSet(StringComparer.Ordinal)
-            ?? [];
+        var recordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
+        var recordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
         var blockByCandidateId = blocks
             .SelectMany(block => block.Candidates.Select(candidate => new { candidate.CandidateId, Block = block }))
             .Where(item => !string.IsNullOrWhiteSpace(item.CandidateId))
@@ -491,7 +494,7 @@ internal sealed class SpotWorkflowSession
 
         var lines = new List<string>
         {
-            $"FPG candidate debug: territory={target.TerritoryId} spot={target.FishingSpotId} name=\"{target.Name}\" player=({FormatPoint(playerSnapshot.Position)}) radius={radiusMeters:F1} limit={limit} scanSource={scanSource} candidates={scan.Candidates.Count} targetRange={scan.Candidates.Count(candidate => candidate.IsWithinTargetSearchRadius)} blocks={blocks.Count} nearby={nearby.Count} confirmed={confirmedFingerprints.Count} snap={snapDistance:F1} fillRange={fillRange:F1}",
+            $"FPG candidate debug: territory={target.TerritoryId} spot={target.FishingSpotId} name=\"{target.Name}\" player=({FormatPoint(playerSnapshot.Position)}) radius={radiusMeters:F1} limit={limit} scanSource={scanSource} candidates={scan.Candidates.Count} targetRange={scan.Candidates.Count(candidate => candidate.IsWithinTargetSearchRadius)} blocks={blocks.Count} nearby={nearby.Count} confirmed={recordedCandidateIds.Count} snap={snapDistance:F1} fillRange={fillRange:F1}",
         };
 
         if (selection is null)
@@ -503,7 +506,7 @@ internal sealed class SpotWorkflowSession
         }
         else
         {
-            var confirmedInBlock = selection.Block.Candidates.Count(candidate => confirmedFingerprints.Contains(candidate.CandidateId));
+            var confirmedInBlock = selection.Block.Candidates.Count(candidate => recordedCandidateIds.Contains(candidate.CandidateId));
             var selectedBlockCount = blocks.Count(block => block.Candidates.Any(candidate => fillCandidateIds.Contains(candidate.CandidateId)));
             lines.Add($"FPG candidate debug selection: surface={FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} block={selection.Block.BlockId} seed={ShortId(selection.SeedCandidate.CandidateId)} seedDistance={selection.Distance:F2} blockCandidates={selection.Block.Candidates.Count} graphCandidates={fillDistances.Count} fillCandidates={fillCandidateIds.Count} fillBlocks={selectedBlockCount} confirmedInBlock={confirmedInBlock}");
         }
@@ -513,29 +516,30 @@ internal sealed class SpotWorkflowSession
         {
             index++;
             var candidate = item.Candidate;
-            var fingerprint = candidate.CandidateFingerprint;
-            blockByCandidateId.TryGetValue(fingerprint, out var block);
-            blockCandidateById.TryGetValue(fingerprint, out var blockCandidate);
+            var candidateId = GetSpotCandidateGraphId(candidate);
+            blockByCandidateId.TryGetValue(candidateId, out var block);
+            blockCandidateById.TryGetValue(candidateId, out var blockCandidate);
             var linkCount = block is not null && blockCandidate is not null
-                ? block.Candidates.Count(next => !string.Equals(next.CandidateId, fingerprint, StringComparison.Ordinal)
+                ? block.Candidates.Count(next => !string.Equals(next.CandidateId, candidateId, StringComparison.Ordinal)
                     && ShouldLinkCastWaterSystem(blockCandidate, next))
                 : 0;
-            var pathDistance = fillDistances.TryGetValue(fingerprint, out var distance)
+            var pathDistance = fillDistances.TryGetValue(candidateId, out var distance)
                 ? distance
                 : (float?)null;
+            var recorded = IsRecordedCandidate(candidate, recordedCandidateIds, recordedCandidateFingerprints);
 
             lines.Add(
                 "FPG candidate debug item: "
                 + $"#{index} dist={item.Distance:F2} block={block?.BlockId ?? "-"} "
                 + $"surface={FormatSurfaceGroup(candidate.SurfaceGroupId)} "
-                + $"fill={(fillCandidateIds.Contains(fingerprint) ? "yes" : "no")} "
+                + $"fill={(fillCandidateIds.Contains(candidateId) ? "yes" : "no")} "
                 + $"path={FormatNullableDistance(pathDistance)} "
-                + $"confirmed={(confirmedFingerprints.Contains(fingerprint) ? "yes" : "no")} "
+                + $"confirmed={(recorded ? "yes" : "no")} "
                 + $"targetRange={(candidate.IsWithinTargetSearchRadius ? "yes" : "no")} "
                 + $"targetDistance={candidate.DistanceToTargetCenterMeters:F1} "
                 + $"links={linkCount} status={candidate.Status} "
                 + $"pos=({FormatPoint(candidate.Position)}) rot={candidate.Rotation:F3} "
-                + $"fp={ShortId(fingerprint)} source={ShortId(candidate.SourceCandidateId)}");
+                + $"fp={ShortId(candidate.CandidateFingerprint)} source={ShortId(candidate.SourceCandidateId)}");
         }
 
         LastMessage = $"已输出 FishingSpot {target.FishingSpotId} 附近候选点调试：{nearby.Count}/{scan.Candidates.Count}，详细见 Dalamud log。";
@@ -707,14 +711,14 @@ internal sealed class SpotWorkflowSession
             return true;
         }
 
-        var candidatesByFingerprint = scan.Candidates
-            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateFingerprint))
-            .GroupBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
+        var candidatesByGraphId = scan.Candidates
+            .Where(candidate => !string.IsNullOrWhiteSpace(GetSpotCandidateGraphId(candidate)))
+            .GroupBy(GetSpotCandidateGraphId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
         var fillDistances = CalculateCastFillDistances(CurrentTargetBlocks, selection.Block, selection.SeedCandidate);
         var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange);
         var candidates = fillCandidateIds
-            .Select(candidateId => candidatesByFingerprint.TryGetValue(candidateId, out var spotCandidate)
+            .Select(candidateId => candidatesByGraphId.TryGetValue(candidateId, out var spotCandidate)
                 ? spotCandidate
                 : null)
             .Where(candidate => candidate is not null)
@@ -727,15 +731,12 @@ internal sealed class SpotWorkflowSession
             return true;
         }
 
-        var existingFingerprints = GetMaintenanceRecord(target.Key)?.ApproachPoints
-            .Where(point => point.Status == ApproachPointStatus.Confirmed)
-            .Select(point => point.SourceCandidateFingerprint)
-            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
-            .ToHashSet(StringComparer.Ordinal)
-            ?? [];
+        var maintenance = GetMaintenanceRecord(target.Key);
+        var existingCandidateIds = GetRecordedCandidateIds(maintenance);
+        var existingCandidateFingerprints = GetRecordedCandidateFingerprints(maintenance);
         var note = $"autoFillFromCast placeName={castPlaceNameId} player={FormatPoint(playerSnapshot.Position)} waterSystem={FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={fillRange:F1} repeatEvidence=true";
         var newCandidates = candidates
-            .Where(candidate => !existingFingerprints.Contains(candidate.CandidateFingerprint))
+            .Where(candidate => !IsRecordedCandidate(candidate, existingCandidateIds, existingCandidateFingerprints))
             .ToList();
         var repeatedCandidates = candidates.Count - newCandidates.Count;
 
@@ -960,13 +961,28 @@ internal sealed class SpotWorkflowSession
         if (!EnsureCurrentTarget())
             return;
 
-        var target = CurrentTarget!;
+        ClearSpotMaintenance(CurrentTarget!.FishingSpotId);
+    }
+
+    public void ClearSpotMaintenance(uint fishingSpotId)
+    {
+        var target = CurrentTerritoryTargets.FirstOrDefault(target => target.FishingSpotId == fishingSpotId);
+        if (target is null)
+        {
+            LastMessage = $"FishingSpot {fishingSpotId} 不在已选择领地 {SelectedTerritoryId}。";
+            return;
+        }
+
         var removedLedger = store.DeleteLegacyLedger(target.Key);
         var removedReview = store.DeleteLegacyReview(target.Key);
         UpdateMaintenanceSpot(target, _ => CreateMaintenanceSpot(target));
-        CurrentCandidateSelection = CurrentScan is null
-            ? null
-            : GetOrBuildCandidateSelection(target, CurrentScan);
+        if (CurrentTarget?.Key == target.Key)
+        {
+            CurrentCandidateSelection = CurrentScan is null
+                ? null
+                : GetOrBuildCandidateSelection(target, CurrentScan);
+        }
+
         LastMessage = $"已清除 FishingSpot {target.FishingSpotId} 的维护数据：真实点、证据和复核状态已重置（ledger={FormatRemoved(removedLedger)}, review={FormatRemoved(removedReview)}）。";
     }
 
@@ -1792,35 +1808,74 @@ internal sealed class SpotWorkflowSession
                 string.Empty);
         }
 
+        if (!navmeshReady)
+        {
+            var mode = currentTerritoryFlyable ? "可飞" : "不能飞";
+            return new TerritoryReachabilityResult(false, null, $"当前区域{mode}，但 vnavmesh 未就绪；为避免保留不可达候选，本次扫描未更新内存候选。");
+        }
+
         if (currentTerritoryFlyable)
         {
-            progress.Report(new TerritoryScanProgress("可达性", 1, 1, "当前区域已解锁飞行，候选全部保留。"));
-            var candidates = survey.Candidates
-                .Select(candidate => candidate with
+            var reachable1 = new List<ApproachCandidate>();
+            var unreachable1 = 0;
+            var unavailable1 = 0;
+            for (var index = 0; index < survey.Candidates.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (index % 64 == 0)
                 {
-                    Reachability = CandidateReachability.Flyable,
-                    PathLengthMeters = null,
-                })
-                .ToList();
+                    progress.Report(new TerritoryScanProgress(
+                        "可达性",
+                        index,
+                        survey.Candidates.Count,
+                        $"正在检查飞行落点 mesh：{index}/{survey.Candidates.Count}，保留 {reachable1.Count} 个。"));
+                }
+
+                var candidate = survey.Candidates[index];
+                var result = navmeshQuery.QueryNearestReachablePoint(
+                    candidate.Position.ToVector3(),
+                    FlyableMeshProbeHalfExtentXZ,
+                    FlyableMeshProbeHalfExtentY);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (result.IsReachable && IsCloseEnoughToCandidateMesh(candidate.Position.ToVector3(), result.Point))
+                {
+                    reachable1.Add(candidate with
+                    {
+                        Reachability = CandidateReachability.Flyable,
+                        PathLengthMeters = null,
+                    });
+                    continue;
+                }
+
+                if (result.Status == PathQueryStatus.Unavailable)
+                    unavailable1++;
+                else
+                    unreachable1++;
+            }
+
+            if (unavailable1 > 0)
+                return new TerritoryReachabilityResult(false, null, $"当前区域可飞，mesh 可达性检查中有 {unavailable1} 个候选无法查询；为避免保留不完整候选，本次扫描未更新内存候选。");
+
+            progress.Report(new TerritoryScanProgress("可达性", survey.Candidates.Count, survey.Candidates.Count, $"飞行落点 mesh 检查完成，保留 {reachable1.Count} 个候选。"));
             return new TerritoryReachabilityResult(
                 true,
                 survey with
                 {
                     ReachabilityMode = SurveyReachabilityMode.Flyable,
+                    ReachabilityOrigin = playerSnapshot?.Position,
                     RawCandidateCount = rawCandidateCount,
-                    ReachableCandidateCount = candidates.Count,
-                    UnreachableCandidateCount = 0,
-                    ReachabilityNote = "当前区域已解锁飞行，扫描候选全部保留。",
-                    Candidates = candidates,
+                    ReachableCandidateCount = reachable1.Count,
+                    UnreachableCandidateCount = unreachable1,
+                    ReachabilityNote = $"当前区域已解锁飞行，已检查候选附近 reachable mesh，保留可用候选 {reachable1.Count} 个。",
+                    Candidates = reachable1,
                 },
                 string.Empty);
         }
 
         if (playerSnapshot is null)
+        {
             return new TerritoryReachabilityResult(false, null, "当前区域不能飞，但无法读取玩家位置；为避免保留不可达候选，本次扫描未更新内存候选。");
-
-        if (!navmeshReady)
-            return new TerritoryReachabilityResult(false, null, "当前区域不能飞，但 vnavmesh 未就绪；为避免保留不可达候选，本次扫描未更新内存候选。");
+        }
 
         var reachable = new List<ApproachCandidate>();
         var unreachable = 0;
@@ -1875,6 +1930,15 @@ internal sealed class SpotWorkflowSession
                 Candidates = reachable,
             },
             string.Empty);
+    }
+
+    private static bool IsCloseEnoughToCandidateMesh(Vector3 candidate, Vector3 meshPoint)
+    {
+        var dx = candidate.X - meshPoint.X;
+        var dz = candidate.Z - meshPoint.Z;
+        var horizontalDistance = MathF.Sqrt((dx * dx) + (dz * dz));
+        return horizontalDistance <= FlyableMeshMaximumHorizontalSnap
+            && MathF.Abs(candidate.Y - meshPoint.Y) <= FlyableMeshMaximumVerticalSnap;
     }
 
     private IReadOnlyList<SpotAnalysis> BuildExportAnalysesFromMaintenance(
@@ -2032,6 +2096,10 @@ internal sealed class SpotWorkflowSession
     {
         if (CurrentCandidateSelection is { } current
             && current.Candidate.Key == target.Key
+            && !IsRecordedCandidate(
+                current.Candidate,
+                CurrentTerritoryRecordedCandidateIds,
+                CurrentTerritoryRecordedCandidateFingerprints)
             && scan.Candidates.Any(candidate => string.Equals(
                 candidate.CandidateFingerprint,
                 current.Candidate.CandidateFingerprint,
@@ -2041,14 +2109,17 @@ internal sealed class SpotWorkflowSession
         return BuildCandidateSelection(target, scan);
     }
 
-    private static IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(
+    private IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(
         SpotScanDocument scan,
         SpotMaintenanceRecord? maintenance)
     {
-        var excludedFingerprints = GetRecordedCandidateFingerprints(maintenance);
+        var recordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
+        var recordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
+        var rejectedFingerprints = GetRejectedCandidateFingerprints(maintenance);
         return scan.Candidates
             .Where(IsSelectableCandidate)
-            .Where(candidate => !excludedFingerprints.Contains(candidate.CandidateFingerprint))
+            .Where(candidate => !IsRecordedCandidate(candidate, recordedCandidateIds, recordedCandidateFingerprints))
+            .Where(candidate => !rejectedFingerprints.Contains(candidate.CandidateFingerprint))
             .ToList();
     }
 
@@ -2071,23 +2142,81 @@ internal sealed class SpotWorkflowSession
         };
     }
 
-    private static IReadOnlySet<string> GetRecordedCandidateFingerprints(SpotMaintenanceRecord? maintenance)
+    private static IReadOnlySet<string> GetRecordedCandidateIds(TerritoryMaintenanceDocument? maintenance)
     {
-        var excludedFingerprints = maintenance?.ApproachPoints
+        return maintenance?.Spots
+            .SelectMany(spot => spot.ApproachPoints)
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(GetApproachPointCandidateId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? [];
+    }
+
+    private static IReadOnlySet<string> GetRecordedCandidateIds(SpotMaintenanceRecord? maintenance)
+    {
+        return maintenance?.ApproachPoints
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(GetApproachPointCandidateId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? [];
+    }
+
+    private static IReadOnlySet<string> GetRecordedCandidateFingerprints(TerritoryMaintenanceDocument? maintenance)
+    {
+        return maintenance?.Spots
+            .SelectMany(spot => spot.ApproachPoints)
             .Where(point => point.Status == ApproachPointStatus.Confirmed)
             .Select(point => point.SourceCandidateFingerprint)
             .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
             .ToHashSet(StringComparer.Ordinal)
             ?? [];
+    }
 
-        foreach (var evidence in maintenance?.Evidence ?? [])
-        {
-            if (evidence.EventType == SpotEvidenceEventType.Reject
-                && !string.IsNullOrWhiteSpace(evidence.CandidateFingerprint))
-                excludedFingerprints.Add(evidence.CandidateFingerprint);
-        }
+    private static IReadOnlySet<string> GetRecordedCandidateFingerprints(SpotMaintenanceRecord? maintenance)
+    {
+        return maintenance?.ApproachPoints
+            .Where(point => point.Status == ApproachPointStatus.Confirmed)
+            .Select(point => point.SourceCandidateFingerprint)
+            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? [];
+    }
 
-        return excludedFingerprints;
+    private static IReadOnlySet<string> GetRejectedCandidateFingerprints(SpotMaintenanceRecord? maintenance)
+    {
+        return maintenance?.Evidence
+            .Where(evidence => evidence.EventType == SpotEvidenceEventType.Reject)
+            .Select(evidence => evidence.CandidateFingerprint)
+            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? [];
+    }
+
+    private static string GetApproachPointCandidateId(ApproachPoint point)
+    {
+        return !string.IsNullOrWhiteSpace(point.SourceCandidateId)
+            ? point.SourceCandidateId
+            : point.SourceCandidateFingerprint;
+    }
+
+    private static string GetSpotCandidateGraphId(SpotCandidate candidate)
+    {
+        return !string.IsNullOrWhiteSpace(candidate.SourceCandidateId)
+            ? candidate.SourceCandidateId
+            : candidate.CandidateFingerprint;
+    }
+
+    private static bool IsRecordedCandidate(
+        SpotCandidate candidate,
+        IReadOnlySet<string> recordedCandidateIds,
+        IReadOnlySet<string> recordedCandidateFingerprints)
+    {
+        var candidateId = GetSpotCandidateGraphId(candidate);
+        return (!string.IsNullOrWhiteSpace(candidateId) && recordedCandidateIds.Contains(candidateId))
+            || (!string.IsNullOrWhiteSpace(candidate.CandidateFingerprint)
+                && recordedCandidateFingerprints.Contains(candidate.CandidateFingerprint));
     }
 
     private static bool IsSelectableCandidate(SpotCandidate candidate)
@@ -2423,7 +2552,7 @@ internal sealed class SpotWorkflowSession
     {
         return new ApproachCandidate
         {
-            CandidateId = candidate.CandidateFingerprint,
+            CandidateId = GetSpotCandidateGraphId(candidate),
             TerritoryId = candidate.Key.TerritoryId,
             RegionId = candidate.RegionId,
             BlockId = candidate.BlockId,
