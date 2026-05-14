@@ -16,6 +16,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float FishableCoverageTargetKeyCellSize = 0.5f;
     private const float OpenWalkableClearanceMeters = 5f;
     private const float WalkableFishableMinimumVerticalDelta = 0.05f;
+    private const float ProbeCacheCellSize = 0.25f;
+    private const float CandidateCoverageCellSize = 2f;
     private const float SurfaceIndexCellSize = 8f;
     private const float CandidateDedupeCellSize = 1.25f;
     private const float CandidateRotationDedupeRadians = 0.15f;
@@ -35,7 +37,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const int MaxDebugWaterSamples = 8;
     private static readonly FishableCoverageRound[] FishableCoverageRounds =
     [
-        new("粗扫", 4f, 12),
+        new("粗扫", 4f, 8),
         // new("补扫", 2f, 12),
     ];
     private static readonly float[] CandidateSearchRadii =
@@ -45,6 +47,14 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         1f,
         1.5f,
         MaximumCandidateDistanceFromFishableSurface,
+    ];
+    private static readonly float[] CandidateFacingPrimaryAngleOffsets =
+    [
+        0f,
+        MathF.PI / 12f,
+        -MathF.PI / 12f,
+        MathF.PI / 6f,
+        -MathF.PI / 6f,
     ];
     private static readonly float[] FishableCenterEntryOffsets =
     [
@@ -677,6 +687,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IProgress<TerritoryScanProgress>? progress,
         CancellationToken cancellationToken)
     {
+        var queryCache = new ScanQueryCache(walkableIndex, fishableIndex);
+        var coverageIndex = new CandidateCoverageIndex(candidates);
         for (var roundIndex = 0; roundIndex < FishableCoverageRounds.Length; roundIndex++)
         {
             var round = FishableCoverageRounds[roundIndex];
@@ -697,21 +709,23 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         $"{round.Name} fishable 覆盖：{targetIndex}/{targets.Count}，已生成 {candidates.Count} 个。"));
 
                 var target = targets[targetIndex];
-                if (IsFishableTargetCovered(target, candidates, walkableIndex, fishableIndex))
+                if (coverageIndex.IsCovered(target, queryCache))
                     continue;
 
                 if (!TryCreateCandidateForFishableTarget(
                         target,
                         round,
-                        walkableIndex,
-                        fishableIndex,
+                        queryCache,
                         candidateKeys,
                         out var candidate))
                     continue;
 
                 var key = CandidateKey.From(candidate.Position, candidate.Rotation);
-                if (candidateKeys.Add(key))
-                    candidates.Add(candidate);
+                if (!candidateKeys.Add(key))
+                    continue;
+
+                candidates.Add(candidate);
+                coverageIndex.Add(candidate);
             }
 
             if (roundIndex > 0 && candidates.Count == additionsBeforeRound)
@@ -770,22 +784,20 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static bool TryCreateCandidateForFishableTarget(
         FishableCoverageTarget target,
         FishableCoverageRound round,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex,
+        ScanQueryCache queryCache,
         IReadOnlySet<CandidateKey> candidateKeys,
         out CandidateScratch candidate)
     {
         candidate = default;
         foreach (var probe in EnumerateCandidateSearchProbes(target.Point, round.DirectionCount))
         {
-            if (!TryFindCandidateWalkablePoint(target, probe, walkableIndex, fishableIndex, out var position))
+            if (!TryFindCandidateWalkablePoint(target, probe, queryCache, out var position))
                 continue;
 
             if (!TryResolveLegalFacingRotation(
                     position,
                     target,
-                    walkableIndex,
-                    fishableIndex,
+                    queryCache,
                     out var rotation))
                 continue;
 
@@ -826,15 +838,14 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static bool TryFindCandidateWalkablePoint(
         FishableCoverageTarget target,
         Vector3 probe,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex,
+        ScanQueryCache queryCache,
         out Vector3 walkablePoint)
     {
         walkablePoint = default;
-        if (!walkableIndex.TryFindHighestContainingPoint(probe, out _, out var candidatePoint))
+        if (!queryCache.TryFindHighestWalkable(probe, out var candidatePoint))
             return false;
 
-        if (!IsOpenWalkablePoint(candidatePoint, walkableIndex)
+        if (!queryCache.IsOpenWalkable(candidatePoint)
             || !IsCandidateFishableForWalkablePoint(candidatePoint, target.Point))
             return false;
 
@@ -845,8 +856,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static bool TryResolveLegalFacingRotation(
         Vector3 position,
         FishableCoverageTarget target,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex,
+        ScanQueryCache queryCache,
         out float rotation)
     {
         rotation = 0f;
@@ -858,21 +868,36 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         TryAddBaseDirection(baseDirections, target.Block.Center - position);
 
         var testedDirections = new HashSet<int>();
-        foreach (var baseDirection in baseDirections)
-        {
-            foreach (var offset in CandidateFacingAngleOffsets)
-            {
-                var direction = RotateDirection(baseDirection, offset);
-                if (!TryAddTestedDirection(testedDirections, direction))
-                    continue;
+        if (baseDirections.Count > 0
+            && TryResolveFacingRotation(
+                position,
+                target.Point,
+                queryCache,
+                [baseDirections[0]],
+                CandidateFacingPrimaryAngleOffsets,
+                testedDirections,
+                out rotation))
+            return true;
 
-                if (!IsLegalFacingDirection(position, direction, target.Point, walkableIndex, fishableIndex))
-                    continue;
+        if (TryResolveFacingRotation(
+                position,
+                target.Point,
+                queryCache,
+                baseDirections,
+                CandidateFacingPrimaryAngleOffsets,
+                testedDirections,
+                out rotation))
+            return true;
 
-                rotation = AngleMath.NormalizeRotation(MathF.Atan2(direction.X, direction.Y));
-                return true;
-            }
-        }
+        if (TryResolveFacingRotation(
+                position,
+                target.Point,
+                queryCache,
+                baseDirections,
+                CandidateFacingAngleOffsets,
+                testedDirections,
+                out rotation))
+            return true;
 
         const int fullSweepSteps = 16;
         for (var index = 0; index < fullSweepSteps; index++)
@@ -880,7 +905,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             var angle = MathF.Tau * index / fullSweepSteps;
             var direction = new Vector2(MathF.Sin(angle), MathF.Cos(angle));
             if (!TryAddTestedDirection(testedDirections, direction)
-                || !IsLegalFacingDirection(position, direction, target.Point, walkableIndex, fishableIndex))
+                || !IsLegalFacingDirection(position, direction, target.Point, queryCache))
                 continue;
 
             rotation = AngleMath.NormalizeRotation(angle);
@@ -890,12 +915,38 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return false;
     }
 
+    private static bool TryResolveFacingRotation(
+        Vector3 position,
+        Vector3 targetFishablePoint,
+        ScanQueryCache queryCache,
+        IReadOnlyList<Vector2> baseDirections,
+        IReadOnlyList<float> angleOffsets,
+        HashSet<int> testedDirections,
+        out float rotation)
+    {
+        foreach (var baseDirection in baseDirections)
+        {
+            foreach (var offset in angleOffsets)
+            {
+                var direction = RotateDirection(baseDirection, offset);
+                if (!TryAddTestedDirection(testedDirections, direction)
+                    || !IsLegalFacingDirection(position, direction, targetFishablePoint, queryCache))
+                    continue;
+
+                rotation = AngleMath.NormalizeRotation(MathF.Atan2(direction.X, direction.Y));
+                return true;
+            }
+        }
+
+        rotation = 0f;
+        return false;
+    }
+
     private static bool IsLegalFacingDirection(
         Vector3 position,
         Vector2 direction,
         Vector3 targetFishablePoint,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex)
+        ScanQueryCache queryCache)
     {
         if (TryGetHorizontalDirection(targetFishablePoint - position, out var targetDirection)
             && Vector2.Dot(targetDirection, direction) <= 0f)
@@ -906,10 +957,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
              offset += FacingProbeStep)
         {
             var probe = CreateProbePoint(position, direction, offset);
-            if (!TryFindFacingFishable(
-                    fishableIndex,
-                    probe,
-                    out var fishablePoint))
+            if (!queryCache.TryFindFacingFishable(probe, out var fishablePoint))
                 continue;
 
             if (!TryGetHorizontalDirection(fishablePoint - position, out var fishableDirection)
@@ -919,86 +967,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             if (!IsCandidateFishableForWalkablePoint(position, fishablePoint))
                 continue;
 
-            if (IsFishableCoveredByWalkable(fishablePoint, walkableIndex))
+            if (queryCache.IsFishableCoveredByWalkable(fishablePoint))
                 continue;
 
             return true;
         }
 
-        return false;
-    }
-
-    private static bool IsFishableTargetCovered(
-        FishableCoverageTarget target,
-        IReadOnlyList<CandidateScratch> candidates,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex)
-    {
-        foreach (var candidate in candidates)
-        {
-            if (!string.Equals(candidate.SurfaceGroupId, target.Block.SurfaceGroupId, StringComparison.Ordinal)
-                || HorizontalDistance(candidate.Position, target.Point) > FishableCoverageSatisfiedDistance
-                || !IsCandidateFishableForWalkablePoint(candidate.Position, target.Point))
-                continue;
-
-            var forward = new Vector2(MathF.Sin(candidate.Rotation), MathF.Cos(candidate.Rotation));
-            if (TryGetHorizontalDirection(target.Point - candidate.Position, out var targetDirection)
-                && Vector2.Dot(targetDirection, forward) <= 0f)
-                continue;
-
-            if (!HasOpenFishableSightLine(candidate.Position, forward, walkableIndex, fishableIndex))
-                continue;
-
-            return true;
-        }
-
-        return false;
-    }
-
-    private static bool HasOpenFishableSightLine(
-        Vector3 position,
-        Vector2 direction,
-        TriangleIndex walkableIndex,
-        TriangleIndex fishableIndex)
-    {
-        for (var offset = FacingProbeStartDistance;
-             offset <= FacingProbeMaxDistance;
-             offset += FacingProbeStep)
-        {
-            var probe = CreateProbePoint(position, direction, offset);
-            if (!TryFindFacingFishable(fishableIndex, probe, out var fishablePoint))
-                continue;
-
-            if (!IsCandidateFishableForWalkablePoint(position, fishablePoint)
-                || IsFishableCoveredByWalkable(fishablePoint, walkableIndex))
-                continue;
-
-            return true;
-        }
-
-        return false;
-    }
-
-    private static bool IsFishableCoveredByWalkable(Vector3 fishablePoint, TriangleIndex walkableIndex)
-    {
-        return walkableIndex.TryFindHighestContainingPoint(fishablePoint, out _, out var walkablePoint)
-            && walkablePoint.Y >= fishablePoint.Y + WalkableFishableMinimumVerticalDelta;
-    }
-
-    private static bool TryFindFacingFishable(
-        TriangleIndex fishableIndex,
-        Vector3 probe,
-        out Vector3 fishablePoint)
-    {
-        if (fishableIndex.TryFindNearest(
-                probe,
-                FacingProbeLateralRadius,
-                out _,
-                out fishablePoint,
-                out _))
-            return true;
-
-        fishablePoint = default;
         return false;
     }
 
@@ -1010,14 +984,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         var walkableHeightAboveFishable = walkablePoint.Y - fishablePoint.Y;
         return walkableHeightAboveFishable >= WalkableFishableMinimumVerticalDelta;
-    }
-
-    private static bool IsOpenWalkablePoint(Vector3 walkablePoint, TriangleIndex walkableIndex)
-    {
-        return !walkableIndex.HasContainingPointAboveWithinVerticalRange(
-            walkablePoint,
-            WalkableFishableMinimumVerticalDelta,
-            OpenWalkableClearanceMeters);
     }
 
     private static void TryAddBaseDirection(List<Vector2> directions, Vector3 vector)
@@ -1360,6 +1326,162 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return counts;
     }
 
+    private sealed class CandidateCoverageIndex
+    {
+        private readonly Dictionary<CandidateCoverageCellKey, List<CandidateScratch>> cells = [];
+
+        public CandidateCoverageIndex(IEnumerable<CandidateScratch> candidates)
+        {
+            foreach (var candidate in candidates)
+                Add(candidate);
+        }
+
+        public void Add(CandidateScratch candidate)
+        {
+            var key = CandidateCoverageCellKey.From(candidate.SurfaceGroupId, candidate.Position);
+            if (!cells.TryGetValue(key, out var list))
+            {
+                list = [];
+                cells[key] = list;
+            }
+
+            list.Add(candidate);
+        }
+
+        public bool IsCovered(FishableCoverageTarget target, ScanQueryCache queryCache)
+        {
+            var center = CandidateCoverageCellKey.From(target.Block.SurfaceGroupId, target.Point);
+            var range = (int)MathF.Ceiling(FishableCoverageSatisfiedDistance / CandidateCoverageCellSize) + 1;
+            for (var x = center.X - range; x <= center.X + range; x++)
+            {
+                for (var z = center.Z - range; z <= center.Z + range; z++)
+                {
+                    if (!cells.TryGetValue(new CandidateCoverageCellKey(center.SurfaceGroupId, x, z), out var candidates))
+                        continue;
+
+                    foreach (var candidate in candidates)
+                    {
+                        if (HorizontalDistance(candidate.Position, target.Point) > FishableCoverageSatisfiedDistance
+                            || !IsCandidateFishableForWalkablePoint(candidate.Position, target.Point))
+                            continue;
+
+                        var forward = new Vector2(MathF.Sin(candidate.Rotation), MathF.Cos(candidate.Rotation));
+                        if (TryGetHorizontalDirection(target.Point - candidate.Position, out var targetDirection)
+                            && Vector2.Dot(targetDirection, forward) <= 0f)
+                            continue;
+
+                        if (!HasOpenFishableSightLine(candidate.Position, forward, queryCache))
+                            continue;
+
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasOpenFishableSightLine(
+            Vector3 position,
+            Vector2 direction,
+            ScanQueryCache queryCache)
+        {
+            for (var offset = FacingProbeStartDistance;
+                 offset <= FacingProbeMaxDistance;
+                 offset += FacingProbeStep)
+            {
+                var probe = CreateProbePoint(position, direction, offset);
+                if (!queryCache.TryFindFacingFishable(probe, out var fishablePoint))
+                    continue;
+
+                if (!IsCandidateFishableForWalkablePoint(position, fishablePoint)
+                    || queryCache.IsFishableCoveredByWalkable(fishablePoint))
+                    continue;
+
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    private sealed class ScanQueryCache
+    {
+        private readonly TriangleIndex walkableIndex;
+        private readonly TriangleIndex fishableIndex;
+        private readonly Dictionary<HorizontalProbeKey, CachedVector3Result> highestWalkable = [];
+        private readonly Dictionary<ProbePointKey, bool> openWalkable = [];
+        private readonly Dictionary<ProbePointKey, bool> fishableCovered = [];
+        private readonly Dictionary<HorizontalProbeKey, CachedVector3Result> facingFishable = [];
+
+        public ScanQueryCache(TriangleIndex walkableIndex, TriangleIndex fishableIndex)
+        {
+            this.walkableIndex = walkableIndex;
+            this.fishableIndex = fishableIndex;
+        }
+
+        public bool TryFindHighestWalkable(Vector3 probe, out Vector3 walkablePoint)
+        {
+            var key = HorizontalProbeKey.From(probe);
+            if (!highestWalkable.TryGetValue(key, out var cached))
+            {
+                var found = walkableIndex.TryFindHighestContainingPoint(probe, out _, out var point);
+                cached = new CachedVector3Result(found, point);
+                highestWalkable[key] = cached;
+            }
+
+            walkablePoint = cached.Point;
+            return cached.Found;
+        }
+
+        public bool IsOpenWalkable(Vector3 walkablePoint)
+        {
+            var key = ProbePointKey.From(walkablePoint);
+            if (!openWalkable.TryGetValue(key, out var result))
+            {
+                result = !walkableIndex.HasContainingPointAboveWithinVerticalRange(
+                    walkablePoint,
+                    WalkableFishableMinimumVerticalDelta,
+                    OpenWalkableClearanceMeters);
+                openWalkable[key] = result;
+            }
+
+            return result;
+        }
+
+        public bool TryFindFacingFishable(Vector3 probe, out Vector3 fishablePoint)
+        {
+            var key = HorizontalProbeKey.From(probe);
+            if (!facingFishable.TryGetValue(key, out var cached))
+            {
+                var found = fishableIndex.TryFindNearest(
+                    probe,
+                    FacingProbeLateralRadius,
+                    out _,
+                    out var point,
+                    out _);
+                cached = new CachedVector3Result(found, point);
+                facingFishable[key] = cached;
+            }
+
+            fishablePoint = cached.Point;
+            return cached.Found;
+        }
+
+        public bool IsFishableCoveredByWalkable(Vector3 fishablePoint)
+        {
+            var key = ProbePointKey.From(fishablePoint);
+            if (!fishableCovered.TryGetValue(key, out var result))
+            {
+                result = TryFindHighestWalkable(fishablePoint, out var walkablePoint)
+                    && walkablePoint.Y >= fishablePoint.Y + WalkableFishableMinimumVerticalDelta;
+                fishableCovered[key] = result;
+            }
+
+            return result;
+        }
+    }
+
     private sealed class TriangleIndex
     {
         private readonly float cellSize;
@@ -1580,6 +1702,37 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         private static int Quantize(float value) => (int)MathF.Floor(value / FishableCoverageTargetKeyCellSize);
     }
+
+    private readonly record struct CandidateCoverageCellKey(string SurfaceGroupId, int X, int Z)
+    {
+        public static CandidateCoverageCellKey From(string surfaceGroupId, Vector3 point) => new(
+            surfaceGroupId,
+            Quantize(point.X),
+            Quantize(point.Z));
+
+        private static int Quantize(float value) => (int)MathF.Floor(value / CandidateCoverageCellSize);
+    }
+
+    private readonly record struct HorizontalProbeKey(int X, int Z)
+    {
+        public static HorizontalProbeKey From(Vector3 point) => new(
+            Quantize(point.X),
+            Quantize(point.Z));
+
+        private static int Quantize(float value) => (int)MathF.Floor(value / ProbeCacheCellSize);
+    }
+
+    private readonly record struct ProbePointKey(int X, int Y, int Z)
+    {
+        public static ProbePointKey From(Vector3 point) => new(
+            Quantize(point.X),
+            Quantize(point.Y),
+            Quantize(point.Z));
+
+        private static int Quantize(float value) => (int)MathF.Floor(value / ProbeCacheCellSize);
+    }
+
+    private readonly record struct CachedVector3Result(bool Found, Vector3 Point);
 
     private readonly record struct BoundaryEdge(Vector3 Start, Vector3 End, ExtractedSceneTriangle Triangle)
     {
