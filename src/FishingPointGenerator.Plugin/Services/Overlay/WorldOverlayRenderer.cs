@@ -47,6 +47,8 @@ internal sealed unsafe class WorldOverlayRenderer
     private bool candidateSelectionActive;
     private Vector2 candidateSelectionStart;
     private Vector2 candidateSelectionEnd;
+    private TerritoryMaintenanceDocument? cachedMaintenance;
+    private OverlayOwnerIndex cachedOwnerIndex = OverlayOwnerIndex.Empty;
 
     public void Draw(SpotWorkflowSession session)
     {
@@ -135,18 +137,20 @@ internal sealed unsafe class WorldOverlayRenderer
             return;
 
         var territoryId = survey.TerritoryId != 0 ? survey.TerritoryId : session.SelectedTerritoryId;
-        var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
-        var riskOwnersByKey = BuildMixedRiskCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
-        var disabledOwnersByKey = BuildDisabledCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
+        var ownerIndex = GetOwnerIndex(session.CurrentTerritoryMaintenance);
+        var recordedOwnersByKey = ownerIndex.RecordedOwnersByKey;
+        var riskOwnersByKey = ownerIndex.RiskOwnersByKey;
+        var disabledOwnersByKey = ownerIndex.DisabledOwnersByKey;
 
         var recordedTotal = survey.Candidates.Count(candidate => HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
         var riskTotal = survey.Candidates.Count(candidate => HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey));
         var disabledTotal = survey.Candidates.Count(candidate => HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
+        var playerPoint = Point3.From(playerPosition);
         var visibleCandidates = survey.Candidates
             .Select(candidate => new
             {
                 Candidate = candidate,
-                Distance = candidate.Position.HorizontalDistanceTo(Point3.From(playerPosition)),
+                Distance = candidate.Position.HorizontalDistanceTo(playerPoint),
             })
             .Where(item => item.Distance <= drawDistance)
             .OrderBy(item => item.Distance)
@@ -350,7 +354,7 @@ internal sealed unsafe class WorldOverlayRenderer
         IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey)
     {
         return HasRiskOwner(candidate, territoryId, riskOwnersByKey)
-            || GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 1;
+            || HasMultipleRecordedOwners(candidate, territoryId, recordedOwnersByKey);
     }
 
     private static bool HasDisabledOwner(
@@ -380,6 +384,49 @@ internal sealed unsafe class WorldOverlayRenderer
         string key)
     {
         return !string.IsNullOrWhiteSpace(key) && ownersByKey.ContainsKey(key);
+    }
+
+    private static bool HasMultipleRecordedOwners(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey)
+    {
+        if (recordedOwnersByKey.Count == 0)
+            return false;
+
+        uint firstOwnerId = 0;
+        var hasOwner = false;
+        return HasDifferentOwner(recordedOwnersByKey, candidate.CandidateId, ref firstOwnerId, ref hasOwner)
+            || HasDifferentOwner(
+                recordedOwnersByKey,
+                GetTerritoryCandidateFingerprint(candidate, territoryId),
+                ref firstOwnerId,
+                ref hasOwner);
+    }
+
+    private static bool HasDifferentOwner(
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> ownersByKey,
+        string key,
+        ref uint firstOwnerId,
+        ref bool hasOwner)
+    {
+        if (string.IsNullOrWhiteSpace(key) || !ownersByKey.TryGetValue(key, out var owners))
+            return false;
+
+        foreach (var owner in owners)
+        {
+            if (!hasOwner)
+            {
+                firstOwnerId = owner.FishingSpotId;
+                hasOwner = true;
+                continue;
+            }
+
+            if (owner.FishingSpotId != firstOwnerId)
+                return true;
+        }
+
+        return false;
     }
 
     private static IReadOnlyList<CandidateRecordOwner> GetRecordedOwners(
@@ -744,9 +791,10 @@ internal sealed unsafe class WorldOverlayRenderer
             return;
 
         var territoryId = session.CurrentTerritorySurvey?.TerritoryId ?? session.SelectedTerritoryId;
-        var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
-        var riskOwnersByKey = BuildMixedRiskCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
-        var disabledOwnersByKey = BuildDisabledCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
+        var ownerIndex = GetOwnerIndex(session.CurrentTerritoryMaintenance);
+        var recordedOwnersByKey = ownerIndex.RecordedOwnersByKey;
+        var riskOwnersByKey = ownerIndex.RiskOwnersByKey;
+        var disabledOwnersByKey = ownerIndex.DisabledOwnersByKey;
         var playerPoint = Point3.From(playerPosition);
         var candidates = blocks
             .SelectMany(block => block.Candidates)
@@ -772,6 +820,19 @@ internal sealed unsafe class WorldOverlayRenderer
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, isDisabled ? 3f : isRisk ? 2.5f : isConfirmed ? 3f : 2f, color, true);
         }
+    }
+
+    private OverlayOwnerIndex GetOwnerIndex(TerritoryMaintenanceDocument? maintenance)
+    {
+        if (ReferenceEquals(cachedMaintenance, maintenance))
+            return cachedOwnerIndex;
+
+        cachedMaintenance = maintenance;
+        cachedOwnerIndex = new OverlayOwnerIndex(
+            BuildRecordedCandidateOwnerIndex(maintenance),
+            BuildMixedRiskCandidateOwnerIndex(maintenance),
+            BuildDisabledCandidateOwnerIndex(maintenance));
+        return cachedOwnerIndex;
     }
 
     private void DrawTerritoryBlockLabels(
@@ -967,4 +1028,15 @@ internal sealed unsafe class WorldOverlayRenderer
 
     private sealed record CandidateRecordOwner(uint FishingSpotId, string Name);
     private sealed record OverlayCandidateScreenPoint(ApproachCandidate Candidate, Vector2 ScreenPosition);
+
+    private sealed record OverlayOwnerIndex(
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> RecordedOwnersByKey,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> RiskOwnersByKey,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> DisabledOwnersByKey)
+    {
+        public static OverlayOwnerIndex Empty { get; } = new(
+            new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal),
+            new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal),
+            new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal));
+    }
 }

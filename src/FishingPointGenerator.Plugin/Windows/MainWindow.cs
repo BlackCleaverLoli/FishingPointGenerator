@@ -140,11 +140,11 @@ internal sealed class MainWindow : Window, IDisposable
             : "-";
 
         DrawSectionTitle("现场工作台");
-        DrawSummaryRow(
+        DrawStableSummaryRow(
             "区域",
             $"{session.CurrentTerritoryId} / {FormatTerritoryTitle(session.SelectedTerritoryId, session.SelectedTerritoryName)}");
-        DrawSummaryRow("目标", statusText, GetStatusColor(session.CurrentAnalysis?.Status));
-        DrawSummaryRow("自动", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
+        DrawStableSummaryRow("目标", statusText, GetStatusColor(session.CurrentAnalysis?.Status));
+        DrawStableSummaryRow("自动", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
 
         ImGui.Spacing();
         ImGui.TextColored(AccentText, "扫点/候选");
@@ -817,6 +817,27 @@ internal sealed class MainWindow : Window, IDisposable
     private static void DrawSummaryRow(string label, string value)
     {
         DrawSummaryRow(label, value, null);
+    }
+
+    private static void DrawStableSummaryRow(string label, string value)
+    {
+        DrawStableSummaryRow(label, value, null);
+    }
+
+    private static void DrawStableSummaryRow(string label, string value, Vector4? valueColor)
+    {
+        var rowStart = ImGui.GetCursorPosX();
+        var width = ImGui.GetContentRegionAvail().X;
+        var labelWidth = Math.Clamp(width * 0.28f, 72f, 132f);
+        var valueWidth = Math.Max(24f, width - labelWidth);
+        ImGui.TextColored(MutedText, FitTextToWidth(label, labelWidth));
+        ImGui.SameLine(rowStart + labelWidth);
+
+        var fittedValue = FitTextToWidth(value, valueWidth);
+        if (valueColor is { } color)
+            ImGui.TextColored(color, fittedValue);
+        else
+            ImGui.TextUnformatted(fittedValue);
     }
 
     private static void DrawSummaryRow(string label, string value, Vector4? valueColor)
