@@ -296,6 +296,15 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
+        if (navmesh.IsNavmeshBuildInProgress || !navmesh.IsReady)
+        {
+            StatusText = navmesh.IsNavmeshBuildInProgress
+                ? "等待 vnavmesh 构建完成后启动区域扫描。"
+                : "等待 vnavmesh 就绪后启动区域扫描。";
+            Delay(LoopDelay);
+            return;
+        }
+
         session.ScanCurrentTerritory();
         if (session.TerritoryScanInProgress)
         {
@@ -381,10 +390,19 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
-        if (playerActions.MountIfNeeded())
+        var mountResult = playerActions.MountIfNeeded();
+        if (mountResult == MountAttemptResult.Ready)
         {
             currentCandidateMountCompleted = true;
             StatusText = $"移动到候选：{CurrentCandidateText}";
+            step = AutoSurveyStep.StartMove;
+            return;
+        }
+
+        if (mountResult == MountAttemptResult.TerritoryMountUnavailable)
+        {
+            currentCandidateMountCompleted = false;
+            StatusText = $"当前领地不能上坐骑，改用地面移动：{CurrentCandidateText}";
             step = AutoSurveyStep.StartMove;
             return;
         }
@@ -400,9 +418,8 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
-        var selection = session.CurrentCandidateSelection;
         ResetMoveResend();
-        var fly = selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
+        var fly = CanUseFlightForCurrentMove();
         if (!TryStartCurrentMove(fly, MoveCloseRangeMeters, $"vnavmesh 移动中：{CurrentCandidateText}", out var failureMessage))
         {
             lastMoveResendAttemptAt = DateTimeOffset.UtcNow;
@@ -441,8 +458,7 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
-        var selection = session.CurrentCandidateSelection;
-        var fly = selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
+        var fly = CanUseFlightForCurrentMove();
         if (TryResendCurrentMove(fly, MoveCloseRangeMeters, "vnavmesh 移动", out var giveUp, out var resendFailure))
             return;
 
@@ -562,11 +578,10 @@ internal sealed class AutoSurveyRunner : IDisposable
         if (!TryResolveDismountRelocateDestination(requestedDestination, out var destination, out failureMessage))
             return false;
 
-        var selection = session.CurrentCandidateSelection;
         StopMove3();
         var result = navmesh.MoveCloseTo(
             destination.ToVector3(),
-            selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable,
+            CanUseFlightForCurrentMove(),
             DismountRelocateMoveCloseRangeMeters);
 
         if (!result.IsStarted)
@@ -652,8 +667,7 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
-        var selection = session.CurrentCandidateSelection;
-        var fly = selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
+        var fly = CanUseFlightForCurrentMove();
         if (TryResendCurrentMove(fly, DismountRelocateMoveCloseRangeMeters, "备用落点移动", out var giveUp, out var resendFailure))
             return;
 
@@ -1173,6 +1187,15 @@ internal sealed class AutoSurveyRunner : IDisposable
 
         distance = Point3.From(player.Position).HorizontalDistanceTo(currentCandidate.Position);
         return true;
+    }
+
+    private bool CanUseFlightForCurrentMove()
+    {
+        if (currentCandidate is null || !playerActions.IsMountedOrFlying())
+            return false;
+
+        var selection = session.CurrentCandidateSelection;
+        return selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
     }
 
     private bool TryPauseForStableCastIfAvailable(string reason)

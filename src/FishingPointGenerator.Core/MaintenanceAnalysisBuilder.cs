@@ -34,6 +34,21 @@ public sealed class MaintenanceAnalysisBuilder
 
         var confirmedCount = CountConfirmedPoints(maintenance);
         var candidateCount = scan?.Candidates.Count ?? 0;
+        var hasMixedRisk = maintenance?.MixedRiskBlocks.Count > 0
+            || HasDecision(reviewDecision, SpotReviewDecision.NeedsManualReview);
+
+        if (hasMixedRisk && !HasDecision(reviewDecision, SpotReviewDecision.AllowRiskExport))
+        {
+            return new SpotAnalysis
+            {
+                Key = target.Key,
+                Status = SpotAnalysisStatus.MixedRisk,
+                CandidateCount = candidateCount,
+                ConfirmedApproachPointCount = confirmedCount,
+                HasMixedRisk = true,
+                Messages = ["该目标存在混合风险记录，需要人工复核。"],
+            };
+        }
 
         if (confirmedCount > 0)
         {

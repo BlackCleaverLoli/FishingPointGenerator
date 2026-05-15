@@ -6,6 +6,24 @@ namespace FishingPointGenerator.Plugin.Services.GameInteraction;
 
 internal static unsafe class CurrentGameState
 {
+    public static bool IsCurrentTerritoryMountAllowed()
+    {
+        try
+        {
+            var territoryId = DService.Instance().ClientState.TerritoryType;
+            if (territoryId == 0)
+                return false;
+
+            var territory = DService.Instance().Data.GetExcelSheet<TerritoryType>().GetRowOrDefault(territoryId);
+            return territory?.Mount ?? false;
+        }
+        catch (Exception ex)
+        {
+            DService.Instance().Log.Warning(ex, "FPG 检查当前区域坐骑状态失败");
+            return false;
+        }
+    }
+
     public static bool IsCurrentTerritoryFlyable()
     {
         try

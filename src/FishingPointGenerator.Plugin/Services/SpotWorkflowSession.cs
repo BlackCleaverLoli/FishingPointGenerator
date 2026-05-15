@@ -19,10 +19,6 @@ internal sealed class SpotWorkflowSession : IDisposable
     private const float MaximumCastBlockSnapDistance = 50f;
     private const float MinimumCastBlockFillRange = 1f;
     private const float MaximumCastBlockFillRange = 1000f;
-    private const float MixedRiskCastBlockFillRangeMeters = 8f;
-    private const float MixedRiskBoundaryDisableWidthMeters = 10f;
-    private const float MixedRiskSeedResolveHorizontalToleranceMeters = 6f;
-    private const float MixedRiskSeedResolveVerticalToleranceMeters = 2f;
     private const float CastWaterSystemLinkDistanceMeters = 15f;
     private const float CastWaterSystemHeightToleranceMeters = 3f;
     private const int FinalCandidateSparsifyMinimumBlockSize = 5;
@@ -36,6 +32,7 @@ internal sealed class SpotWorkflowSession : IDisposable
     private const string ManualOverlayDisableNote = "manualOverlayDisable";
     private const string ManualOverlayDisablePreviousConfirmedNote = "manualOverlayDisablePreviousConfirmed";
     private const string ManualOverlayUndisableNote = "manualOverlayUndisable";
+    private const string UnrecordConfirmedPointsNote = "unrecordConfirmedPoints";
 
     private readonly SpotJsonStore store;
     private readonly TerritoryMaintenanceStore maintenanceStore;
@@ -663,15 +660,15 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     public void RefreshCandidateSelection()
     {
-        RefreshCandidateSelection(includeRecordedUnresolvedRiskCandidates: false);
+        RefreshCandidateSelection(runMixedRiskMaintenance: false, includeMixedRiskCandidates: false);
     }
 
     public void RefreshAutoSurveyCandidateSelection()
     {
-        RefreshCandidateSelection(includeRecordedUnresolvedRiskCandidates: true);
+        RefreshCandidateSelection(runMixedRiskMaintenance: true, includeMixedRiskCandidates: true);
     }
 
-    private void RefreshCandidateSelection(bool includeRecordedUnresolvedRiskCandidates)
+    private void RefreshCandidateSelection(bool runMixedRiskMaintenance, bool includeMixedRiskCandidates)
     {
         if (!EnsureCurrentTarget())
             return;
@@ -685,25 +682,27 @@ internal sealed class SpotWorkflowSession : IDisposable
             return;
         }
 
-        var convergedRiskBlocks = includeRecordedUnresolvedRiskCandidates
+        var prunedAutoBoundaryDisabled = runMixedRiskMaintenance
+            ? PruneCurrentMixedRiskAutoBoundaryDisabledPoints(target, "autoSurveyPreSelectionPruneAutoBoundaryDisabled")
+            : 0;
+        var convergedRiskBlocks = runMixedRiskMaintenance
             ? ConvergeCurrentMixedRiskBlocks(target, "autoSurveyPreSelectionMixedRiskConverged")
             : 0;
-        if (convergedRiskBlocks > 0)
+        if (prunedAutoBoundaryDisabled > 0 || convergedRiskBlocks > 0)
             scan = EnsureScanForCurrentTarget() ?? scan;
 
-        CurrentCandidateSelection = BuildCandidateSelection(
-            target,
-            scan,
-            forceProbe: true,
-            includeRecordedUnresolvedRiskCandidates: includeRecordedUnresolvedRiskCandidates);
+        CurrentCandidateSelection = BuildCandidateSelection(scan, includeMixedRiskCandidates);
         CurrentAnalysis ??= BuildAnalysis(target);
         ReplaceAnalysis(CurrentAnalysis);
         var convergenceNote = convergedRiskBlocks > 0
             ? $"，已收敛风险记录 {convergedRiskBlocks} 个"
             : string.Empty;
+        var pruneNote = prunedAutoBoundaryDisabled > 0
+            ? $"，已清理旧自动屏蔽 {prunedAutoBoundaryDisabled} 个"
+            : string.Empty;
         LastMessage = CurrentCandidateSelection is null
-            ? $"FishingSpot {target.FishingSpotId} 没有可用候选{convergenceNote}。"
-            : $"已刷新 FishingSpot {target.FishingSpotId} 的候选选择：{CurrentCandidateSelection.ModeText}{convergenceNote}。";
+            ? $"FishingSpot {target.FishingSpotId} 没有可用候选{pruneNote}{convergenceNote}。"
+            : $"已刷新 FishingSpot {target.FishingSpotId} 的候选选择：{CurrentCandidateSelection.ModeText}{pruneNote}{convergenceNote}。";
     }
 
     public void StartAutoSurveyOnce()
@@ -835,6 +834,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var blocks = BuildBlocksFromSpotCandidates(scan.Candidates);
         var recordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
         var recordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
+        var blockedCandidateIds = GetCastFillBlockedCandidateIds(CurrentTerritoryMaintenance);
         var blockByCandidateId = blocks
             .SelectMany(block => block.Candidates.Select(candidate => new { candidate.CandidateId, Block = block }))
             .Where(item => !string.IsNullOrWhiteSpace(item.CandidateId))
@@ -854,10 +854,10 @@ internal sealed class SpotWorkflowSession : IDisposable
             CastBlockFillRangeMeters,
             MinimumCastBlockFillRange,
             MaximumCastBlockFillRange);
-        var selection = FindCastFillBlock(blocks, playerSnapshot.Position, snapDistance);
+        var selection = FindCastFillBlock(blocks, playerSnapshot.Position, snapDistance, blockedCandidateIds);
         var fillDistances = selection is null
             ? new Dictionary<string, float>(StringComparer.Ordinal)
-            : CalculateCastFillDistances(blocks, selection.Block, selection.SeedCandidate);
+            : CalculateCastFillDistances(blocks, selection.Block, selection.SeedCandidate, blockedCandidateIds);
         var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange);
 
         var nearby = scan.Candidates
@@ -874,7 +874,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
         var lines = new List<string>
         {
-            $"FPG candidate debug: territory={target.TerritoryId} spot={target.FishingSpotId} name=\"{target.Name}\" player=({FormatPoint(playerSnapshot.Position)}) radius={radiusMeters:F1} limit={limit} scanSource={scanSource} candidates={scan.Candidates.Count} targetRange={scan.Candidates.Count(candidate => candidate.IsWithinTargetSearchRadius)} blocks={blocks.Count} nearby={nearby.Count} confirmed={recordedCandidateIds.Count} snap={snapDistance:F1} fillRange={fillRange:F1}",
+            $"FPG candidate debug: territory={target.TerritoryId} spot={target.FishingSpotId} name=\"{target.Name}\" player=({FormatPoint(playerSnapshot.Position)}) radius={radiusMeters:F1} limit={limit} scanSource={scanSource} candidates={scan.Candidates.Count} targetRange={scan.Candidates.Count(candidate => candidate.IsWithinTargetSearchRadius)} blocks={blocks.Count} nearby={nearby.Count} confirmed={recordedCandidateIds.Count} blocked={blockedCandidateIds.Count} snap={snapDistance:F1} fillRange={fillRange:F1}",
         };
 
         if (selection is null)
@@ -1014,7 +1014,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var playerSnapshot = GetPlayerSnapshot();
         if (playerSnapshot is null)
         {
-            LastMessage = "无法选择未记录/风险候选：没有可用的玩家位置。";
+            LastMessage = "无法选择未记录候选：没有可用的玩家位置。";
             return;
         }
 
@@ -1026,7 +1026,7 @@ internal sealed class SpotWorkflowSession : IDisposable
                 playerSnapshot.Position);
         if (candidate is null)
         {
-            LastMessage = $"FishingSpot {target.FishingSpotId} 没有未记录或风险候选可插旗。";
+            LastMessage = $"FishingSpot {target.FishingSpotId} 没有未记录候选可插旗。";
             return;
         }
 
@@ -1035,13 +1035,13 @@ internal sealed class SpotWorkflowSession : IDisposable
                 target.MapId,
                 candidate.Position.X,
                 candidate.Position.Z,
-                $"{target.Name} 未记录/风险点"))
+                $"{target.Name} 未记录点"))
         {
-            LastMessage = $"无法为 FishingSpot {target.FishingSpotId} 的未记录/风险候选插旗。";
+            LastMessage = $"无法为 FishingSpot {target.FishingSpotId} 的未记录候选插旗。";
             return;
         }
 
-        LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的领地未记录/风险候选插旗：距角色 {candidate.Position.HorizontalDistanceTo(playerSnapshot.Position):F1}m，距中心 {candidate.DistanceToTargetCenterMeters:F1}m。";
+        LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的领地未记录候选插旗：距角色 {candidate.Position.HorizontalDistanceTo(playerSnapshot.Position):F1}m，距中心 {candidate.DistanceToTargetCenterMeters:F1}m。";
     }
 
     public bool RecordCastFill(uint castPlaceNameId)
@@ -1105,7 +1105,11 @@ internal sealed class SpotWorkflowSession : IDisposable
             MinimumCastBlockFillRange,
             MaximumCastBlockFillRange);
         CastBlockFillRangeMeters = fillRange;
-        var selection = FindCastFillBlock(scan.Candidates, playerSnapshot.Position, snapDistance);
+        var prunedAutoBoundaryDisabled = PruneCurrentMixedRiskAutoBoundaryDisabledPoints(
+            target,
+            "autoFillFromCastPreSelectionPruneAutoBoundaryDisabled");
+        var blockedCandidateIds = GetCastFillBlockedCandidateIds(CurrentTerritoryMaintenance);
+        var selection = FindCastFillBlock(scan.Candidates, playerSnapshot.Position, snapDistance, blockedCandidateIds);
         if (selection is null)
         {
             LastMessage = $"{resolutionNote}检测到 FishingSpot {fishingSpotId} 抛竿，但 {snapDistance:F1}m 内没有可填色候选块。";
@@ -1117,10 +1121,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var conflictSpotIds = hasExistingRiskBlock
             ? Array.Empty<uint>()
             : FindCastFillBlockConflictSpotIds(target, selection.Block);
-        var usesRiskRange = hasExistingRiskBlock || conflictSpotIds.Count > 0;
-        var effectiveFillRange = usesRiskRange
-            ? Math.Min(fillRange, MixedRiskCastBlockFillRangeMeters)
-            : fillRange;
+        var hasMixedRisk = hasExistingRiskBlock || conflictSpotIds.Count > 0;
         var markResult = MixedRiskBlockMarkResult.Empty;
         if (conflictSpotIds.Count > 0)
         {
@@ -1136,8 +1137,9 @@ internal sealed class SpotWorkflowSession : IDisposable
             .Where(candidate => !string.IsNullOrWhiteSpace(GetSpotCandidateGraphId(candidate)))
             .GroupBy(GetSpotCandidateGraphId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-        var fillDistances = CalculateCastFillDistances(CurrentTargetBlocks, selection.Block, selection.SeedCandidate);
-        var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, effectiveFillRange);
+        blockedCandidateIds = GetCastFillBlockedCandidateIds(CurrentTerritoryMaintenance);
+        var fillDistances = CalculateCastFillDistances(CurrentTargetBlocks, selection.Block, selection.SeedCandidate, blockedCandidateIds);
+        var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange);
         var candidates = fillCandidateIds
             .Select(candidateId => candidatesByGraphId.TryGetValue(candidateId, out var spotCandidate)
                 ? spotCandidate
@@ -1154,21 +1156,23 @@ internal sealed class SpotWorkflowSession : IDisposable
 
         var existingCandidateIds = GetRecordedCandidateIds(maintenance, target.TerritoryId);
         var existingCandidateFingerprints = GetRecordedCandidateFingerprints(maintenance, target.TerritoryId);
-        var note = $"autoFillFromCast placeName={castPlaceNameId} player={FormatPoint(playerSnapshot.Position)} waterSystem={FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={effectiveFillRange:F1} requestedFillRange={fillRange:F1} mixedRisk={(usesRiskRange ? "true" : "false")} repeatEvidence=true";
+        var note = $"autoFillFromCast placeName={castPlaceNameId} player={FormatPoint(playerSnapshot.Position)} waterSystem={FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} block={selection.Block.BlockId} snap={snapDistance:F1} fillRange={fillRange:F1} mixedRisk={(hasMixedRisk ? "true" : "false")} blocked={blockedCandidateIds.Count} repeatEvidence=true";
         var newCandidates = candidates
             .Where(candidate => !IsRecordedCandidate(candidate, existingCandidateIds, existingCandidateFingerprints))
+            .ToList();
+        var repeatedOwnershipCandidates = candidates
+            .Where(candidate => IsRecordedCandidate(candidate, existingCandidateIds, existingCandidateFingerprints))
             .ToList();
         var repeatedCandidates = candidates.Count - newCandidates.Count;
 
         UpsertAutoCastFillApproachPoints(target, scan, candidates, note);
-        var disabledBoundaryCandidates = usesRiskRange
-            ? DisableMixedRiskBoundaryCandidates(
-                target,
-                scan,
-                selection.Block,
-                $"{note} boundaryDisableWidth={MixedRiskBoundaryDisableWidthMeters:F1}")
+        var ownershipResolution = repeatedOwnershipCandidates.Count > 0
+            ? ResolveRepeatedMixedRiskOwnership(target, repeatedOwnershipCandidates, $"{note} repeatedOwner={target.FishingSpotId}")
+            : MixedRiskOwnershipResolution.Empty;
+        prunedAutoBoundaryDisabled += hasMixedRisk
+            ? PruneMixedRiskAutoBoundaryDisabledPoints(target, selection.Block, $"{note} pruneAutoBoundaryDisabled")
             : 0;
-        var convergedRiskBlocks = usesRiskRange
+        var convergedRiskBlocks = hasMixedRisk
             ? ConvergeMixedRiskBlock(
                 target,
                 selection.Block,
@@ -1178,17 +1182,22 @@ internal sealed class SpotWorkflowSession : IDisposable
         RebuildAnalyses();
         SyncCurrentAnalysis();
         var mixedRiskNote = conflictSpotIds.Count > 0
-            ? $"，混合风险块小范围 {effectiveFillRange:F1}m，标记风险候选 {markResult.MarkedCandidateCount} 个，关联 FishingSpot {FormatSpotIds(markResult.RelatedFishingSpotIds)}"
+            ? $"，标记混合风险候选 {markResult.MarkedCandidateCount} 个，关联 FishingSpot {FormatSpotIds(markResult.RelatedFishingSpotIds)}"
             : hasExistingRiskBlock
-                ? $"，已有风险候选小范围 {effectiveFillRange:F1}m"
+                ? "，已有混合风险候选"
             : string.Empty;
-        var boundaryNote = disabledBoundaryCandidates > 0
-            ? $"，自动屏蔽中线风险候选 {disabledBoundaryCandidates} 个"
+        var pruneBoundaryNote = prunedAutoBoundaryDisabled > 0
+            ? $"，清理旧自动屏蔽 {prunedAutoBoundaryDisabled} 个"
             : string.Empty;
         var convergenceNote = convergedRiskBlocks > 0
             ? $"，风险块收敛结案"
             : string.Empty;
-        LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿水系点亮：{FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 新增 {newCandidates.Count} 个点，重复证据 {repeatedCandidates} 个（本次 {candidates.Count}/{fillDistances.Count}，seed 块 {selection.Block.BlockId}{mixedRiskNote}{boundaryNote}{convergenceNote}）。";
+        var ownershipNote = ownershipResolution.IsEmpty
+            ? string.Empty
+            : ownershipResolution.ResolvedCandidateCount > 0
+                ? $"，重复点归属收敛 {ownershipResolution.ResolvedCandidateCount} 个，移除其它钓场记录 {ownershipResolution.RemovedConflictingPointCount} 个，清理风险 {ownershipResolution.PrunedRiskRecordCount}/{ownershipResolution.UpdatedRiskRecordCount}"
+                : $"，混合重复确认 {ownershipResolution.PendingRepeatCandidateCount} 个（1/2）";
+        LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿水系点亮：{FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 新增 {newCandidates.Count} 个点，重复证据 {repeatedCandidates} 个（本次 {candidates.Count}/{fillDistances.Count}，seed 块 {selection.Block.BlockId}{mixedRiskNote}{pruneBoundaryNote}{convergenceNote}{ownershipNote}）。";
         return true;
     }
 
@@ -1642,6 +1651,156 @@ internal sealed class SpotWorkflowSession : IDisposable
         LastMessage = $"已清除 FishingSpot {target.FishingSpotId} 的维护数据：真实点、证据和复核状态已重置（ledger={FormatRemoved(removedLedger)}, review={FormatRemoved(removedReview)}）。";
     }
 
+    public void ClearCurrentSpotRecordedPoints()
+    {
+        if (!EnsureCurrentTarget())
+            return;
+
+        ClearSpotRecordedPoints(CurrentTarget!.FishingSpotId);
+    }
+
+    public void ClearSpotRecordedPoints(uint fishingSpotId)
+    {
+        var target = CurrentTerritoryTargets.FirstOrDefault(target => target.FishingSpotId == fishingSpotId);
+        if (target is null)
+        {
+            LastMessage = $"FishingSpot {fishingSpotId} 不在已选择领地 {SelectedTerritoryId}。";
+            return;
+        }
+
+        var territoryTargets = GetCatalogTerritoryTargets(target);
+        var document = EnsureMaintenanceSpots(
+            maintenanceStore.LoadTerritory(target.TerritoryId, target.TerritoryName),
+            territoryTargets);
+        var spots = document.Spots.ToList();
+        var spotIndex = spots.FindIndex(spot => spot.FishingSpotId == target.FishingSpotId);
+        if (spotIndex < 0)
+        {
+            LastMessage = $"FishingSpot {target.FishingSpotId} 没有维护记录。";
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var spot = spots[spotIndex];
+        var removedConfirmedCount = spot.ApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed);
+        var keptDisabledCount = spot.ApproachPoints.Count(IsEffectiveDisabledApproachPoint);
+        var removedOwnRiskRecords = spot.MixedRiskBlocks.Count;
+        var changed = removedConfirmedCount > 0 || removedOwnRiskRecords > 0;
+        if (changed)
+        {
+            var evidence = spot.Evidence
+                .Append(new SpotEvidenceEvent
+                {
+                    EventType = SpotEvidenceEventType.Review,
+                    Note = $"{UnrecordConfirmedPointsNote} removedConfirmed={removedConfirmedCount} keptDisabled={keptDisabledCount} removedRiskRecords={removedOwnRiskRecords}",
+                    CreatedAt = now,
+                })
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.EventId, StringComparer.Ordinal)
+                .ToList();
+
+            spots[spotIndex] = spot with
+            {
+                ApproachPoints = spot.ApproachPoints
+                    .Where(point => point.Status != ApproachPointStatus.Confirmed)
+                    .OrderBy(point => point.PointId, StringComparer.Ordinal)
+                    .ToList(),
+                MixedRiskBlocks = [],
+                Evidence = evidence,
+                UpdatedAt = now,
+            };
+        }
+
+        var prunedRiskRecords = 0;
+        var prunedRiskReferences = 0;
+        for (var index = 0; index < spots.Count; index++)
+        {
+            if (index == spotIndex)
+                continue;
+
+            var other = spots[index];
+            if (other.MixedRiskBlocks.Count == 0)
+                continue;
+
+            var records = new List<MixedRiskBlockRecord>();
+            var changedOther = false;
+            foreach (var record in other.MixedRiskBlocks)
+            {
+                var conflicts = record.ConflictingFishingSpotIds
+                    .Where(id => id != target.FishingSpotId)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToList();
+                if (conflicts.Count == record.ConflictingFishingSpotIds.Count)
+                {
+                    records.Add(record);
+                    continue;
+                }
+
+                changedOther = true;
+                prunedRiskReferences += record.ConflictingFishingSpotIds.Count - conflicts.Count;
+                if (conflicts.Count == 0)
+                {
+                    prunedRiskRecords++;
+                    continue;
+                }
+
+                records.Add(record with
+                {
+                    ConflictingFishingSpotIds = conflicts,
+                    UpdatedAt = now,
+                    Note = AppendNote(record.Note, $"{UnrecordConfirmedPointsNote} clearedSpot={target.FishingSpotId}"),
+                });
+            }
+
+            if (!changedOther)
+                continue;
+
+            var evidence = other.Evidence
+                .Append(new SpotEvidenceEvent
+                {
+                    EventType = SpotEvidenceEventType.Review,
+                    Note = $"{UnrecordConfirmedPointsNote} pruneClearedSpot={target.FishingSpotId}",
+                    CreatedAt = now,
+                })
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.EventId, StringComparer.Ordinal)
+                .ToList();
+
+            spots[index] = other with
+            {
+                MixedRiskBlocks = SortMixedRiskBlockRecords(records),
+                Evidence = evidence,
+                UpdatedAt = now,
+            };
+        }
+
+        if (!changed && prunedRiskReferences == 0)
+        {
+            LastMessage = $"FishingSpot {target.FishingSpotId} 没有已记录点需要改为未记录；手动禁用点保留 {keptDisabledCount} 个。";
+            return;
+        }
+
+        document = document with
+        {
+            TerritoryName = string.IsNullOrWhiteSpace(document.TerritoryName) ? target.TerritoryName : document.TerritoryName,
+            UpdatedAt = now,
+            Spots = spots
+                .OrderBy(spot => spot.FishingSpotId)
+                .ToList(),
+        };
+        maintenanceStore.SaveTerritory(document);
+        if (SelectedTerritoryId == target.TerritoryId)
+            CurrentTerritoryMaintenance = document;
+
+        if (CurrentScan is not null && CurrentTarget?.Key == target.Key)
+            CurrentCandidateSelection = GetOrBuildCandidateSelection(target, CurrentScan);
+        RebuildTerritorySummaries();
+        RebuildAnalyses();
+        SyncCurrentAnalysis();
+        LastMessage = $"已将 FishingSpot {target.FishingSpotId} 的已记录点改为未记录：移除确认 {removedConfirmedCount} 个，保留禁用 {keptDisabledCount} 个，清理本钓场风险 {removedOwnRiskRecords} 个，清理关联风险 {prunedRiskRecords}/{prunedRiskReferences}。";
+    }
+
     public void ClearCurrentTerritoryMaintenance()
     {
         if (SelectedTerritoryId == 0)
@@ -1758,6 +1917,359 @@ internal sealed class SpotWorkflowSession : IDisposable
                     .ToList(),
             };
         });
+    }
+
+    private MixedRiskOwnershipResolution ResolveRepeatedMixedRiskOwnership(
+        FishingSpotTarget target,
+        IReadOnlyList<SpotCandidate> candidates,
+        string note)
+    {
+        if (candidates.Count == 0)
+            return MixedRiskOwnershipResolution.Empty;
+
+        var territoryTargets = GetCatalogTerritoryTargets(target);
+        var document = EnsureMaintenanceSpots(
+            maintenanceStore.LoadTerritory(target.TerritoryId, target.TerritoryName),
+            territoryTargets);
+        var territoryId = document.TerritoryId != 0 ? document.TerritoryId : target.TerritoryId;
+        var spots = document.Spots.ToList();
+        var targetIndex = spots.FindIndex(spot => spot.FishingSpotId == target.FishingSpotId);
+        if (targetIndex < 0)
+            return MixedRiskOwnershipResolution.Empty;
+
+        var currentSpot = spots[targetIndex];
+        var allSpotIds = spots
+            .Where(spot => spot.FishingSpotId != 0)
+            .Select(spot => spot.FishingSpotId)
+            .ToList();
+        var ownershipCandidates = candidates
+            .GroupBy(candidate => GetSpotCandidateGraphId(candidate), StringComparer.Ordinal)
+            .Select(group => group.First())
+            .Select(candidate => new OwnershipCandidate(candidate, ToApproachCandidate(candidate), GetSpotCandidateMatchIds(candidate, territoryId)))
+            .Where(item => item.MatchIds.Count > 0)
+            .Where(item => currentSpot.ApproachPoints
+                .Where(point => point.Status == ApproachPointStatus.Confirmed)
+                .Any(point => IsApproachPointForCandidate(point, territoryId, item.ApproachCandidate)))
+            .Select(item =>
+            {
+                var confirmedSpotIds = FindCandidateConfirmedSpotIds(document, territoryId, item.ApproachCandidate);
+                var currentRiskRecords = currentSpot.MixedRiskBlocks
+                    .Where(record => IsMixedRiskBlockRecordForCandidate(record, item.SpotCandidate))
+                    .ToList();
+                var currentRepeatRecords = currentRiskRecords
+                    .Where(record => IsCandidateLevelMixedRiskRecordForCandidate(record, item.SpotCandidate))
+                    .ToList();
+                var matchingRiskRecords = document.Spots
+                    .SelectMany(spot => spot.MixedRiskBlocks
+                        .Where(record => IsMixedRiskBlockRecordForCandidate(record, item.SpotCandidate))
+                        .Select(record => new { spot.FishingSpotId, Record = record }))
+                    .ToList();
+                var hasAnyRiskRecord = matchingRiskRecords.Count > 0;
+                var conflictSpotIds = confirmedSpotIds
+                    .Concat(matchingRiskRecords.Select(item => item.FishingSpotId))
+                    .Concat(matchingRiskRecords.SelectMany(item => item.Record.ConflictingFishingSpotIds))
+                    .Where(id => id != 0 && id != target.FishingSpotId)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToList();
+                var isMixed = (confirmedSpotIds.Count >= 2 && confirmedSpotIds.Contains(target.FishingSpotId))
+                    || hasAnyRiskRecord;
+                var disabledSpotIds = confirmedSpotIds.Count >= 2
+                    ? confirmedSpotIds
+                    : allSpotIds;
+                var disabled = IsCandidateDisabledByAnySpot(document, disabledSpotIds, territoryId, item.ApproachCandidate);
+                var repeatCount = currentRepeatRecords.Count == 0
+                    ? 0
+                    : currentRepeatRecords.Max(record => record.ResetPointCount);
+                return item with
+                {
+                    ConflictingFishingSpotIds = conflictSpotIds,
+                    PostMixedRepeatCount = repeatCount,
+                    HasCurrentRiskRecord = currentRiskRecords.Count > 0,
+                    IsMixedRiskCandidate = isMixed && !disabled,
+                };
+            })
+            .Where(item => item.IsMixedRiskCandidate)
+            .ToList();
+        if (ownershipCandidates.Count == 0)
+            return MixedRiskOwnershipResolution.Empty;
+
+        var readyOwnershipCandidates = ownershipCandidates
+            .Where(item => item.PostMixedRepeatCount >= 1)
+            .ToList();
+        var pendingOwnershipCandidates = ownershipCandidates
+            .Where(item => item.PostMixedRepeatCount < 1)
+            .ToList();
+        var resolvedCandidateIds = readyOwnershipCandidates
+            .SelectMany(item => item.MatchIds)
+            .ToHashSet(StringComparer.Ordinal);
+        var now = DateTimeOffset.UtcNow;
+        var removedConflictingPoints = 0;
+        var prunedRiskRecords = 0;
+        var updatedRiskRecords = 0;
+        var pendingRepeatCandidates = 0;
+        var changed = false;
+
+        if (pendingOwnershipCandidates.Count > 0)
+        {
+            var pendingResult = MarkPendingMixedRiskOwnershipRepeats(
+                target,
+                spots[targetIndex],
+                pendingOwnershipCandidates,
+                now,
+                note);
+            if (pendingResult.Changed)
+            {
+                spots[targetIndex] = pendingResult.Spot;
+                pendingRepeatCandidates = pendingResult.PendingRepeatCandidateCount;
+                changed = true;
+            }
+        }
+
+        if (readyOwnershipCandidates.Count == 0)
+        {
+            if (!changed)
+                return MixedRiskOwnershipResolution.Empty;
+
+            document = document with
+            {
+                TerritoryName = string.IsNullOrWhiteSpace(document.TerritoryName) ? target.TerritoryName : document.TerritoryName,
+                UpdatedAt = now,
+                Spots = spots
+                    .OrderBy(spot => spot.FishingSpotId)
+                    .ToList(),
+            };
+            maintenanceStore.SaveTerritory(document);
+            if (SelectedTerritoryId == target.TerritoryId)
+                CurrentTerritoryMaintenance = document;
+
+            return new MixedRiskOwnershipResolution(0, 0, 0, 0, pendingRepeatCandidates);
+        }
+
+        for (var index = 0; index < spots.Count; index++)
+        {
+            var spot = spots[index];
+            if (HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.IgnoreSpot))
+                continue;
+
+            var points = spot.ApproachPoints.ToList();
+            var removedForSpot = 0;
+            if (spot.FishingSpotId != target.FishingSpotId)
+            {
+                points = points
+                    .Where(point =>
+                    {
+                        if (point.Status != ApproachPointStatus.Confirmed)
+                            return true;
+                        if (!readyOwnershipCandidates.Any(item => IsApproachPointForCandidate(point, territoryId, item.ApproachCandidate)))
+                            return true;
+
+                        removedForSpot++;
+                        return false;
+                    })
+                    .ToList();
+            }
+
+            var records = new List<MixedRiskBlockRecord>();
+            var prunedForSpot = 0;
+            var updatedForSpot = 0;
+            foreach (var record in spot.MixedRiskBlocks)
+            {
+                var matchesResolvedCandidate = readyOwnershipCandidates.Any(item => IsMixedRiskBlockRecordForCandidate(record, item.SpotCandidate));
+                if (!matchesResolvedCandidate)
+                {
+                    records.Add(record);
+                    continue;
+                }
+
+                var candidateIds = record.CandidateIds
+                    .Where(id => !resolvedCandidateIds.Contains(id))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(id => id, StringComparer.Ordinal)
+                    .ToList();
+                if (candidateIds.Count == 0)
+                {
+                    prunedForSpot++;
+                    continue;
+                }
+
+                updatedForSpot++;
+                records.Add(record with
+                {
+                    BlockId = string.Empty,
+                    CandidateIds = candidateIds,
+                    UpdatedAt = now,
+                    Note = AppendNote(record.Note, note),
+                });
+            }
+
+            if (removedForSpot == 0 && prunedForSpot == 0 && updatedForSpot == 0)
+                continue;
+
+            changed = true;
+            removedConflictingPoints += removedForSpot;
+            prunedRiskRecords += prunedForSpot;
+            updatedRiskRecords += updatedForSpot;
+            var evidence = spot.Evidence
+                .Append(new SpotEvidenceEvent
+                {
+                    EventType = SpotEvidenceEventType.Review,
+                    Position = readyOwnershipCandidates[0].ApproachCandidate.Position,
+                    SourceSurfaceGroupId = readyOwnershipCandidates[0].ApproachCandidate.SurfaceGroupId,
+                    Note = $"{note} resolvedCandidates={readyOwnershipCandidates.Count} removedConfirmed={removedForSpot} prunedRisk={prunedForSpot} updatedRisk={updatedForSpot}",
+                    CreatedAt = now,
+                })
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.EventId, StringComparer.Ordinal)
+                .ToList();
+
+            spots[index] = spot with
+            {
+                ReviewDecision = records.Count == 0
+                    ? spot.ReviewDecision & ~SpotReviewDecision.NeedsManualReview
+                    : spot.ReviewDecision,
+                ApproachPoints = points
+                    .OrderBy(point => point.PointId, StringComparer.Ordinal)
+                    .ToList(),
+                MixedRiskBlocks = SortMixedRiskBlockRecords(records),
+                Evidence = evidence,
+                UpdatedAt = now,
+            };
+        }
+
+        if (!changed)
+            return MixedRiskOwnershipResolution.Empty;
+
+        document = document with
+        {
+            TerritoryName = string.IsNullOrWhiteSpace(document.TerritoryName) ? target.TerritoryName : document.TerritoryName,
+            UpdatedAt = now,
+            Spots = spots
+                .OrderBy(spot => spot.FishingSpotId)
+                .ToList(),
+        };
+        maintenanceStore.SaveTerritory(document);
+        if (SelectedTerritoryId == target.TerritoryId)
+            CurrentTerritoryMaintenance = document;
+
+        return new MixedRiskOwnershipResolution(
+            readyOwnershipCandidates.Count,
+            removedConflictingPoints,
+            prunedRiskRecords,
+            updatedRiskRecords,
+            pendingRepeatCandidates);
+    }
+
+    private static PendingMixedRiskOwnershipRepeatResult MarkPendingMixedRiskOwnershipRepeats(
+        FishingSpotTarget target,
+        SpotMaintenanceRecord currentSpot,
+        IReadOnlyList<OwnershipCandidate> pendingCandidates,
+        DateTimeOffset now,
+        string note)
+    {
+        if (pendingCandidates.Count == 0)
+            return new PendingMixedRiskOwnershipRepeatResult(currentSpot, false, 0);
+
+        var records = currentSpot.MixedRiskBlocks.ToList();
+        var changed = false;
+        var pendingCount = 0;
+        foreach (var candidate in pendingCandidates)
+        {
+            var candidateIds = candidate.MatchIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(id => id, StringComparer.Ordinal)
+                .ToList();
+            if (candidateIds.Count == 0)
+                continue;
+
+            var conflicts = candidate.ConflictingFishingSpotIds
+                .Where(id => id != 0 && id != target.FishingSpotId)
+                .Distinct()
+                .OrderBy(id => id)
+                .ToList();
+            var pendingNote = $"{note} repeatConfirm=1/2";
+            var index = records.FindIndex(record => IsCandidateLevelMixedRiskRecordForCandidate(record, candidate.SpotCandidate));
+            if (index < 0)
+            {
+                records.Add(new MixedRiskBlockRecord
+                {
+                    SurfaceGroupId = candidate.SpotCandidate.SurfaceGroupId,
+                    CandidateIds = candidateIds,
+                    ConflictingFishingSpotIds = conflicts,
+                    ResetPointCount = 1,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    Note = pendingNote,
+                });
+                pendingCount++;
+                changed = true;
+                continue;
+            }
+
+            var current = records[index];
+            var mergedCandidateIds = current.CandidateIds
+                .Concat(candidateIds)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(id => id, StringComparer.Ordinal)
+                .ToList();
+            var mergedConflicts = current.ConflictingFishingSpotIds
+                .Concat(conflicts)
+                .Where(id => id != 0)
+                .Distinct()
+                .OrderBy(id => id)
+                .ToList();
+            var shouldSetSurfaceGroup = string.IsNullOrWhiteSpace(current.SurfaceGroupId)
+                && !string.IsNullOrWhiteSpace(candidate.SpotCandidate.SurfaceGroupId);
+            var nextResetPointCount = Math.Max(current.ResetPointCount, 1);
+            var nextNote = AppendNote(current.Note, pendingNote);
+            var shouldUpdate = nextResetPointCount != current.ResetPointCount
+                || !current.CandidateIds.SequenceEqual(mergedCandidateIds)
+                || !current.ConflictingFishingSpotIds.SequenceEqual(mergedConflicts)
+                || shouldSetSurfaceGroup
+                || !string.Equals(current.Note, nextNote, StringComparison.Ordinal);
+            if (!shouldUpdate)
+                continue;
+
+            records[index] = current with
+            {
+                SurfaceGroupId = shouldSetSurfaceGroup ? candidate.SpotCandidate.SurfaceGroupId : current.SurfaceGroupId,
+                CandidateIds = mergedCandidateIds,
+                ConflictingFishingSpotIds = mergedConflicts,
+                ResetPointCount = nextResetPointCount,
+                UpdatedAt = now,
+                Note = nextNote,
+            };
+            pendingCount++;
+            changed = true;
+        }
+
+        if (!changed)
+            return new PendingMixedRiskOwnershipRepeatResult(currentSpot, false, 0);
+
+        var evidence = currentSpot.Evidence
+            .Append(new SpotEvidenceEvent
+            {
+                EventType = SpotEvidenceEventType.Review,
+                Position = pendingCandidates[0].ApproachCandidate.Position,
+                SourceSurfaceGroupId = pendingCandidates[0].ApproachCandidate.SurfaceGroupId,
+                Note = $"{note} repeatConfirm=1/2 pendingCandidates={pendingCount}",
+                CreatedAt = now,
+            })
+            .OrderBy(item => item.CreatedAt)
+            .ThenBy(item => item.EventId, StringComparer.Ordinal)
+            .ToList();
+
+        var nextSpot = currentSpot with
+        {
+            ReviewDecision = currentSpot.ReviewDecision | SpotReviewDecision.NeedsManualReview,
+            ReviewNote = string.IsNullOrWhiteSpace(currentSpot.ReviewNote) ? "mixedRiskBlock" : currentSpot.ReviewNote,
+            MixedRiskBlocks = SortMixedRiskBlockRecords(records),
+            Evidence = evidence,
+            UpdatedAt = now,
+        };
+        return new PendingMixedRiskOwnershipRepeatResult(nextSpot, true, pendingCount);
     }
 
     private IReadOnlyList<uint> FindCastFillBlockConflictSpotIds(
@@ -1883,121 +2395,6 @@ internal sealed class SpotWorkflowSession : IDisposable
         return new MixedRiskBlockMarkResult(markedCandidateCount, involvedSpotIds);
     }
 
-    private int DisableMixedRiskBoundaryCandidates(
-        FishingSpotTarget target,
-        SpotScanDocument scan,
-        SurveyBlock block,
-        string note)
-    {
-        var territoryTargets = GetCatalogTerritoryTargets(target);
-        var document = EnsureMaintenanceSpots(
-            maintenanceStore.LoadTerritory(target.TerritoryId, target.TerritoryName),
-            territoryTargets);
-        var blockCandidateIds = GetBlockCandidateIds(block);
-        var involvedSpotIds = FindMixedRiskBlockSpotIds(document, target.FishingSpotId, block, blockCandidateIds);
-        if (involvedSpotIds.Count < 2)
-            return 0;
-
-        var blockCandidates = block.Candidates
-            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateId))
-            .OrderBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
-            .ToList();
-        if (blockCandidates.Count == 0)
-            return 0;
-
-        var seedsBySpot = BuildMixedRiskSeedCandidatesBySpot(
-            document,
-            involvedSpotIds,
-            target.TerritoryId,
-            block,
-            blockCandidateIds,
-            blockCandidates);
-        if (seedsBySpot.Count < 2)
-            return 0;
-
-        var distancesBySpot = seedsBySpot
-            .ToDictionary(
-                item => item.Key,
-                item => CalculateCandidateGraphDistances(blockCandidates, item.Value));
-        var candidatesToDisable = blockCandidates
-            .Where(candidate => IsMixedRiskBoundaryCandidate(candidate, distancesBySpot))
-            .OrderBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
-            .ToList();
-        if (candidatesToDisable.Count == 0)
-            return 0;
-
-        var now = DateTimeOffset.UtcNow;
-        var changedCandidateIds = new HashSet<string>(StringComparer.Ordinal);
-        var spots = document.Spots.ToList();
-        for (var index = 0; index < spots.Count; index++)
-        {
-            var spot = spots[index];
-            if (!involvedSpotIds.Contains(spot.FishingSpotId) || HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.IgnoreSpot))
-                continue;
-
-            var spotTarget = territoryTargets.FirstOrDefault(item => item.FishingSpotId == spot.FishingSpotId)
-                ?? target with { FishingSpotId = spot.FishingSpotId, Name = spot.Name };
-            var points = spot.ApproachPoints.ToList();
-            var evidence = spot.Evidence.ToList();
-            var changedForSpot = 0;
-            foreach (var candidate in candidatesToDisable)
-            {
-                var eventId = Guid.NewGuid().ToString("N");
-                if (!UpsertDisabledApproachPoint(spotTarget, points, candidate, scan, eventId, note, now))
-                    continue;
-
-                changedForSpot++;
-                changedCandidateIds.Add(candidate.CandidateId);
-                evidence.Add(new SpotEvidenceEvent
-                {
-                    EventId = eventId,
-                    EventType = SpotEvidenceEventType.Review,
-                    Position = candidate.Position,
-                    Rotation = candidate.Rotation,
-                    CandidateFingerprint = candidate.CandidateId,
-                    SourceSurfaceGroupId = candidate.SurfaceGroupId,
-                    SourceScanId = scan.ScanId,
-                    SourceScannerVersion = scan.ScannerVersion,
-                    Note = note,
-                    CreatedAt = now,
-                });
-            }
-
-            if (changedForSpot == 0)
-                continue;
-
-            spots[index] = spot with
-            {
-                ReviewDecision = spot.ReviewDecision | SpotReviewDecision.NeedsManualReview,
-                ReviewNote = string.IsNullOrWhiteSpace(spot.ReviewNote) ? "mixedRiskBoundaryDisabled" : spot.ReviewNote,
-                ApproachPoints = points
-                    .OrderBy(point => point.PointId, StringComparer.Ordinal)
-                    .ToList(),
-                Evidence = evidence
-                    .OrderBy(item => item.CreatedAt)
-                    .ThenBy(item => item.EventId, StringComparer.Ordinal)
-                    .ToList(),
-                UpdatedAt = now,
-            };
-        }
-
-        if (changedCandidateIds.Count == 0)
-            return 0;
-
-        document = document with
-        {
-            TerritoryName = string.IsNullOrWhiteSpace(document.TerritoryName) ? target.TerritoryName : document.TerritoryName,
-            Spots = spots
-                .OrderBy(spot => spot.FishingSpotId)
-                .ToList(),
-        };
-        maintenanceStore.SaveTerritory(document);
-        if (SelectedTerritoryId == target.TerritoryId)
-            CurrentTerritoryMaintenance = document;
-
-        return changedCandidateIds.Count;
-    }
-
     private int ConvergeMixedRiskBlock(
         FishingSpotTarget target,
         SurveyBlock block,
@@ -2095,6 +2492,104 @@ internal sealed class SpotWorkflowSession : IDisposable
         RebuildAnalyses();
         SyncCurrentAnalysis();
         return resolvedRecords;
+    }
+
+    private int PruneCurrentMixedRiskAutoBoundaryDisabledPoints(
+        FishingSpotTarget target,
+        string note)
+    {
+        var maintenance = GetMaintenanceRecord(target.Key);
+        if (maintenance is null || maintenance.MixedRiskBlocks.Count == 0 || CurrentTargetBlocks.Count == 0)
+            return 0;
+
+        var prunedCount = 0;
+        foreach (var block in CurrentTargetBlocks.Where(block => IsMixedRiskBlock(maintenance, block)).ToList())
+            prunedCount += PruneMixedRiskAutoBoundaryDisabledPoints(target, block, note);
+
+        if (prunedCount == 0)
+            return 0;
+
+        RebuildAnalyses();
+        SyncCurrentAnalysis();
+        return prunedCount;
+    }
+
+    private int PruneMixedRiskAutoBoundaryDisabledPoints(
+        FishingSpotTarget target,
+        SurveyBlock block,
+        string note)
+    {
+        var territoryTargets = GetCatalogTerritoryTargets(target);
+        var document = EnsureMaintenanceSpots(
+            maintenanceStore.LoadTerritory(target.TerritoryId, target.TerritoryName),
+            territoryTargets);
+        var blockCandidateIds = GetBlockCandidateIds(block);
+        var now = DateTimeOffset.UtcNow;
+        var spots = document.Spots.ToList();
+        var prunedCount = 0;
+        for (var index = 0; index < spots.Count; index++)
+        {
+            var spot = spots[index];
+            if (HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.IgnoreSpot))
+                continue;
+
+            var points = new List<ApproachPoint>();
+            var prunedForSpot = 0;
+            foreach (var point in spot.ApproachPoints)
+            {
+                if (IsAutoMixedRiskBoundaryDisabledPoint(point)
+                    && IsApproachPointInBlock(point, target.TerritoryId, block, blockCandidateIds))
+                {
+                    prunedForSpot++;
+                    continue;
+                }
+
+                points.Add(point);
+            }
+
+            if (prunedForSpot == 0)
+                continue;
+
+            prunedCount += prunedForSpot;
+            var evidence = spot.Evidence
+                .Append(new SpotEvidenceEvent
+                {
+                    EventType = SpotEvidenceEventType.Review,
+                    Position = block.Center,
+                    SourceSurfaceGroupId = GetBlockSurfaceGroupId(block),
+                    Note = $"{note} pruned={prunedForSpot}",
+                    CreatedAt = now,
+                })
+                .OrderBy(item => item.CreatedAt)
+                .ThenBy(item => item.EventId, StringComparer.Ordinal)
+                .ToList();
+
+            spots[index] = spot with
+            {
+                ApproachPoints = points
+                    .OrderBy(point => point.PointId, StringComparer.Ordinal)
+                    .ToList(),
+                Evidence = evidence,
+                UpdatedAt = now,
+            };
+        }
+
+        if (prunedCount == 0)
+            return 0;
+
+        document = document with
+        {
+            TerritoryName = string.IsNullOrWhiteSpace(document.TerritoryName) ? target.TerritoryName : document.TerritoryName,
+            UpdatedAt = now,
+            Spots = spots
+                .OrderBy(spot => spot.FishingSpotId)
+                .ToList(),
+        };
+        maintenanceStore.SaveTerritory(document);
+        if (SelectedTerritoryId == target.TerritoryId)
+            CurrentTerritoryMaintenance = document;
+
+        return prunedCount;
     }
 
     private static bool AreMixedRiskBlockCandidatesResolved(
@@ -2197,101 +2692,6 @@ internal sealed class SpotWorkflowSession : IDisposable
         return involved
             .OrderBy(id => id)
             .ToList();
-    }
-
-    private static Dictionary<uint, List<ApproachCandidate>> BuildMixedRiskSeedCandidatesBySpot(
-        TerritoryMaintenanceDocument document,
-        IReadOnlyList<uint> involvedSpotIds,
-        uint territoryId,
-        SurveyBlock block,
-        IReadOnlySet<string> blockCandidateIds,
-        IReadOnlyList<ApproachCandidate> blockCandidates)
-    {
-        var candidatesById = blockCandidates
-            .GroupBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
-        var result = new Dictionary<uint, List<ApproachCandidate>>();
-        foreach (var spot in document.Spots)
-        {
-            if (!involvedSpotIds.Contains(spot.FishingSpotId))
-                continue;
-
-            var seeds = new List<ApproachCandidate>();
-            foreach (var point in spot.ApproachPoints.Where(point => point.Status == ApproachPointStatus.Confirmed))
-            {
-                if (!IsApproachPointInBlock(point, territoryId, block, blockCandidateIds))
-                    continue;
-                if (!TryResolveApproachPointCandidate(point, territoryId, candidatesById, blockCandidates, out var candidate))
-                    continue;
-                if (seeds.Any(existing => string.Equals(existing.CandidateId, candidate.CandidateId, StringComparison.Ordinal)))
-                    continue;
-
-                seeds.Add(candidate);
-            }
-
-            if (seeds.Count > 0)
-                result[spot.FishingSpotId] = seeds;
-        }
-
-        return result;
-    }
-
-    private static bool TryResolveApproachPointCandidate(
-        ApproachPoint point,
-        uint territoryId,
-        IReadOnlyDictionary<string, ApproachCandidate> candidatesById,
-        IReadOnlyList<ApproachCandidate> blockCandidates,
-        out ApproachCandidate candidate)
-    {
-        candidate = null!;
-        if (!string.IsNullOrWhiteSpace(point.SourceCandidateId)
-            && candidatesById.TryGetValue(point.SourceCandidateId, out var sourceCandidate))
-        {
-            candidate = sourceCandidate;
-            return true;
-        }
-        if (!string.IsNullOrWhiteSpace(point.SourceCandidateFingerprint)
-            && candidatesById.TryGetValue(point.SourceCandidateFingerprint, out var sourceFingerprintCandidate))
-        {
-            candidate = sourceFingerprintCandidate;
-            return true;
-        }
-        if (territoryId != 0)
-        {
-            var territoryFingerprint = SpotFingerprint.CreateTerritoryCandidateFingerprint(
-                territoryId,
-                point.Position,
-                point.Rotation);
-            if (candidatesById.TryGetValue(territoryFingerprint, out var territoryCandidate))
-            {
-                candidate = territoryCandidate;
-                return true;
-            }
-        }
-
-        candidate = blockCandidates
-            .Where(item => MathF.Abs(item.Position.Y - point.Position.Y) <= MixedRiskSeedResolveVerticalToleranceMeters)
-            .Where(item => item.Position.HorizontalDistanceTo(point.Position) <= MixedRiskSeedResolveHorizontalToleranceMeters)
-            .OrderBy(item => item.Position.HorizontalDistanceTo(point.Position))
-            .ThenBy(item => item.CandidateId, StringComparer.Ordinal)
-            .FirstOrDefault()!;
-        return candidate is not null;
-    }
-
-    private static bool IsMixedRiskBoundaryCandidate(
-        ApproachCandidate candidate,
-        IReadOnlyDictionary<uint, IReadOnlyDictionary<string, float>> distancesBySpot)
-    {
-        var nearest = distancesBySpot
-            .Select(item => item.Value.TryGetValue(candidate.CandidateId, out var distance)
-                ? distance
-                : float.MaxValue)
-            .Where(distance => distance < float.MaxValue)
-            .OrderBy(distance => distance)
-            .Take(2)
-            .ToList();
-        return nearest.Count >= 2
-            && MathF.Abs(nearest[0] - nearest[1]) <= MixedRiskBoundaryDisableWidthMeters;
     }
 
     private IReadOnlyList<FishingSpotTarget> GetCatalogTerritoryTargets(FishingSpotTarget target)
@@ -2719,13 +3119,17 @@ internal sealed class SpotWorkflowSession : IDisposable
         if (existingIndex >= 0)
         {
             var existing = points[existingIndex];
+            if (existing.Status == ApproachPointStatus.Disabled
+                && existing.SourceKind != ApproachPointSourceKind.AutoCastFill
+                && source.SourceKind == ApproachPointSourceKind.AutoCastFill)
+            {
+                return;
+            }
+
             points[existingIndex] = existing with
             {
                 Status = ApproachPointStatus.Confirmed,
-                SourceKind = existing.SourceKind == ApproachPointSourceKind.Manual
-                    && source.SourceKind != ApproachPointSourceKind.Manual
-                        ? source.SourceKind
-                        : existing.SourceKind,
+                SourceKind = MergeApproachPointSourceKind(existing.SourceKind, source.SourceKind),
                 SourceCandidateFingerprint = string.IsNullOrWhiteSpace(existing.SourceCandidateFingerprint)
                     ? source.SourceCandidateFingerprint
                     : existing.SourceCandidateFingerprint,
@@ -2771,6 +3175,20 @@ internal sealed class SpotWorkflowSession : IDisposable
             EvidenceIds = string.IsNullOrWhiteSpace(evidenceId) ? [] : [evidenceId],
             Note = note,
         });
+    }
+
+    private static ApproachPointSourceKind MergeApproachPointSourceKind(
+        ApproachPointSourceKind existing,
+        ApproachPointSourceKind incoming)
+    {
+        if (existing == ApproachPointSourceKind.Manual || incoming == ApproachPointSourceKind.Manual)
+            return ApproachPointSourceKind.Manual;
+        if (existing == ApproachPointSourceKind.Imported || incoming == ApproachPointSourceKind.Imported)
+            return ApproachPointSourceKind.Imported;
+        if (existing == ApproachPointSourceKind.AutoCastFill || incoming == ApproachPointSourceKind.AutoCastFill)
+            return ApproachPointSourceKind.AutoCastFill;
+
+        return existing;
     }
 
     private void AppendMaintenanceEvidence(
@@ -3880,15 +4298,13 @@ internal sealed class SpotWorkflowSession : IDisposable
     }
 
     private CandidateSelection? BuildCandidateSelection(
-        FishingSpotTarget target,
         SpotScanDocument scan,
-        bool forceProbe = false,
-        bool includeRecordedUnresolvedRiskCandidates = false)
+        bool includeMixedRiskCandidates = false)
     {
-        var unresolvedRiskCandidateIds = includeRecordedUnresolvedRiskCandidates
-            ? GetUnresolvedMixedRiskCandidateIds(scan)
+        var mixedRiskCandidateIds = includeMixedRiskCandidates
+            ? GetAutoSurveyMixedRiskCandidateIds(scan)
             : new HashSet<string>(StringComparer.Ordinal);
-        var candidates = GetSelectableCandidatePool(scan, unresolvedRiskCandidateIds);
+        var candidates = GetSelectableCandidatePool(scan, mixedRiskCandidateIds);
         if (candidates.Count == 0)
             return null;
 
@@ -3896,13 +4312,13 @@ internal sealed class SpotWorkflowSession : IDisposable
         var candidate = PickDefaultCandidate(
             candidates,
             playerSnapshot?.Position,
-            unresolvedRiskCandidateIds);
-        var unresolvedRiskCandidateCount = unresolvedRiskCandidateIds.Count == 0
+            mixedRiskCandidateIds);
+        var mixedRiskCandidateCount = mixedRiskCandidateIds.Count == 0
             ? 0
-            : candidates.Count(item => IsCandidateKeyMatched(item, unresolvedRiskCandidateIds));
-        var note = unresolvedRiskCandidateCount > 0
-            ? $"自动点亮候选来自领地内存候选；优先未结案风险候选 {unresolvedRiskCandidateCount} 个，再按距玩家排序；仍排除禁用和拒绝点。"
-            : "当前候选来自领地内存候选；排除当前钓场已记录、禁用和拒绝点，当前钓场风险候选允许重新点亮，再按距玩家排序。";
+            : candidates.Count(item => IsCandidateKeyMatched(item, mixedRiskCandidateIds));
+        var note = mixedRiskCandidateCount > 0
+            ? $"自动点亮候选来自领地内存候选；允许当前钓场未收敛风险候选 {mixedRiskCandidateCount} 个回跑，再按距玩家排序；仍排除禁用和拒绝点。"
+            : "当前候选来自领地内存候选；排除已记录、禁用和拒绝点，再按距玩家排序。";
         return new CandidateSelection(
             candidate,
             GetCandidateSelectionMode(candidate),
@@ -3929,7 +4345,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             return current;
         }
 
-        return BuildCandidateSelection(target, scan);
+        return BuildCandidateSelection(scan);
     }
 
     private IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(SpotScanDocument scan)
@@ -3939,12 +4355,11 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     private IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(
         SpotScanDocument scan,
-        IReadOnlySet<string> unresolvedRiskCandidateIds)
+        IReadOnlySet<string> mixedRiskCandidateIds)
     {
         var currentMaintenance = GetMaintenanceRecord(scan.Key);
         var currentRecordedCandidateIds = GetRecordedCandidateIds(currentMaintenance, scan.Key.TerritoryId);
         var currentRecordedCandidateFingerprints = GetRecordedCandidateFingerprints(currentMaintenance, scan.Key.TerritoryId);
-        var currentRiskCandidateIds = GetMixedRiskCandidateIds(currentMaintenance);
         var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
         var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
         var disabledCandidateIds = GetDisabledCandidateIds(CurrentTerritoryMaintenance);
@@ -3952,14 +4367,122 @@ internal sealed class SpotWorkflowSession : IDisposable
         var rejectedFingerprints = GetRejectedCandidateFingerprints(CurrentTerritoryMaintenance);
         return scan.Candidates
             .Where(IsSelectableCandidate)
-            .Where(candidate => IsCandidateKeyMatched(candidate, unresolvedRiskCandidateIds)
+            .Where(candidate => IsCandidateKeyMatched(candidate, mixedRiskCandidateIds)
                 || !IsRecordedCandidate(candidate, currentRecordedCandidateIds, currentRecordedCandidateFingerprints))
-            .Where(candidate => IsCandidateKeyMatched(candidate, unresolvedRiskCandidateIds)
-                || IsMixedRiskCandidate(candidate, currentRiskCandidateIds)
+            .Where(candidate => IsCandidateKeyMatched(candidate, mixedRiskCandidateIds)
                 || !IsRecordedCandidate(candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints))
             .Where(candidate => !IsRecordedCandidate(candidate, disabledCandidateIds, disabledCandidateFingerprints))
             .Where(candidate => !rejectedFingerprints.Contains(candidate.CandidateFingerprint))
             .ToList();
+    }
+
+    private IReadOnlySet<string> GetAutoSurveyMixedRiskCandidateIds(SpotScanDocument scan)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var currentMaintenance = GetMaintenanceRecord(scan.Key);
+        if (currentMaintenance is null)
+            return ids;
+
+        var maintenanceDocument = CurrentTerritoryMaintenance is { } current
+            && current.TerritoryId == scan.Key.TerritoryId
+                ? current
+                : maintenanceStore.LoadTerritory(scan.Key.TerritoryId);
+        if (maintenanceDocument.Spots.Count == 0)
+            return ids;
+
+        foreach (var candidate in scan.Candidates.Where(IsSelectableCandidate))
+        {
+            if (!IsAutoSurveyMixedRiskCandidate(
+                    candidate,
+                    currentMaintenance,
+                    maintenanceDocument,
+                    scan.Key.TerritoryId))
+            {
+                continue;
+            }
+
+            AddIfNotBlank(ids, GetSpotCandidateGraphId(candidate));
+            AddIfNotBlank(ids, candidate.CandidateFingerprint);
+        }
+
+        return ids;
+    }
+
+    private static bool IsAutoSurveyMixedRiskCandidate(
+        SpotCandidate candidate,
+        SpotMaintenanceRecord currentMaintenance,
+        TerritoryMaintenanceDocument maintenanceDocument,
+        uint territoryId)
+    {
+        var approachCandidate = ToApproachCandidate(candidate);
+        var matchingRecords = currentMaintenance.MixedRiskBlocks
+            .Where(record => IsMixedRiskBlockRecordForCandidate(record, candidate))
+            .ToList();
+        if (matchingRecords.Count > 0)
+        {
+            var involvedSpotIds = matchingRecords
+                .SelectMany(record => record.ConflictingFishingSpotIds)
+                .Append(currentMaintenance.FishingSpotId)
+                .Where(id => id != 0)
+                .Distinct()
+                .OrderBy(id => id)
+                .ToList();
+            if (involvedSpotIds.Count < 2)
+                return false;
+            if (IsCandidateDisabledByAnySpot(maintenanceDocument, involvedSpotIds, territoryId, approachCandidate))
+                return false;
+
+            return CountCandidateConfirmedSpots(maintenanceDocument, involvedSpotIds, territoryId, approachCandidate) != 1;
+        }
+
+        var confirmedSpotIds = FindCandidateConfirmedSpotIds(maintenanceDocument, territoryId, approachCandidate);
+        if (confirmedSpotIds.Count < 2 || !confirmedSpotIds.Contains(currentMaintenance.FishingSpotId))
+            return false;
+        return !IsCandidateDisabledByAnySpot(maintenanceDocument, confirmedSpotIds, territoryId, approachCandidate);
+    }
+
+    private static IReadOnlyList<uint> FindCandidateConfirmedSpotIds(
+        TerritoryMaintenanceDocument document,
+        uint territoryId,
+        ApproachCandidate candidate)
+    {
+        return document.Spots
+            .Where(spot => !HasReviewDecision(spot.ReviewDecision, SpotReviewDecision.IgnoreSpot))
+            .Where(spot => spot.ApproachPoints
+                .Where(point => point.Status == ApproachPointStatus.Confirmed)
+                .Any(point => IsApproachPointForCandidate(point, territoryId, candidate)))
+            .Select(spot => spot.FishingSpotId)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
+    }
+
+    private static bool IsMixedRiskBlockRecordForCandidate(
+        MixedRiskBlockRecord record,
+        SpotCandidate candidate)
+    {
+        if (!string.IsNullOrWhiteSpace(record.BlockId)
+            && !string.IsNullOrWhiteSpace(candidate.BlockId)
+            && string.Equals(record.BlockId, candidate.BlockId, StringComparison.Ordinal))
+            return true;
+
+        var candidateId = GetSpotCandidateGraphId(candidate);
+        return record.CandidateIds.Any(id =>
+            string.Equals(id, candidateId, StringComparison.Ordinal)
+            || string.Equals(id, candidate.CandidateFingerprint, StringComparison.Ordinal));
+    }
+
+    private static bool IsCandidateLevelMixedRiskRecordForCandidate(
+        MixedRiskBlockRecord record,
+        SpotCandidate candidate)
+    {
+        if (!string.IsNullOrWhiteSpace(record.BlockId))
+            return false;
+
+        var candidateId = GetSpotCandidateGraphId(candidate);
+        return record.CandidateIds.Any(id =>
+            string.Equals(id, candidateId, StringComparison.Ordinal)
+            || string.Equals(id, candidate.CandidateFingerprint, StringComparison.Ordinal));
     }
 
     private static SpotCandidate PickDefaultCandidate(
@@ -4070,99 +4593,20 @@ internal sealed class SpotWorkflowSession : IDisposable
         return ids;
     }
 
-    private static IReadOnlySet<string> GetMixedRiskCandidateIds(SpotMaintenanceRecord? maintenance)
+    private static IReadOnlySet<string> GetCastFillBlockedCandidateIds(TerritoryMaintenanceDocument? maintenance)
     {
-        var ids = new HashSet<string>(StringComparer.Ordinal);
         if (maintenance is null)
-            return ids;
+            return new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var record in maintenance.MixedRiskBlocks)
-        {
-            AddIfNotBlank(ids, record.BlockId);
-            foreach (var id in record.CandidateIds.Where(id => !string.IsNullOrWhiteSpace(id)))
-                ids.Add(id);
-        }
-
-        return ids;
-    }
-
-    private IReadOnlySet<string> GetUnresolvedMixedRiskCandidateIds(SpotScanDocument scan)
-    {
         var ids = new HashSet<string>(StringComparer.Ordinal);
-        var currentMaintenance = GetMaintenanceRecord(scan.Key);
-        if (currentMaintenance is null || currentMaintenance.MixedRiskBlocks.Count == 0)
-            return ids;
-
-        var maintenanceDocument = CurrentTerritoryMaintenance is { } current
-            && current.TerritoryId == scan.Key.TerritoryId
-                ? current
-                : maintenanceStore.LoadTerritory(scan.Key.TerritoryId);
-        if (maintenanceDocument.Spots.Count == 0)
-            return ids;
-
-        foreach (var candidate in scan.Candidates.Where(IsSelectableCandidate))
+        foreach (var point in maintenance.Spots
+            .SelectMany(spot => spot.ApproachPoints)
+            .Where(IsCastFillBlockingDisabledPoint))
         {
-            if (!IsUnresolvedMixedRiskCandidate(
-                    candidate,
-                    currentMaintenance,
-                    maintenanceDocument,
-                    scan.Key.TerritoryId))
-            {
-                continue;
-            }
-
-            AddIfNotBlank(ids, GetSpotCandidateGraphId(candidate));
-            AddIfNotBlank(ids, candidate.CandidateFingerprint);
+            AddRecordedCandidateIds(ids, maintenance.TerritoryId, point);
         }
 
         return ids;
-    }
-
-    private static bool IsUnresolvedMixedRiskCandidate(
-        SpotCandidate candidate,
-        SpotMaintenanceRecord currentMaintenance,
-        TerritoryMaintenanceDocument maintenanceDocument,
-        uint territoryId)
-    {
-        if (currentMaintenance.MixedRiskBlocks.Count == 0)
-            return false;
-
-        var approachCandidate = ToApproachCandidate(candidate);
-        var matchingRecords = currentMaintenance.MixedRiskBlocks
-            .Where(record => IsMixedRiskBlockRecordForCandidate(record, candidate))
-            .ToList();
-        if (matchingRecords.Count == 0)
-            return false;
-
-        var involvedSpotIds = matchingRecords
-            .SelectMany(record => record.ConflictingFishingSpotIds)
-            .Append(currentMaintenance.FishingSpotId)
-            .Where(id => id != 0)
-            .Distinct()
-            .OrderBy(id => id)
-            .ToList();
-        if (involvedSpotIds.Count < 2)
-            return false;
-
-        if (IsCandidateDisabledByAnySpot(maintenanceDocument, involvedSpotIds, territoryId, approachCandidate))
-            return false;
-
-        return CountCandidateConfirmedSpots(maintenanceDocument, involvedSpotIds, territoryId, approachCandidate) != 1;
-    }
-
-    private static bool IsMixedRiskBlockRecordForCandidate(
-        MixedRiskBlockRecord record,
-        SpotCandidate candidate)
-    {
-        if (!string.IsNullOrWhiteSpace(record.BlockId)
-            && !string.IsNullOrWhiteSpace(candidate.BlockId)
-            && string.Equals(record.BlockId, candidate.BlockId, StringComparison.Ordinal))
-            return true;
-
-        var candidateId = GetSpotCandidateGraphId(candidate);
-        return record.CandidateIds.Any(id =>
-            string.Equals(id, candidateId, StringComparison.Ordinal)
-            || string.Equals(id, candidate.CandidateFingerprint, StringComparison.Ordinal));
     }
 
     private static IReadOnlySet<string> GetDisabledCandidateFingerprints(SpotMaintenanceRecord? maintenance, uint territoryId = 0)
@@ -4195,6 +4639,29 @@ internal sealed class SpotWorkflowSession : IDisposable
     {
         return point.Status == ApproachPointStatus.Disabled
             && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
+    }
+
+    private static bool IsAutoMixedRiskBoundaryDisabledPoint(ApproachPoint point)
+    {
+        return IsEffectiveDisabledApproachPoint(point)
+            && !string.IsNullOrWhiteSpace(point.Note)
+            && point.Note.Contains("boundaryDisableWidth=", StringComparison.Ordinal)
+            && !point.Note.Contains(ManualOverlayDisableNote, StringComparison.Ordinal);
+    }
+
+    private static bool IsCastFillBlockingDisabledPoint(ApproachPoint point)
+    {
+        return IsEffectiveDisabledApproachPoint(point)
+            && !IsAutoMixedRiskBoundaryDisabledPoint(point);
+    }
+
+    private static bool IsBlockedApproachCandidate(
+        ApproachCandidate candidate,
+        IReadOnlySet<string>? blockedCandidateIds)
+    {
+        return blockedCandidateIds is not null
+            && !string.IsNullOrWhiteSpace(candidate.CandidateId)
+            && blockedCandidateIds.Contains(candidate.CandidateId);
     }
 
     private static HashSet<string> GetOverlayCandidateMatchIds(ApproachCandidate candidate, uint territoryId)
@@ -4319,6 +4786,22 @@ internal sealed class SpotWorkflowSession : IDisposable
             : candidate.CandidateFingerprint;
     }
 
+    private static IReadOnlySet<string> GetSpotCandidateMatchIds(SpotCandidate candidate, uint territoryId)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        AddIfNotBlank(ids, GetSpotCandidateGraphId(candidate));
+        AddIfNotBlank(ids, candidate.CandidateFingerprint);
+        if (territoryId != 0)
+        {
+            ids.Add(SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                territoryId,
+                candidate.Position,
+                candidate.Rotation));
+        }
+
+        return ids;
+    }
+
     private static bool IsCandidateKeyMatched(
         SpotCandidate candidate,
         IReadOnlySet<string>? candidateIds)
@@ -4340,21 +4823,6 @@ internal sealed class SpotWorkflowSession : IDisposable
         return (!string.IsNullOrWhiteSpace(candidateId) && recordedCandidateIds.Contains(candidateId))
             || (!string.IsNullOrWhiteSpace(candidate.CandidateFingerprint)
                 && recordedCandidateFingerprints.Contains(candidate.CandidateFingerprint));
-    }
-
-    private static bool IsMixedRiskCandidate(
-        SpotCandidate candidate,
-        IReadOnlySet<string> mixedRiskCandidateIds)
-    {
-        if (mixedRiskCandidateIds.Count == 0)
-            return false;
-
-        var candidateId = GetSpotCandidateGraphId(candidate);
-        return (!string.IsNullOrWhiteSpace(candidateId) && mixedRiskCandidateIds.Contains(candidateId))
-            || (!string.IsNullOrWhiteSpace(candidate.BlockId)
-                && mixedRiskCandidateIds.Contains(candidate.BlockId))
-            || (!string.IsNullOrWhiteSpace(candidate.CandidateFingerprint)
-                && mixedRiskCandidateIds.Contains(candidate.CandidateFingerprint));
     }
 
     private static bool IsSelectableCandidate(SpotCandidate candidate)
@@ -4629,25 +5097,28 @@ internal sealed class SpotWorkflowSession : IDisposable
     private FillBlockSelection? FindCastFillBlock(
         IReadOnlyList<SpotCandidate> candidates,
         Point3 playerPosition,
-        float snapDistance)
+        float snapDistance,
+        IReadOnlySet<string>? blockedCandidateIds = null)
     {
         var blocks = CurrentTargetBlocks.Count > 0
             ? CurrentTargetBlocks
             : BuildBlocksFromSpotCandidates(candidates);
 
-        return FindCastFillBlock(blocks, playerPosition, snapDistance);
+        return FindCastFillBlock(blocks, playerPosition, snapDistance, blockedCandidateIds);
     }
 
     private FillBlockSelection? FindCastFillBlock(
         IReadOnlyList<SurveyBlock> blocks,
         Point3 playerPosition,
-        float snapDistance)
+        float snapDistance,
+        IReadOnlySet<string>? blockedCandidateIds = null)
     {
         return blocks
             .Select(block => new
             {
                 Block = block,
                 Nearest = block.Candidates
+                    .Where(candidate => !IsBlockedApproachCandidate(candidate, blockedCandidateIds))
                     .Select(candidate => new
                     {
                         Candidate = candidate,
@@ -4678,10 +5149,17 @@ internal sealed class SpotWorkflowSession : IDisposable
     private IReadOnlyDictionary<string, float> CalculateCastFillDistances(
         IReadOnlyList<SurveyBlock> blocks,
         SurveyBlock fallbackBlock,
-        ApproachCandidate seedCandidate)
+        ApproachCandidate seedCandidate,
+        IReadOnlySet<string>? blockedCandidateIds = null)
     {
-        var candidates = SelectCastFillGraphCandidates(blocks, fallbackBlock, seedCandidate);
-        return CalculateCandidateGraphDistances(candidates, seedCandidate);
+        var graphCandidates = SelectCastFillGraphCandidates(blocks, fallbackBlock, seedCandidate);
+        var blockedCandidates = graphCandidates
+            .Where(candidate => IsBlockedApproachCandidate(candidate, blockedCandidateIds))
+            .ToList();
+        var candidates = graphCandidates
+            .Where(candidate => !IsBlockedApproachCandidate(candidate, blockedCandidateIds))
+            .ToList();
+        return CalculateCandidateGraphDistances(candidates, new[] { seedCandidate }, blockedCandidates);
     }
 
     private static IReadOnlyList<ApproachCandidate> SelectCastFillGraphCandidates(
@@ -4706,12 +5184,13 @@ internal sealed class SpotWorkflowSession : IDisposable
         IReadOnlyList<ApproachCandidate> sourceCandidates,
         ApproachCandidate seedCandidate)
     {
-        return CalculateCandidateGraphDistances(sourceCandidates, new[] { seedCandidate });
+        return CalculateCandidateGraphDistances(sourceCandidates, new[] { seedCandidate }, Array.Empty<ApproachCandidate>());
     }
 
     private IReadOnlyDictionary<string, float> CalculateCandidateGraphDistances(
         IReadOnlyList<ApproachCandidate> sourceCandidates,
-        IReadOnlyList<ApproachCandidate> seedCandidates)
+        IReadOnlyList<ApproachCandidate> seedCandidates,
+        IReadOnlyList<ApproachCandidate>? blockedCandidates = null)
     {
         var candidates = sourceCandidates
             .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateId))
@@ -4750,7 +5229,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
             foreach (var next in candidates)
             {
-                if (visited.Contains(next.CandidateId) || !ShouldLinkCastWaterSystem(current, next))
+                if (visited.Contains(next.CandidateId) || !ShouldLinkCastWaterSystem(current, next, blockedCandidates))
                     continue;
 
                 var edgeDistance = Math.Max(0.1f, current.Position.HorizontalDistanceTo(next.Position));
@@ -4765,6 +5244,14 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     private bool ShouldLinkCastWaterSystem(ApproachCandidate left, ApproachCandidate right)
     {
+        return ShouldLinkCastWaterSystem(left, right, null);
+    }
+
+    private bool ShouldLinkCastWaterSystem(
+        ApproachCandidate left,
+        ApproachCandidate right,
+        IReadOnlyList<ApproachCandidate>? blockedCandidates)
+    {
         var sameWaterSystem = !string.IsNullOrWhiteSpace(left.SurfaceGroupId)
             && string.Equals(left.SurfaceGroupId, right.SurfaceGroupId, StringComparison.Ordinal);
         var linkDistance = sameWaterSystem
@@ -4774,7 +5261,53 @@ internal sealed class SpotWorkflowSession : IDisposable
             ? CastWaterSystemHeightToleranceMeters
             : blockOptions.BlockHeightToleranceMeters;
         return MathF.Abs(left.Position.Y - right.Position.Y) <= heightTolerance
-            && left.Position.HorizontalDistanceTo(right.Position) <= linkDistance;
+            && left.Position.HorizontalDistanceTo(right.Position) <= linkDistance
+            && !HasBlockedCandidateBetween(left, right, blockedCandidates, heightTolerance);
+    }
+
+    private bool HasBlockedCandidateBetween(
+        ApproachCandidate left,
+        ApproachCandidate right,
+        IReadOnlyList<ApproachCandidate>? blockedCandidates,
+        float heightTolerance)
+    {
+        if (blockedCandidates is null || blockedCandidates.Count == 0)
+            return false;
+
+        var ax = left.Position.X;
+        var az = left.Position.Z;
+        var bx = right.Position.X;
+        var bz = right.Position.Z;
+        var vx = bx - ax;
+        var vz = bz - az;
+        var lenSq = (vx * vx) + (vz * vz);
+        if (lenSq <= 0.0001f)
+            return false;
+
+        var blockRadius = Math.Max(1f, blockOptions.BlockLinkDistanceMeters * 0.5f);
+        foreach (var blocked in blockedCandidates)
+        {
+            if (MathF.Abs(blocked.Position.Y - left.Position.Y) > heightTolerance
+                && MathF.Abs(blocked.Position.Y - right.Position.Y) > heightTolerance)
+            {
+                continue;
+            }
+
+            var wx = blocked.Position.X - ax;
+            var wz = blocked.Position.Z - az;
+            var t = ((wx * vx) + (wz * vz)) / lenSq;
+            if (t <= 0f || t >= 1f)
+                continue;
+
+            var px = ax + (vx * t);
+            var pz = az + (vz * t);
+            var dx = blocked.Position.X - px;
+            var dz = blocked.Position.Z - pz;
+            if (MathF.Sqrt((dx * dx) + (dz * dz)) <= blockRadius)
+                return true;
+        }
+
+        return false;
     }
 
     private void ClearCurrentTerritoryRuntimeState()
@@ -5073,6 +5606,17 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     private sealed record FillBlockSelection(SurveyBlock Block, ApproachCandidate SeedCandidate, float Distance);
 
+    private sealed record OwnershipCandidate(
+        SpotCandidate SpotCandidate,
+        ApproachCandidate ApproachCandidate,
+        IReadOnlySet<string> MatchIds)
+    {
+        public IReadOnlyList<uint> ConflictingFishingSpotIds { get; init; } = [];
+        public int PostMixedRepeatCount { get; init; }
+        public bool HasCurrentRiskRecord { get; init; }
+        public bool IsMixedRiskCandidate { get; init; }
+    }
+
     private readonly record struct CandidateSparseGridCell(int X, int Z)
     {
         public static CandidateSparseGridCell From(Point3 point, float cellSize) => new(
@@ -5086,6 +5630,26 @@ internal sealed class SpotWorkflowSession : IDisposable
     }
 
     private sealed record MixedRiskBlockUpsertResult(List<MixedRiskBlockRecord> Records, bool Changed);
+
+    private sealed record PendingMixedRiskOwnershipRepeatResult(
+        SpotMaintenanceRecord Spot,
+        bool Changed,
+        int PendingRepeatCandidateCount);
+
+    private sealed record MixedRiskOwnershipResolution(
+        int ResolvedCandidateCount,
+        int RemovedConflictingPointCount,
+        int PrunedRiskRecordCount,
+        int UpdatedRiskRecordCount,
+        int PendingRepeatCandidateCount)
+    {
+        public static MixedRiskOwnershipResolution Empty { get; } = new(0, 0, 0, 0, 0);
+        public bool IsEmpty => ResolvedCandidateCount == 0
+            && RemovedConflictingPointCount == 0
+            && PrunedRiskRecordCount == 0
+            && UpdatedRiskRecordCount == 0
+            && PendingRepeatCandidateCount == 0;
+    }
 
     private sealed record TerritoryReachabilityResult(
         bool Success,

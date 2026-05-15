@@ -21,6 +21,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint DisabledColor = 0xff8080ff;
     private const uint BlockLabelColor = 0xffc0a060;
     private const uint WarningColor = 0xff4080ff;
+    private const uint RiskColor = 0xff38e6ff;
     private const uint FishableDebugFillColor = 0x3345a0ff;
     private const uint FishableDebugEdgeColor = 0xff45a0ff;
     private const uint FishableDebugTextColor = 0xffd0f0ff;
@@ -139,7 +140,7 @@ internal sealed unsafe class WorldOverlayRenderer
         var disabledOwnersByKey = BuildDisabledCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
 
         var recordedTotal = survey.Candidates.Count(candidate => HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
-        var riskTotal = survey.Candidates.Count(candidate => HasRiskOwner(candidate, territoryId, riskOwnersByKey));
+        var riskTotal = survey.Candidates.Count(candidate => HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey));
         var disabledTotal = survey.Candidates.Count(candidate => HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
         var visibleCandidates = survey.Candidates
             .Select(candidate => new
@@ -194,10 +195,10 @@ internal sealed unsafe class WorldOverlayRenderer
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
             var isConfirmed = HasRecordedOwner(candidate, territoryId, recordedOwnersByKey);
-            var isRisk = HasRiskOwner(candidate, territoryId, riskOwnersByKey);
+            var isRisk = HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey);
             var isDisabled = HasDisabledOwner(candidate, territoryId, disabledOwnersByKey);
-            var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : CandidateColor;
-            var pointRadius = isDisabled ? 4f : isConfirmed ? 4f : isRisk ? 3.5f : 3f;
+            var color = isDisabled ? DisabledColor : isRisk ? RiskColor : isConfirmed ? ConfirmedColor : CandidateColor;
+            var pointRadius = isDisabled ? 4f : isRisk ? 3.5f : isConfirmed ? 4f : 3f;
 
             if (session.OverlayPointDisableMode && TryWorldToScreen(standing, out var candidateScreen))
                 selectableCandidates.Add(new OverlayCandidateScreenPoint(candidate, candidateScreen));
@@ -228,7 +229,10 @@ internal sealed unsafe class WorldOverlayRenderer
                 ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
                 : string.Empty;
             var pointDisableText = session.OverlayPointDisableMode ? " 左键/Mouse4点选/框选禁用/恢复" : string.Empty;
-            drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{pointDisableText}{clippedText}");
+            drawList.AddText(
+                screen,
+                riskTotal > 0 ? RiskColor : WarningColor,
+                $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{pointDisableText}{clippedText}");
         }
 
         DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey, riskOwnersByKey, disabledOwnersByKey);
@@ -303,10 +307,12 @@ internal sealed unsafe class WorldOverlayRenderer
         var status = "未记录";
         if (disabledOwners.Count > 0)
             status = $"屏蔽:{FormatRecordedOwners(disabledOwners)}";
-        else if (recordedOwners.Count > 0)
-            status = $"已记录:{FormatRecordedOwners(recordedOwners)}";
+        else if (recordedOwners.Count > 1)
+            status = $"风险已记录:{FormatRecordedOwners(recordedOwners)}";
         else if (riskOwners.Count > 0)
             status = $"风险:{FormatRecordedOwners(riskOwners)}";
+        else if (recordedOwners.Count > 0)
+            status = $"已记录:{FormatRecordedOwners(recordedOwners)}";
         if (disabledOwners.Count > 0 && recordedOwners.Count > 0)
             status += $" 已记录:{FormatRecordedOwners(recordedOwners)}";
         if (recordedOwners.Count > 0 && riskOwners.Count > 0)
@@ -335,6 +341,16 @@ internal sealed unsafe class WorldOverlayRenderer
         IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey)
     {
         return HasOwner(candidate, territoryId, riskOwnersByKey, includeBlock: true);
+    }
+
+    private static bool HasVisibleRiskOwner(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey)
+    {
+        return HasRiskOwner(candidate, territoryId, riskOwnersByKey)
+            || GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 1;
     }
 
     private static bool HasDisabledOwner(
@@ -750,11 +766,11 @@ internal sealed unsafe class WorldOverlayRenderer
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
             var isConfirmed = HasRecordedOwner(candidate, territoryId, recordedOwnersByKey);
-            var isRisk = HasRiskOwner(candidate, territoryId, riskOwnersByKey);
+            var isRisk = HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey);
             var isDisabled = HasDisabledOwner(candidate, territoryId, disabledOwnersByKey);
-            var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : TerritoryCandidateColor;
+            var color = isDisabled ? DisabledColor : isRisk ? RiskColor : isConfirmed ? ConfirmedColor : TerritoryCandidateColor;
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
-            DrawWorldPoint(drawList, standing, isDisabled ? 3f : isConfirmed ? 3f : isRisk ? 2.5f : 2f, color, true);
+            DrawWorldPoint(drawList, standing, isDisabled ? 3f : isRisk ? 2.5f : isConfirmed ? 3f : 2f, color, true);
         }
     }
 
@@ -787,7 +803,7 @@ internal sealed unsafe class WorldOverlayRenderer
             var confirmedCount = item.Block.Candidates.Count(candidate =>
                 HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
             var riskCount = item.Block.Candidates.Count(candidate =>
-                HasRiskOwner(candidate, territoryId, riskOwnersByKey));
+                HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey));
             var disabledCount = item.Block.Candidates.Count(candidate =>
                 HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
             var label = $"{ShortBlockId(item.Block.BlockId)} {confirmedCount}/{item.Block.Candidates.Count}";

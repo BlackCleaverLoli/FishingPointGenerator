@@ -38,6 +38,7 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg autostop - 停止自动点亮\n"
         + "/fpg confirm - 用玩家当前站位确认维护目标\n"
         + "/fpg rejectcandidate - 排除当前候选\n"
+        + "/fpg unrecordspot [fishingSpotId] - 将当前/指定钓场已记录点改为未记录，保留禁用点\n"
         + "/fpg clearspotmaintenance - 清除维护目标数据\n"
         + "/fpg clearterritorymaintenance - 清除当前领地维护数据\n"
         + "/fpg clearterritorycandidates - 清除当前领地内存候选\n"
@@ -368,6 +369,26 @@ public sealed class Plugin : IDalamudPlugin
 
             case "rejectcandidate":
                 session.RejectSelectedCandidate();
+                mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "unrecordspot":
+                if (parts.Length >= 2)
+                {
+                    if (!uint.TryParse(parts[1], out var unrecordSpotId) || unrecordSpotId == 0)
+                    {
+                        Print("用法：/fpg unrecordspot [fishingSpotId]");
+                        return;
+                    }
+
+                    session.ClearSpotRecordedPoints(unrecordSpotId);
+                }
+                else
+                {
+                    session.ClearCurrentSpotRecordedPoints();
+                }
+
                 mainWindow.IsOpen = true;
                 Print(session.LastMessage);
                 break;

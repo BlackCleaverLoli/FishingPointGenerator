@@ -34,8 +34,9 @@ internal sealed class MainWindow : Window, IDisposable
     {
         Territories,
         Spots,
-        Maintenance,
-        Tools,
+        Job,
+        Data,
+        Debug,
     }
 
     public MainWindow(SpotWorkflowSession session)
@@ -73,14 +74,16 @@ internal sealed class MainWindow : Window, IDisposable
             case MainTab.Spots:
                 DrawSpotList();
                 break;
-            case MainTab.Maintenance:
+            case MainTab.Job:
                 DrawSpotDetail();
                 break;
-            case MainTab.Tools:
+            case MainTab.Data:
                 DrawOutputTools();
                 DrawDataCleanup();
-                DrawDebugOptions();
                 DrawPaths();
+                break;
+            case MainTab.Debug:
+                DrawDebug();
                 break;
         }
     }
@@ -97,8 +100,9 @@ internal sealed class MainWindow : Window, IDisposable
         var tabLine = 0f;
         DrawMainTabButton("领地", MainTab.Territories, ref tabLine);
         DrawMainTabButton("钓场", MainTab.Spots, ref tabLine);
-        DrawMainTabButton("维护", MainTab.Maintenance, ref tabLine);
-        DrawMainTabButton("工具", MainTab.Tools, ref tabLine);
+        DrawMainTabButton("作业", MainTab.Job, ref tabLine);
+        DrawMainTabButton("数据", MainTab.Data, ref tabLine);
+        DrawMainTabButton("调试", MainTab.Debug, ref tabLine);
     }
 
     private void DrawMainTabButton(string label, MainTab tab, ref float tabLine)
@@ -135,20 +139,40 @@ internal sealed class MainWindow : Window, IDisposable
             ? $"{session.CurrentTargetDisplayName} / {FormatStatus(session.CurrentAnalysis?.Status)}"
             : "-";
 
-        DrawSectionTitle("现场操作");
+        DrawSectionTitle("现场工作台");
         DrawSummaryRow(
             "区域",
             $"{session.CurrentTerritoryId} / {FormatTerritoryTitle(session.SelectedTerritoryId, session.SelectedTerritoryName)}");
         DrawSummaryRow("目标", statusText, GetStatusColor(session.CurrentAnalysis?.Status));
         DrawSummaryRow("自动", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
 
+        ImGui.Spacing();
+        ImGui.TextColored(AccentText, "扫点/候选");
         var actionLine = 0f;
-        if (FlowActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
-            session.StartAutoSurveyOnce();
+        if (FlowActionButton("扫描当前", session.TerritoryScanInProgress, ref actionLine))
+            session.ScanCurrentTerritory();
+        if (FlowActionButton("取消扫描", !session.TerritoryScanInProgress, ref actionLine))
+            session.CancelTerritoryScan();
+        if (FlowActionButton("派生候选", !hasTarget || session.TerritoryCandidateCount == 0, ref actionLine))
+            session.ScanCurrentTarget();
+        if (FlowActionButton("刷新推荐", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
+            session.RefreshCandidateSelection();
+
+        ImGui.Spacing();
+        ImGui.TextColored(AccentText, "自动/录点");
+        actionLine = 0f;
         if (FlowActionButton("循环点亮", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
             session.StartAutoSurveyLoop();
         if (FlowActionButton("停止自动", !session.AutoSurveyRunning, ref actionLine))
             session.StopAutoSurvey();
+        if (FlowActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
+            session.StartAutoSurveyOnce();
+        if (FlowActionButton("确认站位", !hasTarget || !sameTerritory, ref actionLine))
+            session.ConfirmCurrentStanding();
+
+        ImGui.Spacing();
+        ImGui.TextColored(AccentText, "定位/Overlay");
+        actionLine = 0f;
         if (FlowActionButton("传送水晶", !hasTarget, ref actionLine))
             session.TeleportToCurrentTargetAetheryte();
         if (FlowActionButton("钓场插旗", !hasTarget || !sameTerritory, ref actionLine))
@@ -158,6 +182,8 @@ internal sealed class MainWindow : Window, IDisposable
                 !hasTarget || !sameTerritory || !session.CurrentCandidateSelectionIsActionable,
                 ref actionLine))
             session.PlaceSelectedCandidateFlag();
+        if (FlowActionButton("未记录插旗", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
+            session.PlaceNearestUnrecordedCandidateFlag();
 
         var pointDisableMode = session.OverlayPointDisableMode;
         if (FlowCheckbox("左键/Mouse4点选/框选禁用/恢复", ref pointDisableMode, ref actionLine))
@@ -278,7 +304,7 @@ internal sealed class MainWindow : Window, IDisposable
             if (uint.TryParse(targetIdText.Trim(), out var targetId))
             {
                 session.SelectTarget(targetId);
-                activeTab = MainTab.Maintenance;
+                activeTab = MainTab.Job;
             }
         }
 
@@ -286,7 +312,7 @@ internal sealed class MainWindow : Window, IDisposable
         if (ActionButton("下一个", session.TargetCount == 0))
         {
             session.SelectNextTarget();
-            activeTab = MainTab.Maintenance;
+            activeTab = MainTab.Job;
         }
 
         DrawFilterInput("过滤", "##spot_filter", ref targetFilterText);
@@ -340,7 +366,7 @@ internal sealed class MainWindow : Window, IDisposable
             if (ImGui.Selectable($"{FitTextToWidth(title, nameWidth)}##spot_{target.FishingSpotId}", selected, ImGuiSelectableFlags.None, new Vector2(nameWidth, 0f)))
             {
                 session.SelectTarget(target.FishingSpotId);
-                activeTab = MainTab.Maintenance;
+                activeTab = MainTab.Job;
             }
 
             DrawPseudoCell(x, nameWidth + gap, statusWidth, FormatStatus(analysis?.Status), GetStatusColor(analysis?.Status));
@@ -360,7 +386,7 @@ internal sealed class MainWindow : Window, IDisposable
             if (ImGui.Selectable($"{FitTextToWidth(title, ImGui.GetContentRegionAvail().X)}##spot_{target.FishingSpotId}", selected))
             {
                 session.SelectTarget(target.FishingSpotId);
-                activeTab = MainTab.Maintenance;
+                activeTab = MainTab.Job;
             }
 
             var metricLine = 0f;
@@ -373,18 +399,17 @@ internal sealed class MainWindow : Window, IDisposable
 
     private void DrawSpotDetail()
     {
-        DrawSectionTitle("维护目标");
+        DrawSectionTitle("当前钓场");
 
         var target = session.CurrentTarget;
         if (target is null)
         {
-            ImGui.TextColored(MutedText, "未打开维护目标。");
+            ImGui.TextColored(MutedText, "未打开当前钓场。");
             return;
         }
 
         DrawSelectedSpotSummary(target);
-        DrawTargetActions(session.CurrentAnalysis);
-        DrawPointDebugDetails();
+        DrawJobActions();
     }
 
     private void DrawSelectedSpotSummary(FishingSpotTarget target)
@@ -392,22 +417,21 @@ internal sealed class MainWindow : Window, IDisposable
         var analysis = session.CurrentAnalysis;
         DrawSummaryRow("RowId", target.FishingSpotId.ToString());
         DrawSummaryRow("名称", target.Name);
-        DrawSummaryRow("领地", FormatTerritoryTitle(target.TerritoryId, target.TerritoryName));
         DrawSummaryRow("状态", FormatStatus(analysis?.Status), GetStatusColor(analysis?.Status));
-        DrawSummaryRow("复核", FormatReviewDecision(session.CurrentReviewDecision));
-        DrawSummaryRow("真实点", session.CurrentApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed).ToString());
+        DrawSummaryRow("已记录", session.CurrentApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed).ToString());
         DrawSummaryRow("候选点", (analysis?.CandidateCount ?? 0).ToString());
-        DrawSummaryRow("推荐候选", session.CurrentCandidateSelection?.ModeText ?? "-");
-        if (session.CurrentCandidateSelection is not null)
+
+        if (session.CurrentCandidateSelection is { } selection)
         {
             DrawSummaryRow(
-                "候选状态",
-                session.CurrentCandidateSelectionIsActionable ? "可用" : "仅参考",
+                "推荐",
+                $"{selection.ModeText} / {FormatNullableDistance(selection.DistanceToPlayerMeters)}",
                 session.CurrentCandidateSelectionIsActionable ? GoodText : WarnText);
         }
-
-        DrawSummaryRow("鱼类物品", target.ItemIds.Count == 0 ? "-" : string.Join(", ", target.ItemIds));
-        DrawSummaryRow("半径", target.Radius.ToString("F1"));
+        else
+        {
+            DrawSummaryRow("推荐", "-");
+        }
     }
 
     private void DrawApproachPoints()
@@ -509,36 +533,27 @@ internal sealed class MainWindow : Window, IDisposable
         DrawSummaryRow("说明", string.IsNullOrWhiteSpace(selection.Note) ? "-" : selection.Note);
     }
 
-    private void DrawTargetActions(SpotAnalysis? analysis)
+    private void DrawJobActions()
     {
         var hasTarget = session.CurrentTarget is not null;
+        var hasCandidateSelection = session.CurrentCandidateSelection?.Candidate is not null;
         var sameTerritory = session.SelectedTerritoryIsCurrent;
+        var ctrlDown = ImGui.GetIO().KeyCtrl;
 
         ImGui.Spacing();
-        ImGui.TextColored(AccentText, "派生与确认");
+        ImGui.TextColored(AccentText, "当前钓场操作");
         var actionLine = 0f;
-        if (FlowActionButton("派生候选", !hasTarget || session.TerritoryCandidateCount == 0, ref actionLine))
-            session.ScanCurrentTarget();
-        if (FlowActionButton("刷新推荐候选", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
-            session.RefreshCandidateSelection();
-        if (FlowActionButton("确认当前站位", !hasTarget || !sameTerritory, ref actionLine))
-            session.ConfirmCurrentStanding();
+        if (FlowActionButton("排除推荐候选", !hasCandidateSelection || !sameTerritory, ref actionLine))
+            session.RejectSelectedCandidate();
 
         ImGui.Spacing();
-        ImGui.TextColored(AccentText, "复核");
+        ImGui.TextColored(AccentText, "当前钓场清理");
+        ImGui.TextColored(WarnText, "按住 Ctrl 启用清理按钮。");
         actionLine = 0f;
-        if (FlowActionButton("允许弱覆盖导出", analysis?.Status != SpotAnalysisStatus.WeakCoverage, ref actionLine))
-            session.AllowWeakCoverageExport();
-        if (FlowActionButton("允许风险导出", analysis?.Status != SpotAnalysisStatus.MixedRisk, ref actionLine))
-            session.AllowRiskExport();
-        if (FlowActionButton("忽略钓场", !hasTarget, ref actionLine))
-            session.IgnoreCurrentTarget();
-
-        ImGui.Spacing();
-        ImGui.TextColored(AccentText, "报告");
-        actionLine = 0f;
-        if (FlowActionButton("生成维护目标报告", !hasTarget, ref actionLine))
-            session.GenerateCurrentReport();
+        if (FlowActionButton("当前钓场已记录→未记录", !ctrlDown || !hasTarget, ref actionLine))
+            session.ClearCurrentSpotRecordedPoints();
+        if (FlowActionButton("清当前钓场维护", !ctrlDown || !hasTarget, ref actionLine))
+            session.ClearCurrentSpotMaintenance();
     }
 
     private void DrawPointDebugDetails()
@@ -548,22 +563,6 @@ internal sealed class MainWindow : Window, IDisposable
 
         DrawApproachPoints();
         DrawCandidateSelection();
-        DrawPointDebugActions();
-    }
-
-    private void DrawPointDebugActions()
-    {
-        var hasTarget = session.CurrentTarget is not null;
-        var hasCandidateSelection = session.CurrentCandidateSelection?.Candidate is not null;
-        var sameTerritory = session.SelectedTerritoryIsCurrent;
-
-        ImGui.Spacing();
-        ImGui.TextColored(AccentText, "点位操作");
-        var actionLine = 0f;
-        if (FlowActionButton("插旗未记录候选", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
-            session.PlaceNearestUnrecordedCandidateFlag();
-        if (FlowActionButton("排除推荐候选", !hasCandidateSelection || !sameTerritory, ref actionLine))
-            session.RejectSelectedCandidate();
     }
 
     private void DrawTerritoryOverview()
@@ -576,10 +575,16 @@ internal sealed class MainWindow : Window, IDisposable
         DrawInlineMetric("风险", riskCount.ToString(), riskCount > 0 ? ErrorText : MutedText, ref metricLine);
     }
 
+    private void DrawDebug()
+    {
+        DrawDebugOptions();
+        ImGui.Separator();
+        DrawPointDebugDetails();
+    }
+
     private void DrawDebugOptions()
     {
-        if (!ImGui.CollapsingHeader("调试与显示"))
-            return;
+        DrawSectionTitle("调试");
 
         var autoRecord = session.AutoRecordCastsEnabled;
         if (ImGui.Checkbox("自动记录抛竿", ref autoRecord))
@@ -639,13 +644,10 @@ internal sealed class MainWindow : Window, IDisposable
             return;
 
         var ctrlDown = ImGui.GetIO().KeyCtrl;
-        var hasTarget = session.CurrentTarget is not null;
         var hasTerritory = session.SelectedTerritoryId != 0;
 
-        ImGui.TextColored(WarnText, "按住 Ctrl 启用清理按钮。");
+        ImGui.TextColored(WarnText, "按住 Ctrl 启用领地级清理按钮。");
         var actionLine = 0f;
-        if (FlowActionButton("清维护目标数据", !ctrlDown || !hasTarget, ref actionLine))
-            session.ClearCurrentSpotMaintenance();
         if (FlowActionButton("清当前领地维护", !ctrlDown || !hasTerritory, ref actionLine))
             session.ClearCurrentTerritoryMaintenance();
         if (FlowActionButton("清当前领地内存候选", !ctrlDown || !hasTerritory, ref actionLine))
@@ -711,7 +713,7 @@ internal sealed class MainWindow : Window, IDisposable
         if (session.TargetCount == 0)
             return ("无目录", MutedText);
         if (session.CurrentTarget is null)
-            return ("无维护目标", WarnText);
+            return ("无当前钓场", WarnText);
         if (session.CurrentApproachPoints.Any(point => point.Status == ApproachPointStatus.Confirmed))
             return ("维护中", GoodText);
         return ("待维护", WarnText);
@@ -766,24 +768,6 @@ internal sealed class MainWindow : Window, IDisposable
             SpotAnalysisStatus.Stale => "已过期",
             _ => "未开始",
         };
-    }
-
-    private static string FormatReviewDecision(SpotReviewDecision decision)
-    {
-        if (decision == SpotReviewDecision.None)
-            return "-";
-
-        var values = new List<string>();
-        if ((decision & SpotReviewDecision.IgnoreSpot) == SpotReviewDecision.IgnoreSpot)
-            values.Add("忽略");
-        if ((decision & SpotReviewDecision.AllowWeakCoverageExport) == SpotReviewDecision.AllowWeakCoverageExport)
-            values.Add("弱覆盖");
-        if ((decision & SpotReviewDecision.AllowRiskExport) == SpotReviewDecision.AllowRiskExport)
-            values.Add("风险");
-        if ((decision & SpotReviewDecision.NeedsManualReview) == SpotReviewDecision.NeedsManualReview)
-            values.Add("需复核");
-
-        return values.Count == 0 ? "-" : string.Join("+", values);
     }
 
     private static string FormatApproachPointStatus(ApproachPointStatus status)

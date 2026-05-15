@@ -20,13 +20,13 @@ internal sealed unsafe class PlayerFishingActionService
     private DateTimeOffset lastCastAttemptAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastInterruptAttemptAt = DateTimeOffset.MinValue;
 
-    public bool MountIfNeeded()
+    public MountAttemptResult MountIfNeeded()
     {
         var condition = DService.Instance().Condition;
         if (condition[ConditionFlag.Mounted] || condition[ConditionFlag.RidingPillion] || IsPlayerFlying())
         {
             lastMountAttemptAt = DateTimeOffset.MinValue;
-            return true;
+            return MountAttemptResult.Ready;
         }
 
         if (condition[ConditionFlag.Mounting]
@@ -34,21 +34,30 @@ internal sealed unsafe class PlayerFishingActionService
             || condition[ConditionFlag.Casting]
             || condition[ConditionFlag.Casting87]
             || condition[ConditionFlag.Fishing])
-            return false;
+            return MountAttemptResult.Waiting;
+
+        if (DService.Instance().ObjectTable.LocalPlayer is null)
+            return MountAttemptResult.Waiting;
+
+        if (!CurrentGameState.IsCurrentTerritoryMountAllowed())
+        {
+            lastMountAttemptAt = DateTimeOffset.MinValue;
+            return MountAttemptResult.TerritoryMountUnavailable;
+        }
 
         if (DateTimeOffset.UtcNow - lastMountAttemptAt < MountRetryDelay)
-            return false;
+            return MountAttemptResult.Waiting;
 
         var actionManager = ActionManager.Instance();
         if (actionManager == null)
-            return false;
+            return MountAttemptResult.Waiting;
 
         if (actionManager->GetActionStatus(ActionType.GeneralAction, MountRouletteGeneralActionId) != 0)
-            return false;
+            return MountAttemptResult.Waiting;
 
         lastMountAttemptAt = DateTimeOffset.UtcNow;
         actionManager->UseAction(ActionType.GeneralAction, MountRouletteGeneralActionId);
-        return false;
+        return MountAttemptResult.Waiting;
     }
 
     public bool DismountIfNeeded()
@@ -203,4 +212,11 @@ internal enum FishingCastAttempt
     ActionManagerUnavailable,
     ActionUnavailable,
     ActionRejected,
+}
+
+internal enum MountAttemptResult
+{
+    Ready,
+    Waiting,
+    TerritoryMountUnavailable,
 }
