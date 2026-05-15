@@ -12,8 +12,12 @@ internal sealed class VnavmeshQueryService
         new("vnavmesh.Nav.Pathfind", () => null!);
     private readonly IPCSubscriber<Vector3, Vector3, bool, CancellationToken, Task<List<Vector3>>> navPathfindCancelable =
         new("vnavmesh.Nav.PathfindCancelable", () => null!);
+    private readonly IPCSubscriber<Vector3, float, float, Vector3?> meshNearestPoint =
+        new("vnavmesh.Query.Mesh.NearestPoint", () => (Vector3?)null);
     private readonly IPCSubscriber<Vector3, float, float, Vector3?> meshNearestPointReachable =
         new("vnavmesh.Query.Mesh.NearestPointReachable", () => (Vector3?)null);
+    private readonly IPCSubscriber<Vector3, bool, float, Vector3?> meshPointOnFloor =
+        new("vnavmesh.Query.Mesh.PointOnFloor", () => (Vector3?)null);
     private readonly IPCSubscriber<Vector3, bool, float, bool> pathfindAndMoveCloseTo =
         new("vnavmesh.SimpleMove.PathfindAndMoveCloseTo", () => false);
     private readonly IPCSubscriber<bool> pathIsRunning = new("vnavmesh.Path.IsRunning", () => false);
@@ -37,6 +41,29 @@ internal sealed class VnavmeshQueryService
             return nearest is { } reachablePoint
                 ? MeshPointQueryResult.Reachable(reachablePoint)
                 : MeshPointQueryResult.Unreachable("no nearby reachable mesh point");
+        }
+        catch (Exception ex)
+        {
+            return MeshPointQueryResult.Unavailable(ex.Message);
+        }
+    }
+
+    public MeshPointQueryResult QueryLandingPoint(Vector3 point, float probeHeight, float halfExtentXZ, float halfExtentY)
+    {
+        if (!IsReady)
+            return MeshPointQueryResult.Unavailable("vnavmesh not ready");
+
+        try
+        {
+            var probe = new Vector3(point.X, point.Y + probeHeight, point.Z);
+            var floor = meshPointOnFloor.TryInvokeFunc(probe, true, halfExtentXZ);
+            if (floor is { } floorPoint)
+                return MeshPointQueryResult.Reachable(floorPoint);
+
+            var nearest = meshNearestPoint.TryInvokeFunc(point, halfExtentXZ, halfExtentY);
+            return nearest is { } nearestPoint
+                ? MeshPointQueryResult.Reachable(nearestPoint)
+                : MeshPointQueryResult.Unreachable("no nearby landing mesh point");
         }
         catch (Exception ex)
         {

@@ -24,9 +24,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float WalkableStandingClearanceMeters = 5f;
     private const float OpenFishableClearanceMeters = 5f;
     private const float WalkableFishableMinimumVerticalDelta = 0f;
-    private const float SoftBankCoverMinimumNormalY = 0.75f;
-    private const float SoftBankCoverMinimumBelowWalkable = 0.15f;
-    private const float SoftBankCoverMaximumHeightAboveFishable = 2f;
     private const float CandidateRearClearanceRayHeight = 1f;
     private const float CandidateRearClearanceDistance = 1f;
     private const float ProbeCacheCellSize = 0.25f;
@@ -1607,7 +1604,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             var result = TryFindRayDropFishableTarget(
                 territoryId,
                 rayPoint,
-                walkablePoint,
                 fishableIndex,
                 fishableSurfaceGroupIds,
                 queryCache,
@@ -1954,7 +1950,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static RayDropProbeResult TryFindRayDropFishableTarget(
         uint territoryId,
         Vector3 rayPoint,
-        Vector3 walkablePoint,
         TriangleIndex fishableIndex,
         IReadOnlyDictionary<ExtractedSceneTriangle, string> fishableSurfaceGroupIds,
         ScanQueryCache queryCache,
@@ -1976,15 +1971,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             }
             if (collisionPoint.Y >= fishablePoint.Y - SightLineIntersectionEpsilon)
             {
-                if (IsIgnorableSoftBankCover(walkablePoint, collisionTriangle, collisionPoint, fishablePoint))
-                {
-                    queryCache.RecordRayDropSoftBankCoverPass();
-                }
-                else
-                {
-                    queryCache.RecordRayDropCollisionAboveFishable(rayPoint, collisionTriangle, collisionPoint, fishableTriangle, fishablePoint);
-                    return RayDropProbeResult.CollisionAboveFishable;
-                }
+                queryCache.RecordRayDropCollisionAboveFishable(rayPoint, collisionTriangle, collisionPoint, fishableTriangle, fishablePoint);
+                return RayDropProbeResult.CollisionAboveFishable;
             }
         }
 
@@ -1996,24 +1984,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             : CreateFallbackFishableSurfaceGroupId(territoryId, fishablePoint);
         target = new RayDropFishableTarget(fishablePoint, fishableTriangle, surfaceGroupId);
         return RayDropProbeResult.HitFishable;
-    }
-
-    private static bool IsIgnorableSoftBankCover(
-        Vector3 walkablePoint,
-        ExtractedSceneTriangle collisionTriangle,
-        Vector3 collisionPoint,
-        Vector3 fishablePoint)
-    {
-        if (!collisionTriangle.IsWalkable
-            || collisionTriangle.Normal.Y < SoftBankCoverMinimumNormalY)
-            return false;
-
-        if (collisionPoint.Y > walkablePoint.Y - SoftBankCoverMinimumBelowWalkable)
-            return false;
-
-        var heightAboveFishable = collisionPoint.Y - fishablePoint.Y;
-        return heightAboveFishable >= -SightLineIntersectionEpsilon
-            && heightAboveFishable <= SoftBankCoverMaximumHeightAboveFishable;
     }
 
     private static string CreateFallbackFishableSurfaceGroupId(uint territoryId, Vector3 point) =>
@@ -2066,15 +2036,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             }
             if (collisionPoint.Y >= bestFishablePoint.Y - SightLineIntersectionEpsilon)
             {
-                if (IsIgnorableSoftBankCover(walkablePoint, collisionTriangle, collisionPoint, bestFishablePoint))
-                {
-                    queryCache.RecordRayDropSoftBankCoverPass();
-                }
-                else
-                {
-                    queryCache.RecordRayDropCollisionAboveFishable(rayPoint, collisionTriangle, collisionPoint, bestTriangle, bestFishablePoint);
-                    return RayDropProbeResult.CollisionAboveFishable;
-                }
+                queryCache.RecordRayDropCollisionAboveFishable(rayPoint, collisionTriangle, collisionPoint, bestTriangle, bestFishablePoint);
+                return RayDropProbeResult.CollisionAboveFishable;
             }
         }
 
@@ -3432,7 +3395,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         public long FailureNoFishableHit { get; set; }
         public long FailureCollisionWithoutFishable { get; set; }
         public long FailureCollisionAboveFishable { get; set; }
-        public long RayDropSoftBankCoverPasses { get; set; }
         public long FailureNoUsableSector { get; set; }
         public long FailureRearBlocked { get; set; }
         public long FailureCoverageNoCandidate { get; set; }
@@ -3489,11 +3451,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             }
         }
 
-        public void RecordRayDropSoftBankCoverPass()
-        {
-            RayDropSoftBankCoverPasses++;
-        }
-
         public void RecordRayDropCollisionSample(
             CandidateCreateFailureReason reason,
             Vector3 rayPoint,
@@ -3546,7 +3503,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         {
             stopwatch.Stop();
             log.Information(
-                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} collisionBlockers={CollisionBlockers} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} failureHorizontalBlocked={FailureHorizontalBlocked} failureNoFishable={FailureNoFishable} failureCollisionBeforeFishable={FailureCollisionBeforeFishable} failureCollisionWithoutFishable={FailureCollisionWithoutFishable} failureCollisionAboveFishable={FailureCollisionAboveFishable} softBankCoverPasses={SoftBankCoverPasses} failureNoUsableSector={FailureNoUsableSector} failureRearBlocked={FailureRearBlocked} failureCoverageNoCandidate={FailureCoverageNoCandidate} failureUnknown={FailureUnknown} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} accessQueries={AccessQueries} accessCacheHits={AccessCacheHits} accessBlocked={AccessBlocked}",
+                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} collisionBlockers={CollisionBlockers} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} failureHorizontalBlocked={FailureHorizontalBlocked} failureNoFishable={FailureNoFishable} failureCollisionBeforeFishable={FailureCollisionBeforeFishable} failureCollisionWithoutFishable={FailureCollisionWithoutFishable} failureCollisionAboveFishable={FailureCollisionAboveFishable} failureNoUsableSector={FailureNoUsableSector} failureRearBlocked={FailureRearBlocked} failureCoverageNoCandidate={FailureCoverageNoCandidate} failureUnknown={FailureUnknown} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} accessQueries={AccessQueries} accessCacheHits={AccessCacheHits} accessBlocked={AccessBlocked}",
                 territoryId,
                 stopwatch.Elapsed.TotalMilliseconds,
                 fishableTriangles,
@@ -3563,7 +3520,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 FailureCollisionWithoutFishable + FailureCollisionAboveFishable,
                 FailureCollisionWithoutFishable,
                 FailureCollisionAboveFishable,
-                RayDropSoftBankCoverPasses,
                 FailureNoUsableSector,
                 FailureRearBlocked,
                 FailureCoverageNoCandidate,
@@ -4054,11 +4010,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 collisionPoint,
                 fishableTriangle,
                 fishablePoint);
-        }
-
-        public void RecordRayDropSoftBankCoverPass()
-        {
-            diagnostics?.RecordRayDropSoftBankCoverPass();
         }
 
         public bool TryFindFacingFishable(

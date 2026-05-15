@@ -66,7 +66,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var paths = new PluginPaths(pluginInterface);
         configuration = LoadConfiguration(paths);
-        session = new SpotWorkflowSession(paths, new VnavmeshSceneScanner(pluginLog), configuration, SaveConfiguration);
+        session = new SpotWorkflowSession(paths, new VnavmeshSceneScanner(pluginLog), configuration, SaveConfiguration, pluginLog);
         castMonitor = new FishingCastMonitor(session, pluginLog);
         mainWindow = new MainWindow(session);
         mainWindow.IsOpen = true;

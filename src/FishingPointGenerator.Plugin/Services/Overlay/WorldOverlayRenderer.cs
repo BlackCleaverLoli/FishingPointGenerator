@@ -17,6 +17,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint TerritoryCandidateColor = 0x66808080;
     private const uint CandidateColor = 0xffd0d0d0;
     private const uint ConfirmedColor = 0xff55d779;
+    private const uint DisabledColor = 0xff8080ff;
     private const uint BlockLabelColor = 0xffc0a060;
     private const uint WarningColor = 0xff4080ff;
     private const uint FishableDebugFillColor = 0x3345a0ff;
@@ -121,8 +122,12 @@ internal sealed unsafe class WorldOverlayRenderer
 
         var territoryId = survey.TerritoryId != 0 ? survey.TerritoryId : session.SelectedTerritoryId;
         var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
+        var riskOwnersByKey = BuildMixedRiskCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
+        var disabledOwnersByKey = BuildDisabledCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
 
         var recordedTotal = survey.Candidates.Count(candidate => GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0);
+        var riskTotal = survey.Candidates.Count(candidate => GetRiskOwners(candidate, territoryId, riskOwnersByKey).Count > 0);
+        var disabledTotal = survey.Candidates.Count(candidate => GetDisabledOwners(candidate, territoryId, disabledOwnersByKey).Count > 0);
         var visibleCandidates = survey.Candidates
             .Select(candidate => new
             {
@@ -144,19 +149,23 @@ internal sealed unsafe class WorldOverlayRenderer
             var standing = ToVector3(candidate.Position);
             var recordedOwners = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey);
             var isConfirmed = recordedOwners.Count > 0;
-            var color = isConfirmed ? ConfirmedColor : CandidateColor;
-            var pointRadius = isConfirmed ? 4f : 3f;
+            var riskOwners = GetRiskOwners(candidate, territoryId, riskOwnersByKey);
+            var isRisk = riskOwners.Count > 0;
+            var disabledOwners = GetDisabledOwners(candidate, territoryId, disabledOwnersByKey);
+            var isDisabled = disabledOwners.Count > 0;
+            var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : CandidateColor;
+            var pointRadius = isDisabled ? 4f : isConfirmed ? 4f : isRisk ? 3.5f : 3f;
 
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, pointRadius, color, true);
 
-            if (isConfirmed || labelCount < MaxCandidateLabels)
+            if (isDisabled || isConfirmed || isRisk || labelCount < MaxCandidateLabels)
             {
                 DrawWorldText(
                     drawList,
                     standing + new Vector3(0f, 1.6f, 0f),
-                    BuildCandidateLabel(candidate, item.Distance, recordedOwners),
-                    isConfirmed ? ConfirmedColor : CandidateColor);
+                    BuildCandidateLabel(candidate, item.Distance, recordedOwners, riskOwners, disabledOwners),
+                    color);
                 labelCount++;
             }
         }
@@ -166,20 +175,30 @@ internal sealed unsafe class WorldOverlayRenderer
             var clippedText = visibleCandidates.Count > candidates.Count
                 ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
                 : string.Empty;
-            drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count}{clippedText}");
+            drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{clippedText}");
         }
 
-        DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey);
+        DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey, riskOwnersByKey, disabledOwnersByKey);
     }
 
     private static string BuildCandidateLabel(
         ApproachCandidate candidate,
         float distanceToPlayer,
-        IReadOnlyList<CandidateRecordOwner> recordedOwners)
+        IReadOnlyList<CandidateRecordOwner> recordedOwners,
+        IReadOnlyList<CandidateRecordOwner> riskOwners,
+        IReadOnlyList<CandidateRecordOwner> disabledOwners)
     {
-        var status = recordedOwners.Count > 0
-            ? $"已记录:{FormatRecordedOwners(recordedOwners)}"
-            : "未记录";
+        var status = "未记录";
+        if (disabledOwners.Count > 0)
+            status = $"屏蔽:{FormatRecordedOwners(disabledOwners)}";
+        else if (recordedOwners.Count > 0)
+            status = $"已记录:{FormatRecordedOwners(recordedOwners)}";
+        else if (riskOwners.Count > 0)
+            status = $"风险:{FormatRecordedOwners(riskOwners)}";
+        if (disabledOwners.Count > 0 && recordedOwners.Count > 0)
+            status += $" 已记录:{FormatRecordedOwners(recordedOwners)}";
+        if (recordedOwners.Count > 0 && riskOwners.Count > 0)
+            status += $" 风险:{FormatRecordedOwners(riskOwners)}";
         var reachability = candidate.Reachability switch
         {
             CandidateReachability.Flyable => "可飞",
@@ -206,6 +225,40 @@ internal sealed unsafe class WorldOverlayRenderer
             .ToList();
     }
 
+    private static IReadOnlyList<CandidateRecordOwner> GetRiskOwners(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey)
+    {
+        if (riskOwnersByKey.Count == 0)
+            return [];
+
+        var owners = new Dictionary<uint, CandidateRecordOwner>();
+        AddRecordedOwners(owners, riskOwnersByKey, candidate.CandidateId);
+        AddRecordedOwners(owners, riskOwnersByKey, candidate.BlockId);
+        AddRecordedOwners(owners, riskOwnersByKey, GetTerritoryCandidateFingerprint(candidate, territoryId));
+        return owners.Values
+            .OrderBy(owner => owner.FishingSpotId)
+            .ToList();
+    }
+
+    private static IReadOnlyList<CandidateRecordOwner> GetDisabledOwners(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> disabledOwnersByKey)
+    {
+        if (disabledOwnersByKey.Count == 0)
+            return [];
+
+        var owners = new Dictionary<uint, CandidateRecordOwner>();
+        AddRecordedOwners(owners, disabledOwnersByKey, candidate.CandidateId);
+        AddRecordedOwners(owners, disabledOwnersByKey, candidate.BlockId);
+        AddRecordedOwners(owners, disabledOwnersByKey, GetTerritoryCandidateFingerprint(candidate, territoryId));
+        return owners.Values
+            .OrderBy(owner => owner.FishingSpotId)
+            .ToList();
+    }
+
     private static Dictionary<string, List<CandidateRecordOwner>> BuildRecordedCandidateOwnerIndex(
         TerritoryMaintenanceDocument? maintenance)
     {
@@ -220,6 +273,58 @@ internal sealed unsafe class WorldOverlayRenderer
             {
                 AddRecordedOwner(ownersByKey, point.SourceCandidateId, owner);
                 AddRecordedOwner(ownersByKey, point.SourceCandidateFingerprint, owner);
+                if (maintenance.TerritoryId != 0)
+                {
+                    AddRecordedOwner(
+                        ownersByKey,
+                        SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                            maintenance.TerritoryId,
+                            point.Position,
+                            point.Rotation),
+                        owner);
+                }
+            }
+        }
+
+        return ownersByKey;
+    }
+
+    private static Dictionary<string, List<CandidateRecordOwner>> BuildMixedRiskCandidateOwnerIndex(
+        TerritoryMaintenanceDocument? maintenance)
+    {
+        var ownersByKey = new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal);
+        if (maintenance is null)
+            return ownersByKey;
+
+        foreach (var spot in maintenance.Spots)
+        {
+            var owner = new CandidateRecordOwner(spot.FishingSpotId, spot.Name);
+            foreach (var record in spot.MixedRiskBlocks)
+            {
+                AddRecordedOwner(ownersByKey, record.BlockId, owner);
+                foreach (var candidateId in record.CandidateIds.Where(id => !string.IsNullOrWhiteSpace(id)))
+                    AddRecordedOwner(ownersByKey, candidateId, owner);
+            }
+        }
+
+        return ownersByKey;
+    }
+
+    private static Dictionary<string, List<CandidateRecordOwner>> BuildDisabledCandidateOwnerIndex(
+        TerritoryMaintenanceDocument? maintenance)
+    {
+        var ownersByKey = new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal);
+        if (maintenance is null)
+            return ownersByKey;
+
+        foreach (var spot in maintenance.Spots)
+        {
+            var owner = new CandidateRecordOwner(spot.FishingSpotId, spot.Name);
+            foreach (var point in spot.ApproachPoints.Where(IsEffectiveDisabledApproachPoint))
+            {
+                AddRecordedOwner(ownersByKey, point.SourceCandidateId, owner);
+                AddRecordedOwner(ownersByKey, point.SourceCandidateFingerprint, owner);
+                AddRecordedOwner(ownersByKey, point.SourceBlockId, owner);
                 if (maintenance.TerritoryId != 0)
                 {
                     AddRecordedOwner(
@@ -264,6 +369,12 @@ internal sealed unsafe class WorldOverlayRenderer
 
         if (!owners.Any(existing => existing.FishingSpotId == owner.FishingSpotId))
             owners.Add(owner);
+    }
+
+    private static bool IsEffectiveDisabledApproachPoint(ApproachPoint point)
+    {
+        return point.Status == ApproachPointStatus.Disabled
+            && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
     }
 
     private static string GetTerritoryCandidateFingerprint(ApproachCandidate candidate, uint territoryId)
@@ -446,6 +557,8 @@ internal sealed unsafe class WorldOverlayRenderer
 
         var territoryId = session.CurrentTerritorySurvey?.TerritoryId ?? session.SelectedTerritoryId;
         var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
+        var riskOwnersByKey = BuildMixedRiskCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
+        var disabledOwnersByKey = BuildDisabledCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
         var playerPoint = Point3.From(playerPosition);
         var candidates = blocks
             .SelectMany(block => block.Candidates)
@@ -465,9 +578,11 @@ internal sealed unsafe class WorldOverlayRenderer
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
             var isConfirmed = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0;
-            var color = isConfirmed ? ConfirmedColor : TerritoryCandidateColor;
+            var isRisk = GetRiskOwners(candidate, territoryId, riskOwnersByKey).Count > 0;
+            var isDisabled = GetDisabledOwners(candidate, territoryId, disabledOwnersByKey).Count > 0;
+            var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : TerritoryCandidateColor;
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
-            DrawWorldPoint(drawList, standing, isConfirmed ? 3f : 2f, color, true);
+            DrawWorldPoint(drawList, standing, isDisabled ? 3f : isConfirmed ? 3f : isRisk ? 2.5f : 2f, color, true);
         }
     }
 
@@ -477,7 +592,9 @@ internal sealed unsafe class WorldOverlayRenderer
         Vector3 playerPosition,
         float drawDistance,
         uint territoryId,
-        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey)
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> disabledOwnersByKey)
     {
         if (session.CurrentTerritoryBlocks.Count == 0)
             return;
@@ -497,7 +614,15 @@ internal sealed unsafe class WorldOverlayRenderer
         {
             var confirmedCount = item.Block.Candidates.Count(candidate =>
                 GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0);
+            var riskCount = item.Block.Candidates.Count(candidate =>
+                GetRiskOwners(candidate, territoryId, riskOwnersByKey).Count > 0);
+            var disabledCount = item.Block.Candidates.Count(candidate =>
+                GetDisabledOwners(candidate, territoryId, disabledOwnersByKey).Count > 0);
             var label = $"{ShortBlockId(item.Block.BlockId)} {confirmedCount}/{item.Block.Candidates.Count}";
+            if (riskCount > 0)
+                label += $" r{riskCount}";
+            if (disabledCount > 0)
+                label += $" x{disabledCount}";
             DrawWorldText(drawList, ToVector3(item.Center) + new Vector3(0f, 2f, 0f), label, BlockLabelColor);
         }
     }
