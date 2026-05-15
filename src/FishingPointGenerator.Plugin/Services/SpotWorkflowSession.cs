@@ -61,6 +61,7 @@ internal sealed class SpotWorkflowSession : IDisposable
     private bool overlayShowFishableDebug = true;
     private bool overlayShowWalkableDebug = true;
     private bool overlayPointDisableMode;
+    private DateTimeOffset overlayPerformanceDebugUntil = DateTimeOffset.MinValue;
     private bool overlayPointDisableUiWindowVisible;
     private Vector2 overlayPointDisableUiWindowMin;
     private Vector2 overlayPointDisableUiWindowMax;
@@ -206,6 +207,21 @@ internal sealed class SpotWorkflowSession : IDisposable
     {
         get => overlayPointDisableMode;
         set => overlayPointDisableMode = value;
+    }
+
+    public bool OverlayPerformanceDebugEnabled => DateTimeOffset.UtcNow < overlayPerformanceDebugUntil;
+    public DateTimeOffset OverlayPerformanceDebugUntil => overlayPerformanceDebugUntil;
+
+    public void StartOverlayPerformanceDebug(TimeSpan duration)
+    {
+        overlayPerformanceDebugUntil = DateTimeOffset.UtcNow + duration;
+        LastMessage = $"已开始 overlay 性能采样 {duration.TotalSeconds:F1}s，采样日志会写入 Dalamud log。";
+    }
+
+    public void StopOverlayPerformanceDebug()
+    {
+        overlayPerformanceDebugUntil = DateTimeOffset.MinValue;
+        LastMessage = "已停止 overlay 性能采样。";
     }
 
     public void SetOverlayPointDisableUiWindowVisible(bool visible)
@@ -1205,37 +1221,8 @@ internal sealed class SpotWorkflowSession : IDisposable
     {
         if (!EnsureCurrentTarget())
             return;
-        if (!EnsureSelectedTargetIsCurrentTerritory())
-            return;
 
-        var target = CurrentTarget!;
-        var playerSnapshot = GetPlayerSnapshot();
-        var evidenceId = Guid.NewGuid().ToString("N");
-        var scan = EnsureScanForCurrentTarget();
-        if (scan is not null)
-        {
-            CurrentAnalysis = maintenanceAnalysisBuilder.Analyze(
-                target,
-                scan,
-                GetMaintenanceRecord(target.Key),
-                TryLoadLegacyReview(target.Key));
-            CurrentCandidateSelection = GetOrBuildCandidateSelection(target, scan);
-            ReplaceAnalysis(CurrentAnalysis);
-        }
-
-        if (playerSnapshot is null)
-        {
-            LastMessage = "无法读取玩家当前位置，不能记录真实可钓点。";
-            return;
-        }
-
-        UpsertManualApproachPoint(
-            target,
-            evidenceId,
-            playerSnapshot.Position,
-            playerSnapshot.Rotation,
-            "manualCurrentStanding");
-        LastMessage = $"已用当前站位确认 FishingSpot {target.FishingSpotId}。";
+        LastMessage = "手动站位确认已停用：维护模型只相信真实抛竿点亮；请通过抛竿或自动点亮记录钓场。";
     }
 
     public void RejectSelectedCandidate()
@@ -1557,7 +1544,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         {
             Severity = SpotValidationSeverity.Info,
             Code = "ApproachPoints",
-            Message = $"真实可钓点 {approachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed)} 个，证据 {evidence.Count} 条。",
+            Message = $"真实可钓点 {approachPoints.Count(IsTrustedConfirmedApproachPoint)} 个，证据 {evidence.Count} 条。",
         });
         if (CurrentScan is not null)
         {
@@ -1576,7 +1563,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             FishingSpotName = target.Name,
             Status = analysis.Status,
             CandidateCount = analysis.CandidateCount,
-            ConfirmedApproachPointCount = approachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed),
+            ConfirmedApproachPointCount = approachPoints.Count(IsTrustedConfirmedApproachPoint),
             Findings = findings,
             ApproachPoints = approachPoints,
             Evidence = evidence,
@@ -1595,7 +1582,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
         var export = maintenanceExportBuilder.Build(analyses, maintenanceDocuments);
         store.SaveExport(export);
-        LastMessage = $"已导出 {export.Count} 个已确认点位。";
+        LastMessage = $"已导出 {export.Spots.Values.Sum(points => points.Count)} 个已确认点位。";
     }
 
     public void ClearSpotPointCache(uint fishingSpotId)
@@ -3432,90 +3419,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         FishingSpotTarget target,
         SpotMaintenanceRecord spot)
     {
-        var ledgerPath = store.GetLegacyLedgerPath(target.Key);
-        if (!File.Exists(ledgerPath))
-            return spot;
-
-        var ledger = store.LoadLegacyLedger(target.Key);
-        var bindableEvents = ledger.Events
-            .Where(label => label.EventType is SpotLabelEventType.Confirm or SpotLabelEventType.Override)
-            .Where(label => label.ConfirmedPosition is not null && label.ConfirmedRotation is not null)
-            .OrderBy(label => label.CreatedAt)
-            .ThenBy(label => label.EventId, StringComparer.Ordinal)
-            .ToList();
-        if (bindableEvents.Count == 0)
-            return spot;
-
-        var points = spot.ApproachPoints.ToList();
-        var evidence = spot.Evidence.ToList();
-        var existingPointIds = points
-            .Select(point => point.PointId)
-            .ToHashSet(StringComparer.Ordinal);
-        var existingEvidenceIds = evidence
-            .Select(item => item.EventId)
-            .ToHashSet(StringComparer.Ordinal);
-        var legacyScan = TryLoadLegacySpotScan(target.Key);
-        var candidatesByFingerprint = legacyScan?.Candidates
-            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateFingerprint))
-            .GroupBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal)
-            ?? [];
-
-        foreach (var label in bindableEvents)
-        {
-            var position = label.ConfirmedPosition!.Value;
-            var rotation = label.ConfirmedRotation!.Value;
-            var pointId = SpotFingerprint.CreateApproachPointId(target.Key, position, rotation);
-            candidatesByFingerprint.TryGetValue(label.CandidateFingerprint, out var candidate);
-
-            if (existingEvidenceIds.Add(label.EventId))
-            {
-                evidence.Add(new SpotEvidenceEvent
-                {
-                    EventId = label.EventId,
-                    EventType = SpotEvidenceEventType.ManualConfirm,
-                    Position = position,
-                    Rotation = rotation,
-                    CandidateFingerprint = label.CandidateFingerprint,
-                    SourceScanId = label.SourceScanId,
-                    SourceScannerVersion = label.SourceScannerVersion,
-                    CreatedAt = label.CreatedAt,
-                    Note = string.IsNullOrWhiteSpace(label.Note) ? "legacyLedgerImport" : $"legacyLedgerImport: {label.Note}",
-                });
-            }
-
-            if (!existingPointIds.Add(pointId))
-                continue;
-
-            points.Add(new ApproachPoint
-            {
-                PointId = pointId,
-                Position = position,
-                Rotation = rotation,
-                Status = ApproachPointStatus.Confirmed,
-                SourceKind = ApproachPointSourceKind.Imported,
-                SourceCandidateFingerprint = label.CandidateFingerprint,
-                SourceCandidateId = candidate?.SourceCandidateId ?? string.Empty,
-                SourceBlockId = candidate?.BlockId ?? string.Empty,
-                SourceScanId = label.SourceScanId,
-                SourceScannerVersion = label.SourceScannerVersion,
-                EvidenceIds = [label.EventId],
-                CreatedAt = label.CreatedAt,
-                UpdatedAt = label.CreatedAt,
-                Note = "legacyLedgerImport",
-            });
-        }
-
-        return spot with
-        {
-            ApproachPoints = points
-                .OrderBy(point => point.PointId, StringComparer.Ordinal)
-                .ToList(),
-            Evidence = evidence
-                .OrderBy(item => item.CreatedAt)
-                .ThenBy(item => item.EventId, StringComparer.Ordinal)
-                .ToList(),
-        };
+        return spot;
     }
 
     private SpotMaintenanceRecord MergeLegacyReviewIntoMaintenanceSpot(
@@ -4168,7 +4072,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             {
                 maintenanceByTerritory.TryGetValue(target.TerritoryId, out var document);
                 var maintenance = document?.Spots.FirstOrDefault(spot => spot.FishingSpotId == target.FishingSpotId);
-                var confirmedCount = maintenance?.ApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed) ?? 0;
+                var confirmedCount = maintenance?.ApproachPoints.Count(IsTrustedConfirmedApproachPoint) ?? 0;
                 var reviewDecision = maintenance?.ReviewDecision ?? SpotReviewDecision.None;
                 var status = reviewDecision.HasFlag(SpotReviewDecision.IgnoreSpot)
                     ? SpotAnalysisStatus.Ignored
@@ -4639,6 +4543,13 @@ internal sealed class SpotWorkflowSession : IDisposable
     {
         return point.Status == ApproachPointStatus.Disabled
             && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
+    }
+
+    private static bool IsTrustedConfirmedApproachPoint(ApproachPoint point)
+    {
+        return point.Status == ApproachPointStatus.Confirmed
+            && (point.SourceKind == ApproachPointSourceKind.Candidate
+                || point.SourceKind == ApproachPointSourceKind.AutoCastFill);
     }
 
     private static bool IsAutoMixedRiskBoundaryDisabledPoint(ApproachPoint point)

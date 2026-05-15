@@ -27,6 +27,7 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg scantarget - 从 Territory 缓存为维护目标派生候选\n"
         + "/fpg debugnear [radius] - 只分析角色附近碰撞面，输出调试日志并显示 Fishable/Walkable overlay\n"
         + "/fpg debugcandidates [radius] [limit] - 输出维护目标附近候选点、块和点亮范围调试日志\n"
+        + "/fpg debugoverlayperf [seconds] - 固定采样 overlay 分段计时日志\n"
         + "/fpg debugclear - 清除附近碰撞面调试 overlay\n"
         + "/fpg flag - 为维护目标中心插旗\n"
         + "/fpg tp - 传送到维护目标附近已共鸣以太之光\n"
@@ -36,7 +37,7 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg autoonce - 自动移动到当前候选并抛竿一次\n"
         + "/fpg autoloop - 循环自动移动到当前候选并抛竿\n"
         + "/fpg autostop - 停止自动点亮\n"
-        + "/fpg confirm - 用玩家当前站位确认维护目标\n"
+        + "/fpg confirm - 已停用：模型只通过真实抛竿点亮确认\n"
         + "/fpg rejectcandidate - 排除当前候选\n"
         + "/fpg unrecordspot [fishingSpotId] - 将当前/指定钓场已记录点改为未记录，保留禁用点\n"
         + "/fpg clearspotmaintenance - 清除维护目标数据\n"
@@ -272,6 +273,30 @@ public sealed class Plugin : IDalamudPlugin
             case "debugclear":
                 session.ClearNearbyDebugOverlay();
                 mainWindow.IsOpen = true;
+                Print(session.LastMessage);
+                break;
+
+            case "debugoverlayperf":
+            case "overlayperf":
+                var overlayPerfSeconds = 5f;
+                if (parts.Length >= 2
+                    && string.Equals(parts[1], "off", StringComparison.OrdinalIgnoreCase))
+                {
+                    session.StopOverlayPerformanceDebug();
+                    Print(session.LastMessage);
+                    return;
+                }
+
+                if (parts.Length >= 2
+                    && (!float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out overlayPerfSeconds)
+                        || overlayPerfSeconds <= 0f))
+                {
+                    Print("用法：/fpg debugoverlayperf [seconds]");
+                    return;
+                }
+
+                overlayPerfSeconds = Math.Clamp(overlayPerfSeconds, 1f, 30f);
+                session.StartOverlayPerformanceDebug(TimeSpan.FromSeconds(overlayPerfSeconds));
                 Print(session.LastMessage);
                 break;
 

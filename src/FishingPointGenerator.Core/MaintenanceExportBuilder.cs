@@ -6,7 +6,7 @@ public sealed class MaintenanceExportBuilder
 {
     private const int ExportFloatDigits = 2;
 
-    public List<ExportedApproachPoint> Build(
+    public ExportDocument Build(
         IEnumerable<SpotAnalysis> analyses,
         IEnumerable<TerritoryMaintenanceDocument> maintenanceDocuments)
     {
@@ -17,7 +17,7 @@ public sealed class MaintenanceExportBuilder
             .Where(analysis => analysis.Exportable)
             .Select(analysis => analysis.Key)
             .ToHashSet();
-        var exported = new List<(SpotKey Key, ExportedApproachPoint Point)>();
+        var exported = new List<(SpotKey Key, float[] Point)>();
 
         foreach (var territory in maintenanceDocuments)
         {
@@ -27,31 +27,44 @@ public sealed class MaintenanceExportBuilder
                 if (!exportableKeys.Contains(key))
                     continue;
 
-                foreach (var point in spot.ApproachPoints.Where(point => point.Status == ApproachPointStatus.Confirmed))
+                foreach (var point in spot.ApproachPoints.Where(IsExportableConfirmedPoint))
                 {
                     exported.Add((
                         key,
-                        new ExportedApproachPoint
+                        new[]
                         {
-                            FishingSpot = key.FishingSpotId,
-                            PositionX = RoundExportFloat(point.Position.X),
-                            PositionY = RoundExportFloat(point.Position.Y),
-                            PositionZ = RoundExportFloat(point.Position.Z),
-                            Rotation = RoundExportFloat(point.Rotation),
+                            RoundExportFloat(point.Position.X),
+                            RoundExportFloat(point.Position.Y),
+                            RoundExportFloat(point.Position.Z),
+                            RoundExportFloat(point.Rotation),
                         }));
                 }
             }
         }
 
-        return exported
+        var spots = new SortedDictionary<uint, List<float[]>>();
+        foreach (var group in exported
             .OrderBy(item => item.Key.TerritoryId)
             .ThenBy(item => item.Key.FishingSpotId)
-            .ThenBy(item => item.Point.PositionX)
-            .ThenBy(item => item.Point.PositionY)
-            .ThenBy(item => item.Point.PositionZ)
-            .ThenBy(item => item.Point.Rotation)
-            .Select(item => item.Point)
-            .ToList();
+            .ThenBy(item => item.Point[0])
+            .ThenBy(item => item.Point[1])
+            .ThenBy(item => item.Point[2])
+            .ThenBy(item => item.Point[3])
+            .GroupBy(item => item.Key.FishingSpotId))
+        {
+            spots[group.Key] = group
+                .Select(item => item.Point)
+                .ToList();
+        }
+
+        return new ExportDocument { Spots = spots };
+    }
+
+    private static bool IsExportableConfirmedPoint(ApproachPoint point)
+    {
+        return point.Status == ApproachPointStatus.Confirmed
+            && (point.SourceKind == ApproachPointSourceKind.Candidate
+                || point.SourceKind == ApproachPointSourceKind.AutoCastFill);
     }
 
     private static float RoundExportFloat(float value)

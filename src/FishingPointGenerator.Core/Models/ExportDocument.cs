@@ -2,20 +2,11 @@ using System.Text.Json.Serialization;
 
 namespace FishingPointGenerator.Core.Models;
 
-public sealed record ExportedApproachPoint
+public sealed record ExportDocument
 {
-    [JsonPropertyName("FishingSpot")]
-    public uint FishingSpot { get; init; }
+    [JsonPropertyName("version")]
+    public int Version { get; init; } = 2;
 
-    [JsonPropertyName("PositionX")]
-    public float PositionX { get; init; }
-
-    [JsonPropertyName("PositionY")]
-    public float PositionY { get; init; }
-
-    [JsonPropertyName("PositionZ")]
-    public float PositionZ { get; init; }
-
-    [JsonPropertyName("Rotation")]
-    public float Rotation { get; init; }
+    [JsonPropertyName("spots")]
+    public SortedDictionary<uint, List<float[]>> Spots { get; init; } = [];
 }

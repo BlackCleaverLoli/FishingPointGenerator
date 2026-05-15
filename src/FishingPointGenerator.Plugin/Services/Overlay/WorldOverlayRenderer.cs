@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Dalamud.Bindings.ImGui;
@@ -39,6 +40,8 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint CandidateSelectionEdgeColor = 0xff4080ff;
     private const int MaxSurfaceDebugLabels = 4;
     private const int MaxCandidateLabels = 18;
+    private const double OverlaySlowFrameLogThresholdMs = 12d;
+    private static readonly TimeSpan OverlayPerfFrameLogInterval = TimeSpan.FromSeconds(1);
 
     private Matrix4x4 viewProj;
     private Vector4 nearPlane;
@@ -49,6 +52,14 @@ internal sealed unsafe class WorldOverlayRenderer
     private Vector2 candidateSelectionEnd;
     private TerritoryMaintenanceDocument? cachedMaintenance;
     private OverlayOwnerIndex cachedOwnerIndex = OverlayOwnerIndex.Empty;
+    private TerritorySurveyDocument? cachedStatusSurvey;
+    private OverlayOwnerIndex? cachedStatusOwnerIndex;
+    private uint cachedStatusTerritoryId;
+    private OverlayCandidateStatusIndex cachedStatusIndex = OverlayCandidateStatusIndex.Empty;
+    private DateTimeOffset lastOverlayPerfFrameLogAt = DateTimeOffset.MinValue;
+    private OverlayPerfFrameSample maxOverlayPerfFrameSample = OverlayPerfFrameSample.Empty;
+    private int overlayPerfFrameCount;
+    private int overlayPerfSlowFrameCount;
 
     public void Draw(SpotWorkflowSession session)
     {
@@ -77,17 +88,74 @@ internal sealed unsafe class WorldOverlayRenderer
             windowFlags);
         ImGui.SetWindowSize(ImGui.GetIO().DisplaySize);
 
+        var collectPerfStats = session.OverlayPerformanceDebugEnabled;
+        if (!collectPerfStats)
+        {
+            lastOverlayPerfFrameLogAt = DateTimeOffset.MinValue;
+            maxOverlayPerfFrameSample = OverlayPerfFrameSample.Empty;
+            overlayPerfFrameCount = 0;
+            overlayPerfSlowFrameCount = 0;
+        }
+
+        var frameTiming = StartTiming(collectPerfStats);
         var drawList = ImGui.GetWindowDrawList();
         var canDrawCurrentTerritory = session.SelectedTerritoryIsCurrent;
         var showCandidates = session.OverlayShowCandidates || session.OverlayPointDisableMode;
+        var targetMs = 0d;
+        var surfaceDebugMs = 0d;
+        var surfaceDebugStats = OverlaySurfaceDrawStats.Empty;
+        var territoryCacheStats = OverlayCandidateDrawStats.Empty;
+        var candidateStats = OverlayCandidateDrawStats.Empty;
         if (session.CurrentTarget is not null && canDrawCurrentTerritory)
+        {
+            var step = StartTiming(collectPerfStats);
             DrawTarget(drawList, session, player.Position);
+            targetMs = StopTiming(step);
+        }
+
         if (session.OverlayShowFishableDebug || session.OverlayShowWalkableDebug)
-            DrawSurfaceDebug(drawList, session, player.Position, drawDistance, Math.Min(candidateLimit, 512));
+        {
+            var step = StartTiming(collectPerfStats);
+            surfaceDebugStats = DrawSurfaceDebug(
+                drawList,
+                session,
+                player.Position,
+                drawDistance,
+                Math.Min(candidateLimit, 512),
+                collectPerfStats);
+            surfaceDebugMs = StopTiming(step);
+        }
+
         if (session.OverlayShowTerritoryCache && !showCandidates && canDrawCurrentTerritory)
-            DrawTerritoryCache(drawList, session, player.Position, drawDistance, candidateLimit);
+            territoryCacheStats = DrawTerritoryCache(
+                drawList,
+                session,
+                player.Position,
+                drawDistance,
+                candidateLimit,
+                collectPerfStats);
+
         if (showCandidates && canDrawCurrentTerritory)
-            DrawCandidates(drawList, session, player.Position, drawDistance, candidateLimit);
+            candidateStats = DrawCandidates(
+                drawList,
+                session,
+                player.Position,
+                drawDistance,
+                candidateLimit,
+                collectPerfStats);
+
+        LogOverlayPerfFrame(
+            session,
+            StopTiming(frameTiming),
+            targetMs,
+            surfaceDebugMs,
+            surfaceDebugStats,
+            territoryCacheStats,
+            candidateStats,
+            drawDistance,
+            candidateLimit,
+            canDrawCurrentTerritory,
+            showCandidates);
 
         ImGui.End();
         ImGui.PopStyleVar();
@@ -112,6 +180,108 @@ internal sealed unsafe class WorldOverlayRenderer
         return viewportSize.X > 0f && viewportSize.Y > 0f;
     }
 
+    private void LogOverlayPerfFrame(
+        SpotWorkflowSession session,
+        double totalMs,
+        double targetMs,
+        double surfaceDebugMs,
+        OverlaySurfaceDrawStats surfaceDebugStats,
+        OverlayCandidateDrawStats territoryCacheStats,
+        OverlayCandidateDrawStats candidateStats,
+        float drawDistance,
+        int candidateLimit,
+        bool canDrawCurrentTerritory,
+        bool showCandidates)
+    {
+        if (!session.OverlayPerformanceDebugEnabled)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        var currentSample = new OverlayPerfFrameSample(
+            totalMs,
+            targetMs,
+            surfaceDebugMs,
+            surfaceDebugStats,
+            territoryCacheStats,
+            candidateStats,
+            drawDistance,
+            candidateLimit,
+            canDrawCurrentTerritory,
+            showCandidates);
+        overlayPerfFrameCount++;
+        if (totalMs >= OverlaySlowFrameLogThresholdMs)
+            overlayPerfSlowFrameCount++;
+        if (!maxOverlayPerfFrameSample.HasData || totalMs > maxOverlayPerfFrameSample.TotalMs)
+            maxOverlayPerfFrameSample = currentSample;
+
+        if (lastOverlayPerfFrameLogAt != DateTimeOffset.MinValue
+            && now - lastOverlayPerfFrameLogAt < OverlayPerfFrameLogInterval)
+            return;
+
+        lastOverlayPerfFrameLogAt = now;
+        var logSample = maxOverlayPerfFrameSample.HasData ? maxOverlayPerfFrameSample : currentSample;
+        var frameCount = overlayPerfFrameCount;
+        var slowFrameCount = overlayPerfSlowFrameCount;
+        maxOverlayPerfFrameSample = OverlayPerfFrameSample.Empty;
+        overlayPerfFrameCount = 0;
+        overlayPerfSlowFrameCount = 0;
+        var remainingSeconds = Math.Max(0d, (session.OverlayPerformanceDebugUntil - now).TotalSeconds);
+        DService.Instance().Log.Information(
+            "FPG overlay perf sample: maxTotal={TotalMs:F2}ms maxSlow={IsSlow} frames={FrameCount} slowFrames={SlowFrameCount} remain={RemainingSeconds:F1}s territory={TerritoryId} selected={SelectedTerritoryId} canDraw={CanDrawCurrentTerritory} showCandidates={ShowCandidates} pointDisable={PointDisable} showCache={ShowCache} surfaces={ShowFishable}/{ShowWalkable} target={HasTarget} distance={DrawDistance:F1} limit={CandidateLimit}; maxStages target={TargetMs:F2}ms surface={SurfaceDebugMs:F2}ms territoryCache={TerritoryCacheMs:F2}ms candidates={CandidateMs:F2}ms; {CandidateStats}; {TerritoryCacheStats}; {SurfaceStats}",
+            logSample.TotalMs,
+            logSample.TotalMs >= OverlaySlowFrameLogThresholdMs,
+            frameCount,
+            slowFrameCount,
+            remainingSeconds,
+            session.CurrentTerritoryId,
+            session.SelectedTerritoryId,
+            logSample.CanDrawCurrentTerritory,
+            logSample.ShowCandidates,
+            session.OverlayPointDisableMode,
+            session.OverlayShowTerritoryCache,
+            session.OverlayShowFishableDebug,
+            session.OverlayShowWalkableDebug,
+            session.CurrentTarget is not null,
+            logSample.DrawDistance,
+            logSample.CandidateLimit,
+            logSample.TargetMs,
+            logSample.SurfaceDebugMs,
+            logSample.TerritoryCacheStats.TotalMs,
+            logSample.CandidateStats.TotalMs,
+            FormatCandidateDrawStats(logSample.CandidateStats, "candidates"),
+            FormatCandidateDrawStats(logSample.TerritoryCacheStats, "territoryCache"),
+            FormatSurfaceDrawStats(logSample.SurfaceDebugStats));
+    }
+
+    private static long StartTiming(bool enabled)
+    {
+        return enabled ? Stopwatch.GetTimestamp() : 0L;
+    }
+
+    private static double StopTiming(long timestamp)
+    {
+        return timestamp == 0L ? 0d : Stopwatch.GetElapsedTime(timestamp).TotalMilliseconds;
+    }
+
+    private static string FormatCandidateDrawStats(OverlayCandidateDrawStats stats, string fallbackSource)
+    {
+        var source = stats.Source == "none" ? fallbackSource : stats.Source;
+        if (!stats.HasData)
+            return $"{source}: none";
+
+        return FormattableString.Invariant(
+            $"{source}: src={stats.SourceCount} visible={stats.VisibleCount} drawn={stats.DrawnCount} lines={stats.LineCount} points={stats.PointCount} labels={stats.LabelCount}+{stats.StatusTextCount} selectable={stats.SelectableCount} blocks={stats.BlockLabelsDrawn}/{stats.BlockLabelsVisible}/{stats.BlockLabelsSource} blockChecks={stats.BlockLabelCandidateChecks} status={stats.StatusRecordedTotal}/{stats.StatusRiskTotal}/{stats.StatusDisabledTotal} cache(owner={(stats.OwnerIndexCacheHit ? "hit" : "miss")},status={(stats.StatusIndexCacheHit ? "hit" : "miss")}) ms(owner={stats.OwnerIndexMs:F2},status={stats.StatusIndexMs:F2},collect={stats.CollectMs:F2},draw={stats.DrawLoopMs:F2},hud={stats.HudTextMs:F2},blocks={stats.BlockLabelsMs:F2},select={stats.SelectionMs:F2},total={stats.TotalMs:F2})");
+    }
+
+    private static string FormatSurfaceDrawStats(OverlaySurfaceDrawStats stats)
+    {
+        if (!stats.HasData)
+            return "surface: none";
+
+        return FormattableString.Invariant(
+            $"surface: water={stats.Fishable.DrawnCount}/{stats.Fishable.VisibleCount}/{stats.Fishable.SourceCount} walk={stats.Walkable.DrawnCount}/{stats.Walkable.VisibleCount}/{stats.Walkable.SourceCount} near={stats.NearbyCandidates.DrawnCount}/{stats.NearbyCandidates.VisibleCount}/{stats.NearbyCandidates.SourceCount} lines={stats.LineCount} points={stats.PointCount} fills={stats.FilledTriangleCount} labels={stats.LabelCount}+{stats.HudTextCount} ms(water={stats.Fishable.TotalMs:F2},walk={stats.Walkable.TotalMs:F2},near={stats.NearbyCandidates.TotalMs:F2},hud={stats.HudMs:F2},total={stats.TotalMs:F2})");
+    }
+
     private void DrawTarget(ImDrawListPtr drawList, SpotWorkflowSession session, Vector3 playerPosition)
     {
         var target = session.CurrentTarget!;
@@ -125,40 +295,42 @@ internal sealed unsafe class WorldOverlayRenderer
             DrawWorldCircle(drawList, center, Math.Clamp(target.Radius, 3f, 140f), TargetColor);
     }
 
-    private void DrawCandidates(
+    private OverlayCandidateDrawStats DrawCandidates(
         ImDrawListPtr drawList,
         SpotWorkflowSession session,
         Vector3 playerPosition,
         float drawDistance,
-        int candidateLimit)
+        int candidateLimit,
+        bool collectPerfStats)
     {
         var survey = session.CurrentTerritorySurvey;
         if (survey is null || survey.Candidates.Count == 0)
-            return;
+            return OverlayCandidateDrawStats.Empty;
 
         var territoryId = survey.TerritoryId != 0 ? survey.TerritoryId : session.SelectedTerritoryId;
+        var ownerIndexCacheHit = ReferenceEquals(cachedMaintenance, session.CurrentTerritoryMaintenance);
+        var ownerIndexTiming = StartTiming(collectPerfStats);
         var ownerIndex = GetOwnerIndex(session.CurrentTerritoryMaintenance);
+        var ownerIndexMs = StopTiming(ownerIndexTiming);
         var recordedOwnersByKey = ownerIndex.RecordedOwnersByKey;
         var riskOwnersByKey = ownerIndex.RiskOwnersByKey;
         var disabledOwnersByKey = ownerIndex.DisabledOwnersByKey;
+        var statusIndexCacheHit = IsCandidateStatusIndexCached(survey, territoryId, ownerIndex);
+        var statusIndexTiming = StartTiming(collectPerfStats);
+        var statusIndex = GetCandidateStatusIndex(survey, territoryId, ownerIndex);
+        var statusIndexMs = StopTiming(statusIndexTiming);
 
-        var recordedTotal = survey.Candidates.Count(candidate => HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
-        var riskTotal = survey.Candidates.Count(candidate => HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey));
-        var disabledTotal = survey.Candidates.Count(candidate => HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
         var playerPoint = Point3.From(playerPosition);
-        var visibleCandidates = survey.Candidates
-            .Select(candidate => new
-            {
-                Candidate = candidate,
-                Distance = candidate.Position.HorizontalDistanceTo(playerPoint),
-            })
-            .Where(item => item.Distance <= drawDistance)
-            .OrderBy(item => item.Distance)
-            .ThenBy(item => item.Candidate.CandidateId, StringComparer.Ordinal)
-            .ToList();
-        var candidates = visibleCandidates
-            .Take(candidateLimit)
-            .ToList();
+        var collectTiming = StartTiming(collectPerfStats);
+        var visibleCandidates = CollectVisibleCandidates(
+            survey.Candidates,
+            survey.Candidates.Count,
+            playerPoint,
+            drawDistance,
+            candidateLimit);
+        var collectMs = StopTiming(collectTiming);
+        var clippedCandidateCount = visibleCandidates.ClippedCount;
+        var candidates = visibleCandidates.Candidates;
 
         var mousePosition = ImGui.GetIO().MousePos;
         var selectionMouseDown = IsOverlaySelectionMouseDown();
@@ -194,23 +366,30 @@ internal sealed unsafe class WorldOverlayRenderer
             ? new List<OverlayCandidateScreenPoint>(candidates.Count)
             : [];
         var labelCount = 0;
+        var lineCount = 0;
+        var pointCount = 0;
+        var drawLoopTiming = StartTiming(collectPerfStats);
         foreach (var item in candidates)
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var isConfirmed = HasRecordedOwner(candidate, territoryId, recordedOwnersByKey);
-            var isRisk = HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey);
-            var isDisabled = HasDisabledOwner(candidate, territoryId, disabledOwnersByKey);
+            var status = GetCandidateStatus(candidate, territoryId, ownerIndex, statusIndex);
+            var isConfirmed = status.IsConfirmed;
+            var isRisk = status.IsRisk;
+            var isDisabled = status.IsDisabled;
             var color = isDisabled ? DisabledColor : isRisk ? RiskColor : isConfirmed ? ConfirmedColor : CandidateColor;
             var pointRadius = isDisabled ? 4f : isRisk ? 3.5f : isConfirmed ? 4f : 3f;
+            var shouldLabel = isDisabled || isConfirmed || isRisk || labelCount < MaxCandidateLabels;
 
             if (session.OverlayPointDisableMode && TryWorldToScreen(standing, out var candidateScreen))
                 selectableCandidates.Add(new OverlayCandidateScreenPoint(candidate, candidateScreen));
 
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
+            lineCount++;
             DrawWorldPoint(drawList, standing, pointRadius, color, true);
+            pointCount++;
 
-            if (isDisabled || isConfirmed || isRisk || labelCount < MaxCandidateLabels)
+            if (shouldLabel)
             {
                 var recordedOwners = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey);
                 var riskOwners = GetRiskOwners(candidate, territoryId, riskOwnersByKey);
@@ -223,32 +402,75 @@ internal sealed unsafe class WorldOverlayRenderer
                 labelCount++;
             }
         }
+        var drawLoopMs = StopTiming(drawLoopTiming);
 
+        var selectionTiming = StartTiming(collectPerfStats);
         if (candidateSelectionActive && selectionMouseDown)
             DrawCandidateSelectionRect(drawList, candidateSelectionStart, candidateSelectionEnd);
+        var selectionMs = StopTiming(selectionTiming);
 
+        var statusTextCount = 0;
+        var hudTextTiming = StartTiming(collectPerfStats);
         if (TryWorldToScreen(playerPosition + new Vector3(0f, 2.5f, 0f), out var screen))
         {
-            var clippedText = visibleCandidates.Count > candidates.Count
-                ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
+            var clippedText = clippedCandidateCount > candidates.Count
+                ? $" 显示截断 {candidates.Count}/{clippedCandidateCount}"
                 : string.Empty;
             var pointDisableText = session.OverlayPointDisableMode ? " 左键/Mouse4点选/框选禁用/恢复" : string.Empty;
             drawList.AddText(
                 screen,
-                riskTotal > 0 ? RiskColor : WarningColor,
-                $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{pointDisableText}{clippedText}");
+                statusIndex.RiskTotal > 0 ? RiskColor : WarningColor,
+                $"FPG overlay 已记录 {statusIndex.RecordedTotal}/{survey.Candidates.Count} 风险 {statusIndex.RiskTotal} 屏蔽 {statusIndex.DisabledTotal}{pointDisableText}{clippedText}");
+            statusTextCount = 1;
         }
+        var hudTextMs = StopTiming(hudTextTiming);
 
-        DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey, riskOwnersByKey, disabledOwnersByKey);
+        var blockLabelStats = DrawTerritoryBlockLabels(
+            drawList,
+            session,
+            playerPosition,
+            drawDistance,
+            territoryId,
+            ownerIndex,
+            statusIndex,
+            collectPerfStats);
         if (finishPointDisableSelection)
         {
+            var selectionApplyTiming = StartTiming(collectPerfStats);
             var selectedCandidates = SelectOverlayCandidates(selectableCandidates, candidateSelectionStart, candidateSelectionEnd, mousePosition);
             candidateSelectionActive = false;
             if (selectedCandidates.Count > 0)
                 session.ToggleOverlayCandidatesDisabled(selectedCandidates);
+            selectionMs += StopTiming(selectionApplyTiming);
         }
 
         previousSelectionMouseDown = selectionMouseDown;
+        return new OverlayCandidateDrawStats(
+            "candidates",
+            survey.Candidates.Count,
+            clippedCandidateCount,
+            candidates.Count,
+            lineCount,
+            pointCount,
+            labelCount,
+            statusTextCount,
+            selectableCandidates.Count,
+            blockLabelStats.SourceBlockCount,
+            blockLabelStats.VisibleBlockCount,
+            blockLabelStats.DrawnLabelCount,
+            blockLabelStats.CandidateCheckCount,
+            statusIndex.RecordedTotal,
+            statusIndex.RiskTotal,
+            statusIndex.DisabledTotal,
+            ownerIndexCacheHit,
+            statusIndexCacheHit,
+            ownerIndexMs,
+            statusIndexMs,
+            collectMs,
+            drawLoopMs,
+            hudTextMs,
+            blockLabelStats.TotalMs,
+            selectionMs);
     }
 
     private static IReadOnlyList<ApproachCandidate> SelectOverlayCandidates(
@@ -299,6 +521,38 @@ internal sealed unsafe class WorldOverlayRenderer
         var max = new Vector2(MathF.Max(start.X, end.X), MathF.Max(start.Y, end.Y));
         drawList.AddRectFilled(min, max, CandidateSelectionFillColor);
         drawList.AddRect(min, max, CandidateSelectionEdgeColor, 0f, ImDrawFlags.None, 1.5f);
+    }
+
+    private static VisibleCandidateCollection CollectVisibleCandidates(
+        IEnumerable<ApproachCandidate> source,
+        int sourceCount,
+        Point3 playerPoint,
+        float drawDistance,
+        int candidateLimit)
+    {
+        var candidates = new List<VisibleCandidate>(Math.Min(sourceCount, candidateLimit));
+        var clippedCount = 0;
+        foreach (var candidate in source)
+        {
+            var distance = candidate.Position.HorizontalDistanceTo(playerPoint);
+            if (distance > drawDistance)
+                continue;
+
+            clippedCount++;
+            candidates.Add(new VisibleCandidate(candidate, distance));
+        }
+
+        candidates.Sort(static (left, right) =>
+        {
+            var distanceCompare = left.Distance.CompareTo(right.Distance);
+            return distanceCompare != 0
+                ? distanceCompare
+                : string.Compare(left.Candidate.CandidateId, right.Candidate.CandidateId, StringComparison.Ordinal);
+        });
+        if (candidates.Count > candidateLimit)
+            candidates.RemoveRange(candidateLimit, candidates.Count - candidateLimit);
+
+        return new VisibleCandidateCollection(candidates, clippedCount);
     }
 
     private static string BuildCandidateLabel(
@@ -479,6 +733,45 @@ internal sealed unsafe class WorldOverlayRenderer
             .ToList();
     }
 
+    private static int CountConfirmedPoints(TerritoryMaintenanceDocument? maintenance)
+    {
+        return maintenance?.Spots.Sum(spot =>
+            spot.ApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed)) ?? 0;
+    }
+
+    private static int CountDisabledPoints(TerritoryMaintenanceDocument? maintenance)
+    {
+        return maintenance?.Spots.Sum(spot =>
+            spot.ApproachPoints.Count(IsEffectiveDisabledApproachPoint)) ?? 0;
+    }
+
+    private static int CountMixedRiskCandidates(TerritoryMaintenanceDocument? maintenance)
+    {
+        if (maintenance is null)
+            return 0;
+
+        return maintenance.Spots
+            .SelectMany(spot => spot.MixedRiskBlocks)
+            .Sum(record =>
+            {
+                var candidateCount = record.CandidateIds
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .Distinct(StringComparer.Ordinal)
+                    .Count();
+                return candidateCount > 0 || string.IsNullOrWhiteSpace(record.BlockId) ? candidateCount : 1;
+            });
+    }
+
+    private static int CountRecordedRiskKeys(IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey)
+    {
+        return recordedOwnersByKey.Values.Count(owners =>
+            owners
+                .Select(owner => owner.FishingSpotId)
+                .Distinct()
+                .Skip(1)
+                .Any());
+    }
+
     private static Dictionary<string, List<CandidateRecordOwner>> BuildRecordedCandidateOwnerIndex(
         TerritoryMaintenanceDocument? maintenance)
     {
@@ -489,7 +782,7 @@ internal sealed unsafe class WorldOverlayRenderer
         foreach (var spot in maintenance.Spots)
         {
             var owner = new CandidateRecordOwner(spot.FishingSpotId, spot.Name);
-            foreach (var point in spot.ApproachPoints.Where(point => point.Status == ApproachPointStatus.Confirmed))
+            foreach (var point in spot.ApproachPoints.Where(IsTrustedConfirmedApproachPoint))
             {
                 AddRecordedOwner(ownersByKey, point.SourceCandidateId, owner);
                 AddRecordedOwner(ownersByKey, point.SourceCandidateFingerprint, owner);
@@ -596,6 +889,13 @@ internal sealed unsafe class WorldOverlayRenderer
             && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
     }
 
+    private static bool IsTrustedConfirmedApproachPoint(ApproachPoint point)
+    {
+        return point.Status == ApproachPointStatus.Confirmed
+            && (point.SourceKind == ApproachPointSourceKind.Candidate
+                || point.SourceKind == ApproachPointSourceKind.AutoCastFill);
+    }
+
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int virtualKey);
 
@@ -632,25 +932,26 @@ internal sealed unsafe class WorldOverlayRenderer
                 : $"{owner.Name}#{owner.FishingSpotId}"));
     }
 
-    private void DrawSurfaceDebug(
+    private OverlaySurfaceDrawStats DrawSurfaceDebug(
         ImDrawListPtr drawList,
         SpotWorkflowSession session,
         Vector3 playerPosition,
         float drawDistance,
-        int triangleLimit)
+        int triangleLimit,
+        bool collectPerfStats)
     {
         var debug = session.NearbyDebugOverlay;
         if (debug is null)
-            return;
+            return OverlaySurfaceDrawStats.Empty;
 
         if (debug.TerritoryId != 0 && debug.TerritoryId != session.CurrentTerritoryId)
-            return;
+            return OverlaySurfaceDrawStats.Empty;
 
-        var fishableDrawn = 0;
-        var walkableDrawn = 0;
         var limit = Math.Clamp(triangleLimit, 1, 512);
+        var fishableStats = OverlaySurfaceSetDrawStats.Empty;
+        var walkableStats = OverlaySurfaceSetDrawStats.Empty;
         if (session.OverlayShowFishableDebug)
-            fishableDrawn = DrawSurfaceDebugSet(
+            fishableStats = DrawSurfaceDebugSet(
                 drawList,
                 debug.FishableTriangles,
                 playerPosition,
@@ -659,10 +960,11 @@ internal sealed unsafe class WorldOverlayRenderer
                 "water",
                 FishableDebugEdgeColor,
                 FishableDebugFillColor,
-                FishableDebugTextColor);
+                FishableDebugTextColor,
+                collectPerfStats);
 
         if (session.OverlayShowWalkableDebug)
-            walkableDrawn = DrawSurfaceDebugSet(
+            walkableStats = DrawSurfaceDebugSet(
                 drawList,
                 debug.WalkableTriangles,
                 playerPosition,
@@ -671,17 +973,37 @@ internal sealed unsafe class WorldOverlayRenderer
                 "walk",
                 WalkableDebugEdgeColor,
                 WalkableDebugHatchColor,
-                WalkableDebugTextColor);
+                WalkableDebugTextColor,
+                collectPerfStats);
 
-        var candidateDrawn = DrawNearbyDebugCandidates(drawList, debug.Candidates, playerPosition, drawDistance, limit);
+        var nearbyCandidateStats = DrawNearbyDebugCandidates(
+            drawList,
+            debug.Candidates,
+            playerPosition,
+            drawDistance,
+            limit,
+            collectPerfStats);
+        var hudTiming = StartTiming(collectPerfStats);
+        var hudTextCount = 0;
         if (TryWorldToScreen(debug.PlayerPosition + new Vector3(0f, 3f, 0f), out var screen))
+        {
             drawList.AddText(
                 screen,
                 FishableDebugTextColor,
-                $"FPG surfaces water {fishableDrawn}/{debug.FishableTriangles.Count} walk {walkableDrawn}/{debug.WalkableTriangles.Count} cand {candidateDrawn}/{debug.Candidates.Count} r={debug.RadiusMeters:F0}m");
+                $"FPG surfaces water {fishableStats.DrawnCount}/{debug.FishableTriangles.Count} walk {walkableStats.DrawnCount}/{debug.WalkableTriangles.Count} cand {nearbyCandidateStats.DrawnCount}/{debug.Candidates.Count} r={debug.RadiusMeters:F0}m");
+            hudTextCount = 1;
+        }
+
+        var hudMs = StopTiming(hudTiming);
+        return new OverlaySurfaceDrawStats(
+            fishableStats,
+            walkableStats,
+            nearbyCandidateStats,
+            hudTextCount,
+            hudMs);
     }
 
-    private int DrawSurfaceDebugSet(
+    private OverlaySurfaceSetDrawStats DrawSurfaceDebugSet(
         ImDrawListPtr drawList,
         IReadOnlyList<DebugOverlayTriangle> source,
         Vector3 playerPosition,
@@ -690,11 +1012,13 @@ internal sealed unsafe class WorldOverlayRenderer
         string labelPrefix,
         uint edgeColor,
         uint surfaceColor,
-        uint textColor)
+        uint textColor,
+        bool collectPerfStats)
     {
         if (source.Count == 0)
-            return 0;
+            return OverlaySurfaceSetDrawStats.Empty;
 
+        var collectTiming = StartTiming(collectPerfStats);
         var triangles = source
             .Select(triangle => new
             {
@@ -703,23 +1027,40 @@ internal sealed unsafe class WorldOverlayRenderer
             })
             .Where(item => item.Distance <= drawDistance)
             .OrderBy(item => item.Distance)
-            .Take(triangleLimit)
             .ToList();
+        var visibleCount = triangles.Count;
+        if (triangles.Count > triangleLimit)
+            triangles.RemoveRange(triangleLimit, triangles.Count - triangleLimit);
+        var collectMs = StopTiming(collectTiming);
 
+        var drawTiming = StartTiming(collectPerfStats);
+        var lineCount = 0;
+        var pointCount = 0;
+        var filledTriangleCount = 0;
         foreach (var item in triangles)
         {
             var triangle = item.Triangle;
             if (labelPrefix == "water")
+            {
                 DrawWorldTriangleFilled(drawList, triangle.A, triangle.B, triangle.C, surfaceColor);
+                filledTriangleCount++;
+            }
             else
+            {
                 DrawWorldTriangleHatch(drawList, triangle, surfaceColor);
+                lineCount += CountTriangleHatchLines(triangle);
+            }
 
             DrawWorldLine(drawList, triangle.A, triangle.B, edgeColor);
             DrawWorldLine(drawList, triangle.B, triangle.C, edgeColor);
             DrawWorldLine(drawList, triangle.C, triangle.A, edgeColor);
+            lineCount += 3;
             DrawWorldPoint(drawList, triangle.Centroid, 2f, edgeColor, false);
+            pointCount++;
         }
+        var drawMs = StopTiming(drawTiming);
 
+        var labelTiming = StartTiming(collectPerfStats);
         var labelIndex = 0;
         foreach (var item in triangles.Take(MaxSurfaceDebugLabels))
         {
@@ -730,21 +1071,34 @@ internal sealed unsafe class WorldOverlayRenderer
                 $"{labelPrefix}{labelIndex} {FormatMaterial(item.Triangle.Material)} {item.Distance:F1}m",
                 textColor);
         }
+        var labelMs = StopTiming(labelTiming);
 
-        return triangles.Count;
+        return new OverlaySurfaceSetDrawStats(
+            source.Count,
+            visibleCount,
+            triangles.Count,
+            lineCount,
+            pointCount,
+            filledTriangleCount,
+            labelIndex,
+            collectMs,
+            drawMs,
+            labelMs);
     }
 
-    private int DrawNearbyDebugCandidates(
+    private OverlayNearbyDebugCandidateStats DrawNearbyDebugCandidates(
         ImDrawListPtr drawList,
         IReadOnlyList<ApproachCandidate> source,
         Vector3 playerPosition,
         float drawDistance,
-        int candidateLimit)
+        int candidateLimit,
+        bool collectPerfStats)
     {
         if (source.Count == 0)
-            return 0;
+            return OverlayNearbyDebugCandidateStats.Empty;
 
         var playerPoint = Point3.From(playerPosition);
+        var collectTiming = StartTiming(collectPerfStats);
         var candidates = source
             .Select(candidate => new
             {
@@ -754,16 +1108,24 @@ internal sealed unsafe class WorldOverlayRenderer
             .Where(item => item.Distance <= drawDistance)
             .OrderBy(item => item.Distance)
             .ThenBy(item => item.Candidate.CandidateId, StringComparer.Ordinal)
-            .Take(candidateLimit)
             .ToList();
+        var visibleCount = candidates.Count;
+        if (candidates.Count > candidateLimit)
+            candidates.RemoveRange(candidateLimit, candidates.Count - candidateLimit);
+        var collectMs = StopTiming(collectTiming);
 
         var labelCount = 0;
+        var lineCount = 0;
+        var pointCount = 0;
+        var drawTiming = StartTiming(collectPerfStats);
         foreach (var item in candidates)
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
             DrawFacingGuide(drawList, standing, candidate.Rotation, WarningColor);
+            lineCount++;
             DrawWorldPoint(drawList, standing, 3f, WarningColor, true);
+            pointCount++;
 
             if (labelCount < MaxCandidateLabels)
             {
@@ -775,51 +1137,100 @@ internal sealed unsafe class WorldOverlayRenderer
                 labelCount++;
             }
         }
+        var drawMs = StopTiming(drawTiming);
 
-        return candidates.Count;
+        return new OverlayNearbyDebugCandidateStats(
+            source.Count,
+            visibleCount,
+            candidates.Count,
+            lineCount,
+            pointCount,
+            labelCount,
+            collectMs,
+            drawMs);
     }
 
-    private void DrawTerritoryCache(
+    private OverlayCandidateDrawStats DrawTerritoryCache(
         ImDrawListPtr drawList,
         SpotWorkflowSession session,
         Vector3 playerPosition,
         float drawDistance,
-        int candidateLimit)
+        int candidateLimit,
+        bool collectPerfStats)
     {
         var blocks = session.CurrentTerritoryBlocks;
         if (blocks.Count == 0)
-            return;
+            return OverlayCandidateDrawStats.Empty;
 
         var territoryId = session.CurrentTerritorySurvey?.TerritoryId ?? session.SelectedTerritoryId;
+        var ownerIndexCacheHit = ReferenceEquals(cachedMaintenance, session.CurrentTerritoryMaintenance);
+        var ownerIndexTiming = StartTiming(collectPerfStats);
         var ownerIndex = GetOwnerIndex(session.CurrentTerritoryMaintenance);
-        var recordedOwnersByKey = ownerIndex.RecordedOwnersByKey;
-        var riskOwnersByKey = ownerIndex.RiskOwnersByKey;
-        var disabledOwnersByKey = ownerIndex.DisabledOwnersByKey;
+        var ownerIndexMs = StopTiming(ownerIndexTiming);
+        var statusIndexCacheHit = session.CurrentTerritorySurvey is { } survey
+            && IsCandidateStatusIndexCached(survey, territoryId, ownerIndex);
+        var statusIndexTiming = StartTiming(collectPerfStats);
+        var statusIndex = session.CurrentTerritorySurvey is { } currentSurvey
+            ? GetCandidateStatusIndex(currentSurvey, territoryId, ownerIndex)
+            : OverlayCandidateStatusIndex.Empty;
+        var statusIndexMs = StopTiming(statusIndexTiming);
         var playerPoint = Point3.From(playerPosition);
-        var candidates = blocks
-            .SelectMany(block => block.Candidates)
-            .Select(candidate => new
-            {
-                Candidate = candidate,
-                Distance = candidate.Position.HorizontalDistanceTo(playerPoint),
-            })
-            .Where(item => item.Distance <= drawDistance)
-            .OrderBy(item => item.Distance)
-            .ThenBy(item => item.Candidate.CandidateId, StringComparer.Ordinal)
-            .Take(candidateLimit)
-            .ToList();
+        var totalCandidateCount = blocks.Sum(block => block.Candidates.Count);
+        var collectTiming = StartTiming(collectPerfStats);
+        var visibleCandidates = CollectVisibleCandidates(
+                blocks.SelectMany(block => block.Candidates),
+                totalCandidateCount,
+                playerPoint,
+                drawDistance,
+                candidateLimit);
+        var collectMs = StopTiming(collectTiming);
+        var candidates = visibleCandidates.Candidates;
 
+        var lineCount = 0;
+        var pointCount = 0;
+        var drawLoopTiming = StartTiming(collectPerfStats);
         foreach (var item in candidates)
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var isConfirmed = HasRecordedOwner(candidate, territoryId, recordedOwnersByKey);
-            var isRisk = HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey);
-            var isDisabled = HasDisabledOwner(candidate, territoryId, disabledOwnersByKey);
+            var status = GetCandidateStatus(candidate, territoryId, ownerIndex, statusIndex);
+            var isConfirmed = status.IsConfirmed;
+            var isRisk = status.IsRisk;
+            var isDisabled = status.IsDisabled;
             var color = isDisabled ? DisabledColor : isRisk ? RiskColor : isConfirmed ? ConfirmedColor : TerritoryCandidateColor;
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
+            lineCount++;
             DrawWorldPoint(drawList, standing, isDisabled ? 3f : isRisk ? 2.5f : isConfirmed ? 3f : 2f, color, true);
+            pointCount++;
         }
+        var drawLoopMs = StopTiming(drawLoopTiming);
+
+        return new OverlayCandidateDrawStats(
+            "territoryCache",
+            totalCandidateCount,
+            visibleCandidates.ClippedCount,
+            candidates.Count,
+            lineCount,
+            pointCount,
+            0,
+            0,
+            0,
+            blocks.Count,
+            0,
+            0,
+            0,
+            statusIndex.RecordedTotal,
+            statusIndex.RiskTotal,
+            statusIndex.DisabledTotal,
+            ownerIndexCacheHit,
+            statusIndexCacheHit,
+            ownerIndexMs,
+            statusIndexMs,
+            collectMs,
+            drawLoopMs,
+            0d,
+            0d,
+            0d);
     }
 
     private OverlayOwnerIndex GetOwnerIndex(TerritoryMaintenanceDocument? maintenance)
@@ -828,52 +1239,162 @@ internal sealed unsafe class WorldOverlayRenderer
             return cachedOwnerIndex;
 
         cachedMaintenance = maintenance;
+        var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(maintenance);
+        var riskOwnersByKey = BuildMixedRiskCandidateOwnerIndex(maintenance);
         cachedOwnerIndex = new OverlayOwnerIndex(
-            BuildRecordedCandidateOwnerIndex(maintenance),
-            BuildMixedRiskCandidateOwnerIndex(maintenance),
-            BuildDisabledCandidateOwnerIndex(maintenance));
+            recordedOwnersByKey,
+            riskOwnersByKey,
+            BuildDisabledCandidateOwnerIndex(maintenance),
+            CountConfirmedPoints(maintenance),
+            CountMixedRiskCandidates(maintenance),
+            CountDisabledPoints(maintenance),
+            CountRecordedRiskKeys(recordedOwnersByKey));
         return cachedOwnerIndex;
     }
 
-    private void DrawTerritoryBlockLabels(
+    private OverlayCandidateStatusIndex GetCandidateStatusIndex(
+        TerritorySurveyDocument survey,
+        uint territoryId,
+        OverlayOwnerIndex ownerIndex)
+    {
+        if (IsCandidateStatusIndexCached(survey, territoryId, ownerIndex))
+            return cachedStatusIndex;
+
+        cachedStatusSurvey = survey;
+        cachedStatusOwnerIndex = ownerIndex;
+        cachedStatusTerritoryId = territoryId;
+        cachedStatusIndex = new OverlayCandidateStatusIndex(
+            new Dictionary<string, OverlayCandidateStatus>(
+                Math.Min(Math.Max(survey.Candidates.Count / 8, 256), 4096),
+                StringComparer.Ordinal),
+            ownerIndex.RecordedPointCount,
+            ownerIndex.RiskCandidateCount + ownerIndex.RecordedRiskKeyCount,
+            ownerIndex.DisabledPointCount);
+        return cachedStatusIndex;
+    }
+
+    private bool IsCandidateStatusIndexCached(
+        TerritorySurveyDocument survey,
+        uint territoryId,
+        OverlayOwnerIndex ownerIndex)
+    {
+        return ReferenceEquals(cachedStatusSurvey, survey)
+            && ReferenceEquals(cachedStatusOwnerIndex, ownerIndex)
+            && cachedStatusTerritoryId == territoryId;
+    }
+
+    private static OverlayCandidateStatus GetCandidateStatus(
+        ApproachCandidate candidate,
+        uint territoryId,
+        OverlayOwnerIndex ownerIndex,
+        OverlayCandidateStatusIndex statusIndex)
+    {
+        var key = GetCandidateStatusKey(candidate, territoryId);
+        if (!string.IsNullOrWhiteSpace(key)
+            && statusIndex.StatusByCandidateKey.TryGetValue(key, out var cachedStatus))
+            return cachedStatus;
+
+        var status = CreateCandidateStatus(candidate, territoryId, ownerIndex);
+        if (!string.IsNullOrWhiteSpace(key))
+            statusIndex.StatusByCandidateKey[key] = status;
+        return status;
+    }
+
+    private static OverlayCandidateStatus CreateCandidateStatus(
+        ApproachCandidate candidate,
+        uint territoryId,
+        OverlayOwnerIndex ownerIndex)
+    {
+        var isConfirmed = HasRecordedOwner(candidate, territoryId, ownerIndex.RecordedOwnersByKey);
+        var isRisk = HasVisibleRiskOwner(
+            candidate,
+            territoryId,
+            ownerIndex.RecordedOwnersByKey,
+            ownerIndex.RiskOwnersByKey);
+        var isDisabled = HasDisabledOwner(candidate, territoryId, ownerIndex.DisabledOwnersByKey);
+        return new OverlayCandidateStatus(isConfirmed, isRisk, isDisabled);
+    }
+
+    private static string GetCandidateStatusKey(ApproachCandidate candidate, uint territoryId)
+    {
+        return !string.IsNullOrWhiteSpace(candidate.CandidateId)
+            ? candidate.CandidateId
+            : GetTerritoryCandidateFingerprint(candidate, territoryId);
+    }
+
+    private OverlayBlockLabelDrawStats DrawTerritoryBlockLabels(
         ImDrawListPtr drawList,
         SpotWorkflowSession session,
         Vector3 playerPosition,
         float drawDistance,
         uint territoryId,
-        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey,
-        IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey,
-        IReadOnlyDictionary<string, List<CandidateRecordOwner>> disabledOwnersByKey)
+        OverlayOwnerIndex ownerIndex,
+        OverlayCandidateStatusIndex statusIndex,
+        bool collectPerfStats)
     {
         if (session.CurrentTerritoryBlocks.Count == 0)
-            return;
+            return OverlayBlockLabelDrawStats.Empty;
 
         var playerPoint = Point3.From(playerPosition);
-        foreach (var item in session.CurrentTerritoryBlocks
-            .Select(block => new
-            {
-                Block = block,
-                Center = block.Center,
-                Distance = block.Center.HorizontalDistanceTo(playerPoint),
-            })
-            .Where(item => item.Distance <= drawDistance)
-            .OrderBy(item => item.Distance)
-            .ThenBy(item => item.Block.BlockId, StringComparer.Ordinal)
-            .Take(32))
+        var collectTiming = StartTiming(collectPerfStats);
+        var visibleBlocks = new List<OverlayBlockDistance>(Math.Min(session.CurrentTerritoryBlocks.Count, 32));
+        var visibleBlockCount = 0;
+        foreach (var block in session.CurrentTerritoryBlocks)
         {
-            var confirmedCount = item.Block.Candidates.Count(candidate =>
-                HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
-            var riskCount = item.Block.Candidates.Count(candidate =>
-                HasVisibleRiskOwner(candidate, territoryId, recordedOwnersByKey, riskOwnersByKey));
-            var disabledCount = item.Block.Candidates.Count(candidate =>
-                HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
+            var distance = block.Center.HorizontalDistanceTo(playerPoint);
+            if (distance > drawDistance)
+                continue;
+
+            visibleBlockCount++;
+            visibleBlocks.Add(new OverlayBlockDistance(block, distance));
+        }
+
+        visibleBlocks.Sort(static (left, right) =>
+        {
+            var distanceCompare = left.Distance.CompareTo(right.Distance);
+            return distanceCompare != 0
+                ? distanceCompare
+                : string.Compare(left.Block.BlockId, right.Block.BlockId, StringComparison.Ordinal);
+        });
+        if (visibleBlocks.Count > 32)
+            visibleBlocks.RemoveRange(32, visibleBlocks.Count - 32);
+        var collectMs = StopTiming(collectTiming);
+
+        var candidateCheckCount = 0;
+        var drawTiming = StartTiming(collectPerfStats);
+        foreach (var item in visibleBlocks)
+        {
+            var confirmedCount = 0;
+            var riskCount = 0;
+            var disabledCount = 0;
+            foreach (var candidate in item.Block.Candidates)
+            {
+                candidateCheckCount++;
+                var status = GetCandidateStatus(candidate, territoryId, ownerIndex, statusIndex);
+                if (status.IsConfirmed)
+                    confirmedCount++;
+                if (status.IsRisk)
+                    riskCount++;
+                if (status.IsDisabled)
+                    disabledCount++;
+            }
+
             var label = $"{ShortBlockId(item.Block.BlockId)} {confirmedCount}/{item.Block.Candidates.Count}";
             if (riskCount > 0)
                 label += $" r{riskCount}";
             if (disabledCount > 0)
                 label += $" x{disabledCount}";
-            DrawWorldText(drawList, ToVector3(item.Center) + new Vector3(0f, 2f, 0f), label, BlockLabelColor);
+            DrawWorldText(drawList, ToVector3(item.Block.Center) + new Vector3(0f, 2f, 0f), label, BlockLabelColor);
         }
+        var drawMs = StopTiming(drawTiming);
+
+        return new OverlayBlockLabelDrawStats(
+            session.CurrentTerritoryBlocks.Count,
+            visibleBlockCount,
+            visibleBlocks.Count,
+            candidateCheckCount,
+            collectMs,
+            drawMs);
     }
 
     private void DrawWorldCircle(ImDrawListPtr drawList, Vector3 center, float radius, uint color)
@@ -899,15 +1420,7 @@ internal sealed unsafe class WorldOverlayRenderer
 
     private void DrawWorldTriangleHatch(ImDrawListPtr drawList, DebugOverlayTriangle triangle, uint color)
     {
-        var maxLength = MathF.Max(
-            HorizontalDistance(triangle.A, triangle.B),
-            MathF.Max(
-                HorizontalDistance(triangle.B, triangle.C),
-                HorizontalDistance(triangle.C, triangle.A)));
-        var stripeCount = Math.Clamp(
-            (int)MathF.Ceiling(maxLength / DebugSurfaceHatchSpacingMeters),
-            2,
-            24);
+        var stripeCount = CountTriangleHatchLines(triangle);
 
         for (var index = 1; index <= stripeCount; index++)
         {
@@ -916,6 +1429,19 @@ internal sealed unsafe class WorldOverlayRenderer
             var end = Vector3.Lerp(triangle.A, triangle.C, t);
             DrawWorldLine(drawList, start, end, color);
         }
+    }
+
+    private static int CountTriangleHatchLines(DebugOverlayTriangle triangle)
+    {
+        var maxLength = MathF.Max(
+            HorizontalDistance(triangle.A, triangle.B),
+            MathF.Max(
+                HorizontalDistance(triangle.B, triangle.C),
+                HorizontalDistance(triangle.C, triangle.A)));
+        return Math.Clamp(
+            (int)MathF.Ceiling(maxLength / DebugSurfaceHatchSpacingMeters),
+            2,
+            24);
     }
 
     private void DrawWorldTriangleFilled(ImDrawListPtr drawList, Vector3 a, Vector3 b, Vector3 c, uint color)
@@ -1026,17 +1552,209 @@ internal sealed unsafe class WorldOverlayRenderer
         return value.Length <= 10 ? value : value[..10];
     }
 
+    private readonly record struct OverlayPerfFrameSample(
+        double TotalMs,
+        double TargetMs,
+        double SurfaceDebugMs,
+        OverlaySurfaceDrawStats SurfaceDebugStats,
+        OverlayCandidateDrawStats TerritoryCacheStats,
+        OverlayCandidateDrawStats CandidateStats,
+        float DrawDistance,
+        int CandidateLimit,
+        bool CanDrawCurrentTerritory,
+        bool ShowCandidates)
+    {
+        public static OverlayPerfFrameSample Empty { get; } = new(
+            0d,
+            0d,
+            0d,
+            OverlaySurfaceDrawStats.Empty,
+            OverlayCandidateDrawStats.Empty,
+            OverlayCandidateDrawStats.Empty,
+            0f,
+            0,
+            false,
+            false);
+
+        public bool HasData => TotalMs > 0d;
+    }
+
+    private readonly record struct OverlayCandidateDrawStats(
+        string Source,
+        int SourceCount,
+        int VisibleCount,
+        int DrawnCount,
+        int LineCount,
+        int PointCount,
+        int LabelCount,
+        int StatusTextCount,
+        int SelectableCount,
+        int BlockLabelsSource,
+        int BlockLabelsVisible,
+        int BlockLabelsDrawn,
+        int BlockLabelCandidateChecks,
+        int StatusRecordedTotal,
+        int StatusRiskTotal,
+        int StatusDisabledTotal,
+        bool OwnerIndexCacheHit,
+        bool StatusIndexCacheHit,
+        double OwnerIndexMs,
+        double StatusIndexMs,
+        double CollectMs,
+        double DrawLoopMs,
+        double HudTextMs,
+        double BlockLabelsMs,
+        double SelectionMs)
+    {
+        public static OverlayCandidateDrawStats Empty { get; } = new(
+            "none",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            true,
+            true,
+            0d,
+            0d,
+            0d,
+            0d,
+            0d,
+            0d,
+            0d);
+
+        public bool HasData => SourceCount > 0
+            || VisibleCount > 0
+            || DrawnCount > 0
+            || BlockLabelsSource > 0
+            || BlockLabelsVisible > 0
+            || BlockLabelsDrawn > 0;
+
+        public double TotalMs => OwnerIndexMs
+            + StatusIndexMs
+            + CollectMs
+            + DrawLoopMs
+            + HudTextMs
+            + BlockLabelsMs
+            + SelectionMs;
+    }
+
+    private readonly record struct OverlaySurfaceDrawStats(
+        OverlaySurfaceSetDrawStats Fishable,
+        OverlaySurfaceSetDrawStats Walkable,
+        OverlayNearbyDebugCandidateStats NearbyCandidates,
+        int HudTextCount,
+        double HudMs)
+    {
+        public static OverlaySurfaceDrawStats Empty { get; } = new(
+            OverlaySurfaceSetDrawStats.Empty,
+            OverlaySurfaceSetDrawStats.Empty,
+            OverlayNearbyDebugCandidateStats.Empty,
+            0,
+            0d);
+
+        public bool HasData => Fishable.HasData || Walkable.HasData || NearbyCandidates.HasData || HudTextCount > 0;
+        public int LineCount => Fishable.LineCount + Walkable.LineCount + NearbyCandidates.LineCount;
+        public int PointCount => Fishable.PointCount + Walkable.PointCount + NearbyCandidates.PointCount;
+        public int FilledTriangleCount => Fishable.FilledTriangleCount + Walkable.FilledTriangleCount;
+        public int LabelCount => Fishable.LabelCount + Walkable.LabelCount + NearbyCandidates.LabelCount;
+        public double TotalMs => Fishable.TotalMs + Walkable.TotalMs + NearbyCandidates.TotalMs + HudMs;
+    }
+
+    private readonly record struct OverlaySurfaceSetDrawStats(
+        int SourceCount,
+        int VisibleCount,
+        int DrawnCount,
+        int LineCount,
+        int PointCount,
+        int FilledTriangleCount,
+        int LabelCount,
+        double CollectMs,
+        double DrawMs,
+        double LabelMs)
+    {
+        public static OverlaySurfaceSetDrawStats Empty { get; } = new(0, 0, 0, 0, 0, 0, 0, 0d, 0d, 0d);
+        public bool HasData => SourceCount > 0 || VisibleCount > 0 || DrawnCount > 0;
+        public double TotalMs => CollectMs + DrawMs + LabelMs;
+    }
+
+    private readonly record struct OverlayNearbyDebugCandidateStats(
+        int SourceCount,
+        int VisibleCount,
+        int DrawnCount,
+        int LineCount,
+        int PointCount,
+        int LabelCount,
+        double CollectMs,
+        double DrawMs)
+    {
+        public static OverlayNearbyDebugCandidateStats Empty { get; } = new(0, 0, 0, 0, 0, 0, 0d, 0d);
+        public bool HasData => SourceCount > 0 || VisibleCount > 0 || DrawnCount > 0;
+        public double TotalMs => CollectMs + DrawMs;
+    }
+
+    private readonly record struct OverlayBlockLabelDrawStats(
+        int SourceBlockCount,
+        int VisibleBlockCount,
+        int DrawnLabelCount,
+        int CandidateCheckCount,
+        double CollectMs,
+        double DrawMs)
+    {
+        public static OverlayBlockLabelDrawStats Empty { get; } = new(0, 0, 0, 0, 0d, 0d);
+        public double TotalMs => CollectMs + DrawMs;
+    }
+
+    private readonly record struct OverlayBlockDistance(SurveyBlock Block, float Distance);
+
+    private readonly record struct VisibleCandidate(ApproachCandidate Candidate, float Distance);
+
+    private sealed record VisibleCandidateCollection(IReadOnlyList<VisibleCandidate> Candidates, int ClippedCount);
+
+    private readonly record struct OverlayCandidateStatus(bool IsConfirmed, bool IsRisk, bool IsDisabled);
+
     private sealed record CandidateRecordOwner(uint FishingSpotId, string Name);
     private sealed record OverlayCandidateScreenPoint(ApproachCandidate Candidate, Vector2 ScreenPosition);
+
+    private sealed record OverlayCandidateStatusIndex(
+        Dictionary<string, OverlayCandidateStatus> StatusByCandidateKey,
+        int RecordedTotal,
+        int RiskTotal,
+        int DisabledTotal)
+    {
+        public static OverlayCandidateStatusIndex Empty { get; } = new(
+            new Dictionary<string, OverlayCandidateStatus>(StringComparer.Ordinal),
+            0,
+            0,
+            0);
+    }
 
     private sealed record OverlayOwnerIndex(
         IReadOnlyDictionary<string, List<CandidateRecordOwner>> RecordedOwnersByKey,
         IReadOnlyDictionary<string, List<CandidateRecordOwner>> RiskOwnersByKey,
-        IReadOnlyDictionary<string, List<CandidateRecordOwner>> DisabledOwnersByKey)
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> DisabledOwnersByKey,
+        int RecordedPointCount,
+        int RiskCandidateCount,
+        int DisabledPointCount,
+        int RecordedRiskKeyCount)
     {
         public static OverlayOwnerIndex Empty { get; } = new(
             new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal),
             new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal),
-            new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal));
+            new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal),
+            0,
+            0,
+            0,
+            0);
     }
 }

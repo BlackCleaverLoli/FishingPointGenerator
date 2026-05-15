@@ -11,6 +11,7 @@ public sealed class SpotJsonStore
 
     private readonly string rootDirectory;
     private readonly JsonSerializerOptions jsonOptions;
+    private readonly JsonSerializerOptions compactJsonOptions;
 
     public SpotJsonStore(string rootDirectory)
     {
@@ -22,6 +23,11 @@ public sealed class SpotJsonStore
             WriteIndented = true,
         };
         jsonOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        compactJsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = false,
+        };
+        compactJsonOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
     }
 
     public string GetCatalogPath()
@@ -146,20 +152,20 @@ public sealed class SpotJsonStore
         WriteJson(GetReportPath(report.Key), report with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
-    public void SaveExport(List<ExportedApproachPoint> points)
+    public void SaveExport(ExportDocument export)
     {
-        ArgumentNullException.ThrowIfNull(points);
+        ArgumentNullException.ThrowIfNull(export);
 
-        WriteJson(GetExportPath(), points);
+        WriteJson(GetExportPath(), export, compactJsonOptions);
     }
 
-    private void WriteJson<T>(string path, T value)
+    private void WriteJson<T>(string path, T value, JsonSerializerOptions? options = null)
     {
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
 
-        File.WriteAllText(path, JsonSerializer.Serialize(value, jsonOptions) + "\n");
+        File.WriteAllText(path, JsonSerializer.Serialize(value, options ?? jsonOptions) + "\n");
     }
 
     private static bool DeleteFile(string path)

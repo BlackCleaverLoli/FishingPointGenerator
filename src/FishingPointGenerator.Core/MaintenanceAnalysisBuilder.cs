@@ -97,7 +97,10 @@ public sealed class MaintenanceAnalysisBuilder
 
     private static int CountConfirmedPoints(SpotMaintenanceRecord? maintenance)
     {
-        return maintenance?.ApproachPoints.Count(point => point.Status == ApproachPointStatus.Confirmed) ?? 0;
+        return maintenance?.ApproachPoints.Count(point =>
+            point.Status == ApproachPointStatus.Confirmed
+            && (point.SourceKind == ApproachPointSourceKind.Candidate
+                || point.SourceKind == ApproachPointSourceKind.AutoCastFill)) ?? 0;
     }
 
     private static bool HasDecision(SpotReviewDecision decisions, SpotReviewDecision flag)
