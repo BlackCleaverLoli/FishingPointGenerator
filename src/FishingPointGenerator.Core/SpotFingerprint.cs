@@ -14,6 +14,24 @@ public static class SpotFingerprint
         return CreateFingerprint("sp_", key, position, rotation);
     }
 
+    public static string CreateTerritoryCandidateFingerprint(uint territoryId, Point3 position, float rotation)
+    {
+        if (territoryId == 0)
+            throw new ArgumentException("TerritoryId 必须非 0。", nameof(territoryId));
+
+        var normalizedRotation = NormalizeRotation(rotation);
+        var payload = string.Join(
+            "|",
+            territoryId.ToString(),
+            Quantize(position.X, StandingPositionQuantumMeters).ToString(),
+            Quantize(position.Y, StandingPositionQuantumMeters).ToString(),
+            Quantize(position.Z, StandingPositionQuantumMeters).ToString(),
+            Quantize(normalizedRotation, RotationQuantumRadians).ToString());
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload));
+        return "tc_" + Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant();
+    }
+
     public static string CreateApproachPointId(SpotKey key, Point3 position, float rotation)
     {
         return CreateFingerprint("ap_", key, position, rotation);

@@ -8,6 +8,7 @@ namespace FishingPointGenerator.Plugin.Services.GameInteraction;
 
 internal sealed unsafe class PlayerFishingActionService
 {
+    private const uint FishingCastActionId = 289;
     private const uint MountRouletteGeneralActionId = 9;
     private const uint FishingInterruptActionId = 299;
     private static readonly TimeSpan MountRetryDelay = TimeSpan.FromSeconds(1.5);
@@ -110,17 +111,36 @@ internal sealed unsafe class PlayerFishingActionService
         return condition[ConditionFlag.Fishing];
     }
 
-    public bool CastIfReady()
+    public bool IsMountedOrFlying()
+    {
+        var condition = DService.Instance().Condition;
+        return condition[ConditionFlag.Mounted]
+            || condition[ConditionFlag.RidingPillion]
+            || IsPlayerFlying();
+    }
+
+    public FishingCastAttempt TryCast(float rotation)
     {
         if (!IsFreeForAutoSurvey())
-            return false;
+            return FishingCastAttempt.NotFree;
+
+        if (!Face(rotation))
+            return FishingCastAttempt.PlayerUnavailable;
 
         if (DateTimeOffset.UtcNow - lastCastAttemptAt < CastRetryDelay)
-            return false;
+            return FishingCastAttempt.Throttled;
+
+        var actionManager = ActionManager.Instance();
+        if (actionManager == null)
+            return FishingCastAttempt.ActionManagerUnavailable;
+
+        if (actionManager->GetActionStatus(ActionType.Action, FishingCastActionId) != 0)
+            return FishingCastAttempt.ActionUnavailable;
 
         lastCastAttemptAt = DateTimeOffset.UtcNow;
-        FishingCommand.Cast();
-        return true;
+        return actionManager->UseAction(ActionType.Action, FishingCastActionId, 0)
+            ? FishingCastAttempt.Issued
+            : FishingCastAttempt.ActionRejected;
     }
 
     public FishingInterruptAttempt InterruptFishingIfNeeded()
@@ -186,4 +206,15 @@ internal enum FishingInterruptAttempt
     Idle,
     Issued,
     Waiting,
+}
+
+internal enum FishingCastAttempt
+{
+    Issued,
+    NotFree,
+    PlayerUnavailable,
+    Throttled,
+    ActionManagerUnavailable,
+    ActionUnavailable,
+    ActionRejected,
 }

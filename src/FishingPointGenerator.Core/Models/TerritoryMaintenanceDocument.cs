@@ -17,7 +17,20 @@ public sealed record SpotMaintenanceRecord
     public string ReviewNote { get; init; } = string.Empty;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<ApproachPoint> ApproachPoints { get; init; } = [];
+    public List<MixedRiskBlockRecord> MixedRiskBlocks { get; init; } = [];
     public List<SpotEvidenceEvent> Evidence { get; init; } = [];
+}
+
+public sealed record MixedRiskBlockRecord
+{
+    public string BlockId { get; init; } = string.Empty;
+    public string SurfaceGroupId { get; init; } = string.Empty;
+    public List<string> CandidateIds { get; init; } = [];
+    public List<uint> ConflictingFishingSpotIds { get; init; } = [];
+    public int DisabledPointCount { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
+    public string Note { get; init; } = string.Empty;
 }
 
 public enum ApproachPointStatus

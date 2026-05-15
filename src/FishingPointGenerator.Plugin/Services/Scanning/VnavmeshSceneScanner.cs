@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Plugin.Services;
+using FishingPointGenerator.Core;
 using FishingPointGenerator.Core.Geometry;
 using FishingPointGenerator.Core.Models;
 using OmenTools;
@@ -314,9 +315,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         diagnostics?.LogStep("order-candidates", orderStopwatch, $"input={candidates.Count} output={orderedCandidates.Count}");
 
         var result = orderedCandidates
-            .Select((candidate, index) => new ApproachCandidate
+            .Select(candidate => new ApproachCandidate
             {
-                CandidateId = $"scene_{territoryId}_{index + 1:D5}",
+                CandidateId = SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                    territoryId,
+                    Point3.From(candidate.Position),
+                    candidate.Rotation),
                 TerritoryId = territoryId,
                 SurfaceGroupId = candidate.SurfaceGroupId,
                 Position = Point3.From(candidate.Position),
@@ -1566,6 +1570,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         {
             var direction = DirectionFromAngle(angle);
             var rayPoint = CreateProbePoint(walkablePoint, direction, CandidateFishableRayMaxDistance) + new Vector3(0f, CandidateFishableRayHeight, 0f);
+            if (!queryCache.HasClearRayDropHorizontalLine(walkablePoint, rayPoint))
+                return null;
+
             var result = TryFindRayDropFishableTarget(
                 territoryId,
                 rayPoint,
@@ -1612,6 +1619,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         {
             var direction = DirectionFromAngle(angle);
             var rayPoint = CreateProbePoint(walkablePoint, direction, CandidateFishableRayMaxDistance) + new Vector3(0f, CandidateFishableRayHeight, 0f);
+            if (!queryCache.HasClearRayDropHorizontalLine(walkablePoint, rayPoint))
+                return null;
+
             var result = TryFindRayDropFishableTarget(rayPoint, walkablePoint, nearbyBlocks, queryCache, out var target);
             if (result == RayDropProbeResult.Miss)
                 return null;
@@ -3532,6 +3542,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         private readonly Dictionary<ProbePointKey, bool> standingClearance = [];
         private readonly Dictionary<ProbePointKey, bool> fishableCovered = [];
         private readonly Dictionary<SightLineKey, bool> clearFacingCorridor = [];
+        private readonly Dictionary<SightLineKey, bool> clearRayDropHorizontalLine = [];
 
         public ScanQueryCache(
             TriangleIndex walkableIndex,
@@ -3618,8 +3629,17 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 return cached.Found;
             }
 
+            var rayPoint = probe + new Vector3(0f, CandidateFishableRayHeight, 0f);
+            if (!HasClearRayDropHorizontalLine(candidatePosition, rayPoint))
+            {
+                fishablePoint = default;
+                blocked = true;
+                facingFishable[key] = new CachedVector3Result(false, blocked, fishablePoint);
+                return false;
+            }
+
             var result = TryFindRayDropFishableTarget(
-                probe + new Vector3(0f, CandidateFishableRayHeight, 0f),
+                rayPoint,
                 candidatePosition,
                 [target.Block],
                 this,
@@ -3631,6 +3651,22 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             if (found && diagnostics is not null)
                 diagnostics.FacingFishableHits++;
             return found;
+        }
+
+        public bool HasClearRayDropHorizontalLine(Vector3 walkablePoint, Vector3 rayPoint)
+        {
+            var start = walkablePoint + new Vector3(0f, CandidateFishableRayHeight, 0f);
+            if (HorizontalDistance(start, rayPoint) <= 0f)
+                return true;
+
+            var key = SightLineKey.From(start, rayPoint);
+            if (!clearRayDropHorizontalLine.TryGetValue(key, out var result))
+            {
+                result = !collisionBlockerIndex.IntersectsSegment(start, rayPoint);
+                clearRayDropHorizontalLine[key] = result;
+            }
+
+            return result;
         }
 
         public bool HasClearFishableAccess(Vector3 walkablePoint, Vector3 fishablePoint)

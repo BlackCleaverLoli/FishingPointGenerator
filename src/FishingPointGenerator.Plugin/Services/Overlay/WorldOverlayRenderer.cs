@@ -176,10 +176,12 @@ internal sealed unsafe class WorldOverlayRenderer
         bool isConfirmed,
         CandidateSelection? selection)
     {
-        var status = isConfirmed
-            ? "已记录"
-            : isSelectedCandidate && selection is not null
-                ? $"当前/{selection.ModeText}"
+        var status = isSelectedCandidate && selection is not null
+            ? isConfirmed
+                ? $"当前/已记录/{selection.ModeText}"
+                : $"当前/{selection.ModeText}"
+            : isConfirmed
+                ? "已记录"
                 : "未记录";
         var path = isSelectedCandidate && selection?.PathLengthMeters is { } pathLength
             ? $" path={pathLength:F1}m"

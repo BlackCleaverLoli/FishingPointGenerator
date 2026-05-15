@@ -34,21 +34,6 @@ public sealed class MaintenanceAnalysisBuilder
 
         var confirmedCount = CountConfirmedPoints(maintenance);
         var candidateCount = scan?.Candidates.Count ?? 0;
-        var hasMixedRisk = scan?.Candidates.Any(candidate =>
-            candidate.NearbyFishingSpotIds.Any(id => id != 0 && id != target.FishingSpotId)) ?? false;
-
-        if (hasMixedRisk && !HasDecision(reviewDecision, SpotReviewDecision.AllowRiskExport))
-        {
-            return new SpotAnalysis
-            {
-                Key = target.Key,
-                Status = SpotAnalysisStatus.MixedRisk,
-                CandidateCount = candidateCount,
-                ConfirmedApproachPointCount = confirmedCount,
-                HasMixedRisk = true,
-                Messages = ["一个或多个候选点接近其它 FishingSpot 目标。"],
-            };
-        }
 
         if (confirmedCount > 0)
         {
@@ -63,7 +48,6 @@ public sealed class MaintenanceAnalysisBuilder
                 Status = status,
                 CandidateCount = candidateCount,
                 ConfirmedApproachPointCount = confirmedCount,
-                HasMixedRisk = hasMixedRisk,
             };
         }
 

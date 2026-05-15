@@ -59,13 +59,9 @@ internal sealed class SpotScanService
             .Select(candidate => CreateSpotCandidate(target, catalogTargets, candidate))
             .GroupBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .Select(group => group
-                .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
-                .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
-                .ThenBy(candidate => candidate.SourceCandidateId, StringComparer.Ordinal)
+                .OrderBy(candidate => candidate.SourceCandidateId, StringComparer.Ordinal)
                 .First())
-            .OrderByDescending(candidate => candidate.IsWithinTargetSearchRadius)
-            .ThenBy(candidate => candidate.DistanceToTargetCenterMeters)
-            .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
+            .OrderBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .ToList();
 
         if (candidates.Count == 0)
@@ -96,10 +92,14 @@ internal sealed class SpotScanService
         var key = target.Key;
         var targetDistance = GetDistanceToTargetCenter(target, candidate.Position);
         var searchRadius = GetSearchRadius(target);
+        var territoryId = candidate.TerritoryId != 0 ? candidate.TerritoryId : target.TerritoryId;
         return new SpotCandidate
         {
             Key = key,
-            CandidateFingerprint = SpotFingerprint.CreateCandidateFingerprint(key, candidate.Position, candidate.Rotation),
+            CandidateFingerprint = SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                territoryId,
+                candidate.Position,
+                candidate.Rotation),
             RegionId = candidate.RegionId,
             BlockId = candidate.BlockId,
             SurfaceGroupId = candidate.SurfaceGroupId,

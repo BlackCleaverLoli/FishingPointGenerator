@@ -22,8 +22,8 @@ internal sealed record CandidateSelection(
     public string ModeText => Mode switch
     {
         CandidateSelectionMode.Filtered => "已过滤候选",
-        CandidateSelectionMode.FlyableDistance => "可飞：按距中心",
-        CandidateSelectionMode.WalkReachable => "不可飞：步行可达",
+        CandidateSelectionMode.FlyableDistance => "可飞：未记录/距玩家",
+        CandidateSelectionMode.WalkReachable => "不可飞：未记录/距玩家",
         _ => Mode.ToString(),
     };
 }
