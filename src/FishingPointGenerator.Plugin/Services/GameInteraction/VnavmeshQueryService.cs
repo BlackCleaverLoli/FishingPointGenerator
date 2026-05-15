@@ -69,6 +69,25 @@ internal sealed class VnavmeshQueryService
         }
     }
 
+    public MeshPointQueryResult QueryFloorPoint(Vector3 point, float probeHeight, float halfExtentXZ)
+    {
+        if (!IsReady)
+            return MeshPointQueryResult.Unavailable("vnavmesh not ready");
+
+        try
+        {
+            var probe = new Vector3(point.X, point.Y + probeHeight, point.Z);
+            var floor = meshPointOnFloor.TryInvokeFunc(probe, true, halfExtentXZ);
+            return floor is { } floorPoint
+                ? MeshPointQueryResult.Reachable(floorPoint)
+                : MeshPointQueryResult.Unreachable("no nearby floor point");
+        }
+        catch (Exception ex)
+        {
+            return MeshPointQueryResult.Unavailable(ex.Message);
+        }
+    }
+
     public MeshPointQueryResult QueryLandingPoint(Vector3 point, float probeHeight, float halfExtentXZ, float halfExtentY)
     {
         if (!IsReady)

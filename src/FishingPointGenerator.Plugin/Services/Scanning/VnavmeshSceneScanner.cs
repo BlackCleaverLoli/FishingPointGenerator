@@ -23,6 +23,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float FishableCoverageTargetKeyCellSize = 0.5f;
     private const float WalkableStandingClearanceMeters = 5f;
     private const float OpenFishableClearanceMeters = 5f;
+    private const float WalkableFishableOverlapVerticalTolerance = 0.05f;
     private const float WalkableFishableMinimumVerticalDelta = 0f;
     private const float CandidateRearClearanceRayHeight = 1f;
     private const float CandidateRearClearanceDistance = 1f;
@@ -498,6 +499,22 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
         return false;
     }
+
+    private static bool IsWalkableSampleOverlappingFishableSurface(
+        Vector3 walkablePoint,
+        TriangleIndex fishableIndex)
+    {
+        foreach (var fishablePoint in fishableIndex.FindContainingPoints(walkablePoint))
+        {
+            if (IsCandidateFishableHeightTooClose(walkablePoint, fishablePoint))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsCandidateFishableHeightTooClose(Vector3 candidatePoint, Vector3 fishablePoint) =>
+        MathF.Abs(candidatePoint.Y - fishablePoint.Y) <= WalkableFishableOverlapVerticalTolerance;
 
     private static IEnumerable<Vector3> EnumerateTriangleProximitySamples(
         ExtractedSceneTriangle triangle,
@@ -1368,6 +1385,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         out _))
                     continue;
 
+                if (IsWalkableSampleOverlappingFishableSurface(position, fishableIndex))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.WalkableRejects++;
+                    continue;
+                }
+
                 if (!queryCache.HasStandingClearance(position))
                 {
                     if (diagnostics is not null)
@@ -1636,6 +1660,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             return false;
         }
 
+        if (IsCandidateFishableHeightTooClose(walkablePoint, hit.FishablePoint))
+        {
+            failureReason = CandidateCreateFailureReason.FishableHeightOverlap;
+            return false;
+        }
+
         if (!queryCache.HasClearCandidateRearLine(walkablePoint, hit.Angle))
         {
             failureReason = CandidateCreateFailureReason.RearBlocked;
@@ -1695,6 +1725,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 out var sector))
         {
             failureReason = attempt.ResolveFacingFailureReason();
+            return false;
+        }
+
+        if (IsCandidateFishableHeightTooClose(walkablePoint, hit.FishablePoint))
+        {
+            failureReason = CandidateCreateFailureReason.FishableHeightOverlap;
             return false;
         }
 
@@ -3350,6 +3386,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         CollisionAboveFishable,
         NoUsableSector,
         RearBlocked,
+        FishableHeightOverlap,
         CoverageNoCandidate,
         Unknown,
     }
@@ -3397,6 +3434,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         public long FailureCollisionAboveFishable { get; set; }
         public long FailureNoUsableSector { get; set; }
         public long FailureRearBlocked { get; set; }
+        public long FailureFishableHeightOverlap { get; set; }
         public long FailureCoverageNoCandidate { get; set; }
         public long FailureUnknown { get; set; }
         public long CandidateDedupeRejects { get; set; }
@@ -3441,6 +3479,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     break;
                 case CandidateCreateFailureReason.RearBlocked:
                     FailureRearBlocked++;
+                    break;
+                case CandidateCreateFailureReason.FishableHeightOverlap:
+                    FailureFishableHeightOverlap++;
                     break;
                 case CandidateCreateFailureReason.CoverageNoCandidate:
                     FailureCoverageNoCandidate++;
@@ -3503,7 +3544,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         {
             stopwatch.Stop();
             log.Information(
-                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} collisionBlockers={CollisionBlockers} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} failureHorizontalBlocked={FailureHorizontalBlocked} failureNoFishable={FailureNoFishable} failureCollisionBeforeFishable={FailureCollisionBeforeFishable} failureCollisionWithoutFishable={FailureCollisionWithoutFishable} failureCollisionAboveFishable={FailureCollisionAboveFishable} failureNoUsableSector={FailureNoUsableSector} failureRearBlocked={FailureRearBlocked} failureCoverageNoCandidate={FailureCoverageNoCandidate} failureUnknown={FailureUnknown} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} accessQueries={AccessQueries} accessCacheHits={AccessCacheHits} accessBlocked={AccessBlocked}",
+                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} collisionBlockers={CollisionBlockers} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} failureHorizontalBlocked={FailureHorizontalBlocked} failureNoFishable={FailureNoFishable} failureCollisionBeforeFishable={FailureCollisionBeforeFishable} failureCollisionWithoutFishable={FailureCollisionWithoutFishable} failureCollisionAboveFishable={FailureCollisionAboveFishable} failureNoUsableSector={FailureNoUsableSector} failureRearBlocked={FailureRearBlocked} failureFishableHeightOverlap={FailureFishableHeightOverlap} failureCoverageNoCandidate={FailureCoverageNoCandidate} failureUnknown={FailureUnknown} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} accessQueries={AccessQueries} accessCacheHits={AccessCacheHits} accessBlocked={AccessBlocked}",
                 territoryId,
                 stopwatch.Elapsed.TotalMilliseconds,
                 fishableTriangles,
@@ -3522,6 +3563,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 FailureCollisionAboveFishable,
                 FailureNoUsableSector,
                 FailureRearBlocked,
+                FailureFishableHeightOverlap,
                 FailureCoverageNoCandidate,
                 FailureUnknown,
                 CandidateDedupeRejects,

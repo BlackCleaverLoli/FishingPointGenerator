@@ -160,7 +160,7 @@ internal sealed class MainWindow : Window, IDisposable
             session.PlaceSelectedCandidateFlag();
 
         var pointDisableMode = session.OverlayPointDisableMode;
-        if (FlowCheckbox("点选/框选禁用/恢复", ref pointDisableMode, ref actionLine))
+        if (FlowCheckbox("左键/Mouse4点选/框选禁用/恢复", ref pointDisableMode, ref actionLine))
             session.OverlayPointDisableMode = pointDisableMode;
     }
 

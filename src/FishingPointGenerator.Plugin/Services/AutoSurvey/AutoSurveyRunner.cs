@@ -32,8 +32,9 @@ internal sealed class AutoSurveyRunner : IDisposable
     private const int InitialLandingMinimumSupportScore = 7;
     private const float DismountRelocateMoveCloseRangeMeters = 0.5f;
     private const float DismountRelocateArrivedDistanceMeters = 0.75f;
-    private const float DismountRelocateMeshProbeHalfExtentXZ = 2.25f;
-    private const float DismountRelocateMeshProbeHalfExtentY = 3f;
+    private const float DismountRelocateFloorProbeHeight = 5f;
+    private const float DismountRelocateFloorProbeHalfExtentXZ = 0.5f;
+    private const float DismountRelocateMaximumFloorHorizontalSnapMeters = 0.5f;
     private const float DismountRelocateMaximumVerticalSnapMeters = 1.75f;
     private const int MaximumMoveResendAttempts = 3;
     private static readonly TimeSpan ShortDelay = TimeSpan.FromMilliseconds(250);
@@ -558,23 +559,8 @@ internal sealed class AutoSurveyRunner : IDisposable
             offset.SideMeters,
             offset.ForwardMeters);
         dismountRelocateOffsetIndex++;
-        var meshResult = navmesh.QueryNearestReachablePoint(
-            requestedDestination.ToVector3(),
-            DismountRelocateMeshProbeHalfExtentXZ,
-            DismountRelocateMeshProbeHalfExtentY);
-        if (!meshResult.IsReachable)
-        {
-            failureMessage = $"备用落点没有可达 mesh：{meshResult.Message}";
+        if (!TryResolveDismountRelocateDestination(requestedDestination, out var destination, out failureMessage))
             return false;
-        }
-
-        var destination = Point3.From(meshResult.Point);
-        var verticalDelta = MathF.Abs(destination.Y - currentCandidate.Position.Y);
-        if (verticalDelta > DismountRelocateMaximumVerticalSnapMeters)
-        {
-            failureMessage = $"备用落点高度偏差过大：请求 {FormatPoint(requestedDestination)}，实际 {FormatPoint(destination)}，dy={verticalDelta:F2}m";
-            return false;
-        }
 
         var selection = session.CurrentCandidateSelection;
         StopMove3();
@@ -596,6 +582,48 @@ internal sealed class AutoSurveyRunner : IDisposable
         StatusText = $"长时间无法下坐骑：尝试附近同高落点 {dismountRelocateOffsetIndex}/{DismountRelocateOffsets.Length} {FormatPoint(destination)}";
         Delay(ShortDelay);
         step = AutoSurveyStep.DismountRelocateMove;
+        return true;
+    }
+
+    private bool TryResolveDismountRelocateDestination(
+        Point3 requestedDestination,
+        out Point3 destination,
+        out string failureMessage)
+    {
+        destination = default;
+        failureMessage = string.Empty;
+        if (currentCandidate is null)
+        {
+            failureMessage = "没有当前候选";
+            return false;
+        }
+
+        var floorResult = navmesh.QueryFloorPoint(
+            requestedDestination.ToVector3(),
+            DismountRelocateFloorProbeHeight,
+            DismountRelocateFloorProbeHalfExtentXZ);
+        if (!floorResult.IsReachable)
+        {
+            failureMessage = $"备用落点找不到地板点：{floorResult.Message}";
+            return false;
+        }
+
+        var floorPoint = Point3.From(floorResult.Point);
+        var floorHorizontalSnap = floorPoint.HorizontalDistanceTo(requestedDestination);
+        if (floorHorizontalSnap > DismountRelocateMaximumFloorHorizontalSnapMeters)
+        {
+            failureMessage = $"备用落点地板吸附过远：请求 {FormatPoint(requestedDestination)}，floor {FormatPoint(floorPoint)}，dxz={floorHorizontalSnap:F2}m";
+            return false;
+        }
+
+        destination = floorPoint;
+        var verticalDelta = MathF.Abs(destination.Y - currentCandidate.Position.Y);
+        if (verticalDelta > DismountRelocateMaximumVerticalSnapMeters)
+        {
+            failureMessage = $"备用落点高度偏差过大：请求 {FormatPoint(requestedDestination)}，实际 {FormatPoint(destination)}，dy={verticalDelta:F2}m";
+            return false;
+        }
+
         return true;
     }
 

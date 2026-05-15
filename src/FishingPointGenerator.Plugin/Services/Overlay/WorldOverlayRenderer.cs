@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -31,6 +32,8 @@ internal sealed unsafe class WorldOverlayRenderer
     private const float DebugSurfaceHatchSpacingMeters = 4f;
     private const float CandidateClickRadiusPixels = 22f;
     private const float CandidateSelectionDragThresholdPixels = 8f;
+    private const int VirtualKeyXButton1 = 0x05;
+    private const int KeyDownMask = 0x8000;
     private const uint CandidateSelectionFillColor = 0x334080ff;
     private const uint CandidateSelectionEdgeColor = 0xff4080ff;
     private const int MaxSurfaceDebugLabels = 4;
@@ -39,7 +42,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private Matrix4x4 viewProj;
     private Vector4 nearPlane;
     private Vector2 viewportSize;
-    private bool previousLeftMouseDown;
+    private bool previousSelectionMouseDown;
     private bool candidateSelectionActive;
     private Vector2 candidateSelectionStart;
     private Vector2 candidateSelectionEnd;
@@ -153,7 +156,7 @@ internal sealed unsafe class WorldOverlayRenderer
             .ToList();
 
         var mousePosition = ImGui.GetIO().MousePos;
-        var leftMouseDown = IsGameLeftMouseDown();
+        var selectionMouseDown = IsOverlaySelectionMouseDown();
         var viewportMin = ImGuiHelpers.MainViewport.Pos;
         var viewportMax = viewportMin + viewportSize;
         var mouseInViewport = mousePosition.X >= viewportMin.X
@@ -161,13 +164,13 @@ internal sealed unsafe class WorldOverlayRenderer
             && mousePosition.X <= viewportMax.X
             && mousePosition.Y <= viewportMax.Y;
         var canStartPointDisableSelection = session.OverlayPointDisableMode
-            && leftMouseDown
-            && !previousLeftMouseDown
+            && selectionMouseDown
+            && !previousSelectionMouseDown
             && !session.IsOverlayPointDisableMouseBlockedByUi(mousePosition)
             && mouseInViewport;
         var finishPointDisableSelection = session.OverlayPointDisableMode
-            && !leftMouseDown
-            && previousLeftMouseDown
+            && !selectionMouseDown
+            && previousSelectionMouseDown
             && candidateSelectionActive;
         if (!session.OverlayPointDisableMode)
             candidateSelectionActive = false;
@@ -177,7 +180,7 @@ internal sealed unsafe class WorldOverlayRenderer
             candidateSelectionStart = mousePosition;
             candidateSelectionEnd = mousePosition;
         }
-        else if (candidateSelectionActive && leftMouseDown)
+        else if (candidateSelectionActive && selectionMouseDown)
         {
             candidateSelectionEnd = mousePosition;
         }
@@ -216,7 +219,7 @@ internal sealed unsafe class WorldOverlayRenderer
             }
         }
 
-        if (candidateSelectionActive && leftMouseDown)
+        if (candidateSelectionActive && selectionMouseDown)
             DrawCandidateSelectionRect(drawList, candidateSelectionStart, candidateSelectionEnd);
 
         if (TryWorldToScreen(playerPosition + new Vector3(0f, 2.5f, 0f), out var screen))
@@ -224,7 +227,7 @@ internal sealed unsafe class WorldOverlayRenderer
             var clippedText = visibleCandidates.Count > candidates.Count
                 ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
                 : string.Empty;
-            var pointDisableText = session.OverlayPointDisableMode ? " 点选/框选禁用/恢复" : string.Empty;
+            var pointDisableText = session.OverlayPointDisableMode ? " 左键/Mouse4点选/框选禁用/恢复" : string.Empty;
             drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{pointDisableText}{clippedText}");
         }
 
@@ -237,7 +240,7 @@ internal sealed unsafe class WorldOverlayRenderer
                 session.ToggleOverlayCandidatesDisabled(selectedCandidates);
         }
 
-        previousLeftMouseDown = leftMouseDown;
+        previousSelectionMouseDown = selectionMouseDown;
     }
 
     private static IReadOnlyList<ApproachCandidate> SelectOverlayCandidates(
@@ -530,11 +533,15 @@ internal sealed unsafe class WorldOverlayRenderer
             && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
     }
 
-    private static bool IsGameLeftMouseDown()
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
+    private static bool IsOverlaySelectionMouseDown()
     {
         try
         {
-            return InputManager.IsLeftMouseDown();
+            return InputManager.IsLeftMouseDown()
+                || (GetAsyncKeyState(VirtualKeyXButton1) & KeyDownMask) != 0;
         }
         catch
         {
