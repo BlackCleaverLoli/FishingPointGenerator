@@ -4,7 +4,7 @@ namespace FishingPointGenerator.Core.Models;
 
 public sealed record ExportDocument
 {
-    public int Version { get; init; } = 1;
+    public int Version { get; init; } = 2;
     public DateTimeOffset GeneratedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<ExportFishingSpot> FishingSpots { get; init; } = [];
 }
@@ -18,9 +18,6 @@ public sealed record ExportFishingSpot
 
 public sealed record ExportedApproachPoint
 {
-    [JsonPropertyName("FishingSpot")]
-    public uint FishingSpot { get; init; }
-
     [JsonPropertyName("PositionX")]
     public float PositionX { get; init; }
 
@@ -32,10 +29,4 @@ public sealed record ExportedApproachPoint
 
     [JsonPropertyName("Rotation")]
     public float Rotation { get; init; }
-
-    public string SourceBlockId { get; init; } = string.Empty;
-    public string SourceCandidateId { get; init; } = string.Empty;
-    public string SourceCandidateFingerprint { get; init; } = string.Empty;
-    public string SourceEvidenceId { get; init; } = string.Empty;
-    public string SourceScanId { get; init; } = string.Empty;
 }

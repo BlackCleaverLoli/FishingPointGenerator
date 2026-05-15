@@ -15,9 +15,11 @@ internal sealed class AutoSurveyRunner
     private const float CastAdjustArrivedDistanceMeters = 0.35f;
     private const float DismountRelocateMoveCloseRangeMeters = 0.5f;
     private const float DismountRelocateArrivedDistanceMeters = 0.75f;
+    private const int MaximumMoveResendAttempts = 3;
     private static readonly TimeSpan ShortDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan LoopDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan CastRecordTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan MoveResendDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DismountRelocateDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DismountRelocateRetryDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan InterruptFallbackDelay = TimeSpan.FromSeconds(6);
@@ -49,6 +51,7 @@ internal sealed class AutoSurveyRunner
     private bool completeRoundAfterInterrupt;
     private SpotCandidate? currentCandidate;
     private int observedCastRecordVersion;
+    private int castRecordTimeoutRetryCount;
     private float currentLandingBackoffMeters = LandingBackoffMeters;
     private float currentLandingSideOffsetMeters;
     private float currentLandingForwardOffsetMeters;
@@ -56,6 +59,8 @@ internal sealed class AutoSurveyRunner
     private DateTimeOffset dismountStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastDismountRelocateAttemptAt = DateTimeOffset.MinValue;
     private int dismountRelocateOffsetIndex;
+    private DateTimeOffset lastMoveResendAttemptAt = DateTimeOffset.MinValue;
+    private int moveResendAttemptCount;
 
     public AutoSurveyRunner(
         SpotWorkflowSession session,
@@ -122,6 +127,7 @@ internal sealed class AutoSurveyRunner
         waitUntil = default;
         currentCandidate = null;
         observedCastRecordVersion = 0;
+        castRecordTimeoutRetryCount = 0;
         castStartedAt = DateTimeOffset.MinValue;
         interruptStartedAt = DateTimeOffset.MinValue;
         stepAfterInterrupt = AutoSurveyStep.Idle;
@@ -322,19 +328,16 @@ internal sealed class AutoSurveyRunner
             return;
         }
 
-        var destination = GetCurrentMoveDestination();
         var selection = session.CurrentCandidateSelection;
-        var result = navmesh.MoveCloseTo(
-            destination.ToVector3(),
-            selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable,
-            MoveCloseRangeMeters);
-        if (!result.IsStarted)
+        ResetMoveResend();
+        var fly = selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
+        if (!TryStartCurrentMove(fly, MoveCloseRangeMeters, $"vnavmesh 移动中：{CurrentCandidateText}", out var failureMessage))
         {
-            Stop($"自动点亮停止：vnavmesh 移动失败。{result.Message}");
-            return;
+            lastMoveResendAttemptAt = DateTimeOffset.UtcNow;
+            StatusText = $"vnavmesh 移动启动失败，准备重发：{failureMessage}。目标 {CurrentCandidateText}";
+            Delay(ShortDelay);
         }
 
-        StatusText = $"vnavmesh 移动中：{CurrentCandidateText}";
         step = AutoSurveyStep.Move;
     }
 
@@ -349,6 +352,7 @@ internal sealed class AutoSurveyRunner
         if (IsNearCurrentCandidate())
         {
             navmesh.StopMovement();
+            ResetMoveResend();
             BeginDismount($"已到达候选：{CurrentCandidateText}，准备下坐骑。");
             return;
         }
@@ -362,7 +366,16 @@ internal sealed class AutoSurveyRunner
             return;
         }
 
-        StatusText = $"vnavmesh 未运行且尚未到点：目标 {CurrentCandidateText}。可手动处理或停止自动点亮。";
+        var selection = session.CurrentCandidateSelection;
+        var fly = selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
+        if (TryResendCurrentMove(fly, MoveCloseRangeMeters, "vnavmesh 移动", out var giveUp, out var resendFailure))
+            return;
+
+        if (giveUp)
+        {
+            Stop($"自动点亮停止：vnavmesh 未运行且尚未到点，重发仍失败。{resendFailure}");
+            return;
+        }
     }
 
     private void Dismount()
@@ -432,6 +445,7 @@ internal sealed class AutoSurveyRunner
             return false;
         }
 
+        ResetMoveResend();
         currentLandingSideOffsetMeters = offset.SideMeters;
         currentLandingForwardOffsetMeters = offset.ForwardMeters;
         StatusText = $"长时间无法下坐骑：尝试附近同高落点 {dismountRelocateOffsetIndex}/{DismountRelocateOffsets.Length} {FormatPoint(destination)}";
@@ -451,6 +465,7 @@ internal sealed class AutoSurveyRunner
         if (IsNearCurrentMoveDestination(DismountRelocateArrivedDistanceMeters))
         {
             navmesh.StopMovement();
+            ResetMoveResend();
             BeginDismount($"已到达备用落点：{FormatPoint(GetCurrentMoveDestination())}，准备下坐骑。");
             return;
         }
@@ -464,11 +479,23 @@ internal sealed class AutoSurveyRunner
             return;
         }
 
-        BeginDismount($"备用落点移动已停止：继续尝试下坐骑 {CurrentCandidateText}");
+        var selection = session.CurrentCandidateSelection;
+        var fly = selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable;
+        if (TryResendCurrentMove(fly, DismountRelocateMoveCloseRangeMeters, "备用落点移动", out var giveUp, out var resendFailure))
+            return;
+
+        if (giveUp)
+        {
+            ResetMoveResend();
+            BeginDismount($"备用落点移动多次停止或重发失败：{resendFailure}。继续尝试下坐骑 {CurrentCandidateText}");
+        }
     }
 
     private void Face()
     {
+        if (TryCompleteDelayedCastRecord())
+            return;
+
         if (currentCandidate is null)
         {
             step = AutoSurveyStep.RefreshCandidate;
@@ -495,6 +522,9 @@ internal sealed class AutoSurveyRunner
 
     private void Cast()
     {
+        if (TryCompleteDelayedCastRecord())
+            return;
+
         if (currentCandidate is null)
         {
             step = AutoSurveyStep.RefreshCandidate;
@@ -513,7 +543,9 @@ internal sealed class AutoSurveyRunner
         if (castAttempt == FishingCastAttempt.Issued)
         {
             castStartedAt = DateTimeOffset.UtcNow;
-            StatusText = $"已发送抛竿：等待日志记录 {CurrentCandidateText}";
+            StatusText = castRecordTimeoutRetryCount > 0
+                ? $"已重新发送抛竿 {castRecordTimeoutRetryCount}：等待日志记录 {CurrentCandidateText}"
+                : $"已发送抛竿：等待日志记录 {CurrentCandidateText}";
             Delay(ShortDelay);
             step = AutoSurveyStep.WaitCastRecord;
             return;
@@ -569,6 +601,7 @@ internal sealed class AutoSurveyRunner
             return false;
         }
 
+        ResetMoveResend();
         currentLandingBackoffMeters = nextBackoff;
         castAdjustMoveCount++;
         StatusText = $"抛竿不可用：小步靠近 {castAdjustMoveCount}，目标 {CurrentCandidateText}";
@@ -588,6 +621,7 @@ internal sealed class AutoSurveyRunner
         if (IsNearCurrentMoveDestination(CastAdjustArrivedDistanceMeters))
         {
             navmesh.StopMovement();
+            ResetMoveResend();
             StatusText = $"已小步靠近：{CurrentCandidateText}，重新设置朝向。";
             Delay(ShortDelay);
             step = AutoSurveyStep.Face;
@@ -603,9 +637,16 @@ internal sealed class AutoSurveyRunner
             return;
         }
 
-        StatusText = $"小步靠近已停止：{CurrentCandidateText}，重新尝试抛竿。";
-        Delay(ShortDelay);
-        step = AutoSurveyStep.Face;
+        if (TryResendCurrentMove(fly: false, CastAdjustMoveCloseRangeMeters, "小步靠近", out var giveUp, out var resendFailure))
+            return;
+
+        if (giveUp)
+        {
+            ResetMoveResend();
+            StatusText = $"小步靠近多次停止或重发失败：{resendFailure}。重新尝试抛竿 {CurrentCandidateText}";
+            Delay(ShortDelay);
+            step = AutoSurveyStep.Face;
+        }
     }
 
     private void WaitCastRecord()
@@ -614,10 +655,20 @@ internal sealed class AutoSurveyRunner
         {
             if (DateTimeOffset.UtcNow - castStartedAt >= CastRecordTimeout)
             {
+                castRecordTimeoutRetryCount++;
+                castStartedAt = DateTimeOffset.MinValue;
+                if (playerActions.IsFreeForAutoSurvey())
+                {
+                    StatusText = $"等待抛竿日志超时：第 {castRecordTimeoutRetryCount} 次，继续重试抛竿 {CurrentCandidateText}";
+                    Delay(ShortDelay);
+                    step = AutoSurveyStep.Face;
+                    return;
+                }
+
                 BeginInterrupt(
                     completeRound: false,
-                    nextStep: AutoSurveyStep.Cast,
-                    $"等待抛竿日志超时：准备中断后重试 {CurrentCandidateText}");
+                    nextStep: AutoSurveyStep.Face,
+                    $"等待抛竿日志超时：第 {castRecordTimeoutRetryCount} 次，准备中断后重试抛竿 {CurrentCandidateText}");
                 return;
             }
 
@@ -626,6 +677,7 @@ internal sealed class AutoSurveyRunner
         }
 
         castStartedAt = DateTimeOffset.MinValue;
+        castRecordTimeoutRetryCount = 0;
         BeginInterrupt(
             completeRound: true,
             nextStep: AutoSurveyStep.LoopDelay,
@@ -644,6 +696,17 @@ internal sealed class AutoSurveyRunner
 
     private void InterruptFishing()
     {
+        if (!completeRoundAfterInterrupt
+            && castRecordTimeoutRetryCount > 0
+            && session.CastRecordVersion != observedCastRecordVersion)
+        {
+            castStartedAt = DateTimeOffset.MinValue;
+            castRecordTimeoutRetryCount = 0;
+            completeRoundAfterInterrupt = true;
+            stepAfterInterrupt = AutoSurveyStep.LoopDelay;
+            StatusText = $"延迟收到抛竿日志：准备完成本轮 {CurrentCandidateText}";
+        }
+
         var interruptResult = playerActions.InterruptFishingIfNeeded();
         if (interruptResult == FishingInterruptAttempt.Idle)
         {
@@ -672,6 +735,20 @@ internal sealed class AutoSurveyRunner
         Delay(ShortDelay);
     }
 
+    private bool TryCompleteDelayedCastRecord()
+    {
+        if (castRecordTimeoutRetryCount <= 0 || session.CastRecordVersion == observedCastRecordVersion)
+            return false;
+
+        castStartedAt = DateTimeOffset.MinValue;
+        castRecordTimeoutRetryCount = 0;
+        BeginInterrupt(
+            completeRound: true,
+            nextStep: AutoSurveyStep.LoopDelay,
+            $"延迟收到抛竿日志：准备完成本轮 {CurrentCandidateText}");
+        return true;
+    }
+
     private void FinishInterrupt()
     {
         interruptStartedAt = DateTimeOffset.MinValue;
@@ -693,6 +770,7 @@ internal sealed class AutoSurveyRunner
         CompletedRounds++;
         currentCandidate = null;
         castStartedAt = DateTimeOffset.MinValue;
+        castRecordTimeoutRetryCount = 0;
         interruptStartedAt = DateTimeOffset.MinValue;
         completeRoundAfterInterrupt = false;
         stepAfterInterrupt = AutoSurveyStep.Idle;
@@ -795,7 +873,96 @@ internal sealed class AutoSurveyRunner
         currentLandingSideOffsetMeters = 0f;
         currentLandingForwardOffsetMeters = 0f;
         castAdjustMoveCount = 0;
+        castRecordTimeoutRetryCount = 0;
+        ResetMoveResend();
         ResetDismountWait();
+    }
+
+    private bool TryStartCurrentMove(
+        bool fly,
+        float range,
+        string statusText,
+        out string failureMessage)
+    {
+        failureMessage = string.Empty;
+        if (currentCandidate is null)
+        {
+            failureMessage = "没有当前候选";
+            return false;
+        }
+
+        var result = navmesh.MoveCloseTo(GetCurrentMoveDestination().ToVector3(), fly, range);
+        if (!result.IsStarted)
+        {
+            failureMessage = result.Message;
+            return false;
+        }
+
+        StatusText = statusText;
+        Delay(ShortDelay);
+        return true;
+    }
+
+    private bool TryResendCurrentMove(
+        bool fly,
+        float range,
+        string label,
+        out bool giveUp,
+        out string failureMessage)
+    {
+        giveUp = false;
+        failureMessage = string.Empty;
+        if (currentCandidate is null)
+        {
+            giveUp = true;
+            failureMessage = "没有当前候选";
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var elapsed = now - lastMoveResendAttemptAt;
+        if (elapsed < MoveResendDelay)
+        {
+            var remainingSeconds = Math.Max(0d, (MoveResendDelay - elapsed).TotalSeconds);
+            StatusText = $"{label}未运行且尚未到点：等待重发 {moveResendAttemptCount}/{MaximumMoveResendAttempts}，{remainingSeconds:F1}s，目标 {CurrentCandidateText}";
+            Delay(ShortDelay);
+            return false;
+        }
+
+        if (moveResendAttemptCount >= MaximumMoveResendAttempts)
+        {
+            giveUp = true;
+            failureMessage = $"{label}已重发 {moveResendAttemptCount}/{MaximumMoveResendAttempts} 次仍未到点";
+            return false;
+        }
+
+        moveResendAttemptCount++;
+        lastMoveResendAttemptAt = now;
+        var result = navmesh.MoveCloseTo(GetCurrentMoveDestination().ToVector3(), fly, range);
+        if (!result.IsStarted)
+        {
+            failureMessage = result.Message;
+            if (moveResendAttemptCount >= MaximumMoveResendAttempts)
+            {
+                giveUp = true;
+                failureMessage = $"{label}重发失败 {moveResendAttemptCount}/{MaximumMoveResendAttempts}：{result.Message}";
+                return false;
+            }
+
+            StatusText = $"{label}重发失败 {moveResendAttemptCount}/{MaximumMoveResendAttempts}：{result.Message}，目标 {CurrentCandidateText}";
+            Delay(ShortDelay);
+            return false;
+        }
+
+        StatusText = $"{label}已重发 {moveResendAttemptCount}/{MaximumMoveResendAttempts}：目标 {CurrentCandidateText}";
+        Delay(ShortDelay);
+        return true;
+    }
+
+    private void ResetMoveResend()
+    {
+        lastMoveResendAttemptAt = DateTimeOffset.MinValue;
+        moveResendAttemptCount = 0;
     }
 
     private void BeginDismount(string statusText)

@@ -31,16 +31,10 @@ public sealed class MaintenanceExportBuilder
                         key,
                         new ExportedApproachPoint
                         {
-                            FishingSpot = spot.FishingSpotId,
                             PositionX = point.Position.X,
                             PositionY = point.Position.Y,
                             PositionZ = point.Position.Z,
                             Rotation = point.Rotation,
-                            SourceBlockId = point.SourceBlockId,
-                            SourceCandidateId = point.SourceCandidateId,
-                            SourceCandidateFingerprint = point.SourceCandidateFingerprint,
-                            SourceEvidenceId = point.EvidenceIds.FirstOrDefault() ?? string.Empty,
-                            SourceScanId = point.SourceScanId,
                         }));
                 }
             }
@@ -58,9 +52,10 @@ public sealed class MaintenanceExportBuilder
                     FishingSpotId = group.Key.FishingSpotId,
                     Points = group
                         .Select(item => item.Point)
-                        .OrderBy(point => point.SourceEvidenceId, StringComparer.Ordinal)
-                        .ThenBy(point => point.PositionX)
+                        .OrderBy(point => point.PositionX)
+                        .ThenBy(point => point.PositionY)
                         .ThenBy(point => point.PositionZ)
+                        .ThenBy(point => point.Rotation)
                         .ToList(),
                 })
                 .ToList(),

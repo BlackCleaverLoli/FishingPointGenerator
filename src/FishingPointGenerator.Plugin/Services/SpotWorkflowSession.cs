@@ -2630,6 +2630,10 @@ internal sealed class SpotWorkflowSession : IDisposable
             playerSnapshot?.Position,
             territoryRecordedCandidateIds,
             territoryRecordedCandidateFingerprints);
+        var isTerritoryRecorded = IsRecordedCandidate(
+            candidate,
+            territoryRecordedCandidateIds,
+            territoryRecordedCandidateFingerprints);
         return new CandidateSelection(
             candidate,
             GetCandidateSelectionMode(candidate),
@@ -2638,7 +2642,10 @@ internal sealed class SpotWorkflowSession : IDisposable
             playerSnapshot is null ? null : candidate.Position.HorizontalDistanceTo(playerSnapshot.Position),
             candidate.DistanceToTargetCenterMeters,
             candidates.Count,
-            "当前候选来自领地内存候选；优先选择领地未记录点，再按距玩家排序；没有领地未记录点时才回退到当前钓场未记录点。");
+            isTerritoryRecorded,
+            isTerritoryRecorded
+                ? "当前候选来自领地内存候选；领地未记录候选已耗尽，正在回退到当前钓场未记录但领地已记录的混合风险点。"
+                : "当前候选来自领地内存候选；优先选择领地未记录点，再按距玩家排序；没有领地未记录点时才回退到当前钓场未记录点。");
     }
 
     private CandidateSelection? GetOrBuildCandidateSelection(
@@ -2663,7 +2670,19 @@ internal sealed class SpotWorkflowSession : IDisposable
                 candidate.CandidateFingerprint,
                 current.Candidate.CandidateFingerprint,
                 StringComparison.Ordinal)))
-            return current;
+        {
+            var isTerritoryRecorded = IsRecordedCandidate(
+                current.Candidate,
+                territoryRecordedCandidateIds,
+                territoryRecordedCandidateFingerprints);
+            return current with
+            {
+                IsTerritoryRecorded = isTerritoryRecorded,
+                Note = isTerritoryRecorded
+                    ? "当前候选来自领地内存候选；领地未记录候选已耗尽，正在回退到当前钓场未记录但领地已记录的混合风险点。"
+                    : current.Note,
+            };
+        }
 
         return BuildCandidateSelection(target, scan);
     }

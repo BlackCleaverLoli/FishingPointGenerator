@@ -76,7 +76,7 @@ FishingPointGenerator 默认只导出经过验证的数据。
 - `weakCoverage`、`mixedRisk`、`noCandidate`、`ignored` 默认不会导出。
 - 弱覆盖数据可通过 `/fpg allowweak` 显式允许导出。
 - 混合风险数据可通过 `/fpg allowrisk` 显式复核后允许导出。
-- 导出点使用 MissFisher 消费侧的 `FishingSpot`、`PositionX/Y/Z`、`Rotation` 形态，并附带来源 evidence、candidate fingerprint 和 scan id 便于追踪。
+- 导出按 `territoryId`、`fishingSpotId` 分组；每个点只保留 `PositionX/Y/Z` 和 `Rotation`。来源证据、候选和冲突信息只保留在维护数据中。
 
 ## 文档
 

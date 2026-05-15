@@ -1,6 +1,6 @@
 # Data Format
 
-`SpotJsonStore` 使用 `System.Text.Json` 写入 UTF-8 JSON，属性名为 camelCase，枚举值为 camelCase 字符串。插件运行时以 Dalamud 插件配置目录作为根目录；本仓库的 `data` 目录仅用于说明和未来样例。
+`SpotJsonStore` 使用 `System.Text.Json` 写入 UTF-8 JSON，默认属性名为 camelCase，枚举值为 camelCase 字符串；少数对齐下游消费方的字段保留固定大小写。插件运行时以 Dalamud 插件配置目录作为根目录；本仓库的 `data` 目录仅用于说明和未来样例。
 
 ## Catalog
 
@@ -86,5 +86,6 @@ data/exports/FishingSpotApproachPoints.json
 
 - 只导出 `confirmed` 的 `SpotKey`。
 - `weakCoverage`、`mixedRisk`、`noCandidate`、`ignored` 默认不导出。
-- 每个点包含 `FishingSpot`、`PositionX`、`PositionY`、`PositionZ`、`Rotation`，对齐 MissFisher `FishRecordSpotIndex` 的消费字段。
-- 每个点保留 `sourceEvidenceId`、`sourceCandidateFingerprint`、`sourceScanId`，便于回溯。
+- 导出文档保留 `version` 作为 schema 版本，当前为 `2`。
+- 每个钓场按 `territoryId`、`fishingSpotId` 分组；每个点只保留 `PositionX`、`PositionY`、`PositionZ`、`Rotation`。
+- 来源证据、候选和扫描信息只保留在维护层，不进入导出文件。
