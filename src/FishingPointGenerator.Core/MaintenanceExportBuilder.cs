@@ -4,6 +4,8 @@ namespace FishingPointGenerator.Core;
 
 public sealed class MaintenanceExportBuilder
 {
+    private const int ExportFloatDigits = 2;
+
     public ExportDocument Build(
         IEnumerable<SpotAnalysis> analyses,
         IEnumerable<TerritoryMaintenanceDocument> maintenanceDocuments)
@@ -31,10 +33,10 @@ public sealed class MaintenanceExportBuilder
                         key,
                         new ExportedApproachPoint
                         {
-                            PositionX = point.Position.X,
-                            PositionY = point.Position.Y,
-                            PositionZ = point.Position.Z,
-                            Rotation = point.Rotation,
+                            PositionX = RoundExportFloat(point.Position.X),
+                            PositionY = RoundExportFloat(point.Position.Y),
+                            PositionZ = RoundExportFloat(point.Position.Z),
+                            Rotation = RoundExportFloat(point.Rotation),
                         }));
                 }
             }
@@ -60,5 +62,10 @@ public sealed class MaintenanceExportBuilder
                 })
                 .ToList(),
         };
+    }
+
+    private static float RoundExportFloat(float value)
+    {
+        return MathF.Round(value, ExportFloatDigits, MidpointRounding.AwayFromZero);
     }
 }

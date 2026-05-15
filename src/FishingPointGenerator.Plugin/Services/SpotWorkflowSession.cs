@@ -21,6 +21,8 @@ internal sealed class SpotWorkflowSession : IDisposable
     private const float MixedRiskCastBlockFillRangeMeters = 8f;
     private const float CastWaterSystemLinkDistanceMeters = 8f;
     private const float CastWaterSystemHeightToleranceMeters = 3f;
+    private const int FinalCandidateSparsifyMinimumBlockSize = 5;
+    private const float FinalCandidateSparsifySpacingMeters = 4f;
     private const float FlyableMeshProbeHalfExtentXZ = 1f;
     private const float FlyableMeshProbeHalfExtentY = 1.5f;
     private const float FlyableMeshMaximumHorizontalSnap = 0.75f;
@@ -915,7 +917,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         }
 
         var territoryRecorded = IsRecordedCandidate(candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints);
-        var recordScope = territoryRecorded ? "当前钓场未记录、但领地已记录候选" : "领地未记录候选";
+        var recordScope = territoryRecorded ? "冲突待覆盖候选" : "领地未记录候选";
         LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的{recordScope}插旗：距角色 {candidate.Position.HorizontalDistanceTo(playerSnapshot.Position):F1}m，距中心 {candidate.DistanceToTargetCenterMeters:F1}m。";
     }
 
@@ -1037,7 +1039,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         RebuildAnalyses();
         SyncCurrentAnalysis();
         var mixedRiskNote = isMixedRiskBlock
-            ? $"，混合风险块小范围 {effectiveFillRange:F1}m，禁用旧自动点 {resetResult.DisabledPointCount} 个，关联 FishingSpot {FormatSpotIds(resetResult.RelatedFishingSpotIds)}"
+            ? $"，混合风险块小范围 {effectiveFillRange:F1}m，删除旧自动点 {resetResult.ResetPointCount} 个，关联 FishingSpot {FormatSpotIds(resetResult.RelatedFishingSpotIds)}"
             : string.Empty;
         LastMessage = $"{resolutionNote}FishingSpot {fishingSpotId} 抛竿水系点亮：{FormatSurfaceGroup(selection.SeedCandidate.SurfaceGroupId)} 新增 {newCandidates.Count} 个点，重复证据 {repeatedCandidates} 个（本次 {candidates.Count}/{fillDistances.Count}，seed 块 {selection.Block.BlockId}{mixedRiskNote}）。";
         return true;
@@ -1453,7 +1455,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             return MixedRiskBlockResetResult.Empty;
 
         var now = DateTimeOffset.UtcNow;
-        var totalDisabled = 0;
+        var totalReset = 0;
         var touchedSpotIds = new List<uint>();
         var spots = document.Spots.ToList();
         for (var index = 0; index < spots.Count; index++)
@@ -1466,23 +1468,19 @@ internal sealed class SpotWorkflowSession : IDisposable
                 .Where(id => id != spot.FishingSpotId)
                 .OrderBy(id => id)
                 .ToList();
-            var points = spot.ApproachPoints.ToList();
-            var disabled = 0;
-            for (var pointIndex = 0; pointIndex < points.Count; pointIndex++)
+            var reset = 0;
+            var points = new List<ApproachPoint>(spot.ApproachPoints.Count);
+            foreach (var point in spot.ApproachPoints)
             {
-                var point = points[pointIndex];
-                if (point.Status != ApproachPointStatus.Confirmed
-                    || point.SourceKind != ApproachPointSourceKind.AutoCastFill
-                    || !IsApproachPointInBlock(point, target.TerritoryId, block, blockCandidateIds))
-                    continue;
-
-                disabled++;
-                points[pointIndex] = point with
+                if (point.SourceKind == ApproachPointSourceKind.AutoCastFill
+                    && point.Status is ApproachPointStatus.Confirmed or ApproachPointStatus.Disabled
+                    && IsApproachPointInBlock(point, target.TerritoryId, block, blockCandidateIds))
                 {
-                    Status = ApproachPointStatus.Disabled,
-                    UpdatedAt = now,
-                    Note = AppendNote(point.Note, note),
-                };
+                    reset++;
+                    continue;
+                }
+
+                points.Add(point);
             }
 
             var upsert = UpsertMixedRiskBlockRecord(
@@ -1490,13 +1488,13 @@ internal sealed class SpotWorkflowSession : IDisposable
                 block,
                 blockCandidateIds,
                 conflictsForSpot,
-                disabled,
+                reset,
                 now,
                 note);
-            if (!upsert.Changed && disabled == 0)
+            if (!upsert.Changed && reset == 0)
                 continue;
 
-            totalDisabled += disabled;
+            totalReset += reset;
             touchedSpotIds.Add(spot.FishingSpotId);
             var evidence = spot.Evidence
                 .Append(new SpotEvidenceEvent
@@ -1504,7 +1502,7 @@ internal sealed class SpotWorkflowSession : IDisposable
                     EventType = SpotEvidenceEventType.Review,
                     Position = block.Center,
                     SourceSurfaceGroupId = GetBlockSurfaceGroupId(block),
-                    Note = $"{note} disabledAutoFill={disabled} conflicts={FormatSpotIds(conflictsForSpot)}",
+                    Note = $"{note} resetAutoFill={reset} conflicts={FormatSpotIds(conflictsForSpot)}",
                     CreatedAt = now,
                 })
                 .OrderBy(item => item.CreatedAt)
@@ -1541,7 +1539,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         RebuildTerritorySummaries();
         RebuildAnalyses();
         SyncCurrentAnalysis();
-        return new MixedRiskBlockResetResult(totalDisabled, involvedSpotIds);
+        return new MixedRiskBlockResetResult(totalReset, involvedSpotIds);
     }
 
     private IReadOnlyList<FishingSpotTarget> GetCatalogTerritoryTargets(FishingSpotTarget target)
@@ -1937,11 +1935,12 @@ internal sealed class SpotWorkflowSession : IDisposable
                 : CreateMaintenanceSpot(target);
             spot = MergeLegacyReviewIntoMaintenanceSpot(target, spot);
             spot = MergeLegacyLedgerIntoMaintenanceSpot(target, spot);
+            spot = RemoveLegacyDisabledAutoCastFillPoints(spot);
             spots.Add(spot);
         }
 
         foreach (var orphaned in document.Spots.Where(spot => !targets.Any(target => target.FishingSpotId == spot.FishingSpotId)))
-            spots.Add(orphaned);
+            spots.Add(RemoveLegacyDisabledAutoCastFillPoints(orphaned));
 
         var territoryName = document.TerritoryName;
         if (string.IsNullOrWhiteSpace(territoryName))
@@ -1963,6 +1962,24 @@ internal sealed class SpotWorkflowSession : IDisposable
         {
             FishingSpotId = target.FishingSpotId,
             Name = target.Name,
+        };
+    }
+
+    private static SpotMaintenanceRecord RemoveLegacyDisabledAutoCastFillPoints(SpotMaintenanceRecord spot)
+    {
+        if (!spot.ApproachPoints.Any(point =>
+                point.Status == ApproachPointStatus.Disabled
+                && point.SourceKind == ApproachPointSourceKind.AutoCastFill))
+            return spot;
+
+        return spot with
+        {
+            ApproachPoints = spot.ApproachPoints
+                .Where(point => point.Status != ApproachPointStatus.Disabled
+                    || point.SourceKind != ApproachPointSourceKind.AutoCastFill)
+                .OrderBy(point => point.PointId, StringComparer.Ordinal)
+                .ToList(),
+            UpdatedAt = DateTimeOffset.UtcNow,
         };
     }
 
@@ -2225,16 +2242,25 @@ internal sealed class SpotWorkflowSession : IDisposable
                 reachability.Survey.Candidates,
                 CreateBlockBuildProgressAdapter(progress, "分块", $"{filteredCandidateLabel}重分块："),
                 cancellationToken);
+            var filteredCandidateCount = filteredBlocks.Sum(block => block.Candidates.Count);
+            var finalBlocks = SparsifyFinalCandidateBlocks(filteredBlocks);
+            var finalCandidateCount = finalBlocks.Sum(block => block.Candidates.Count);
+            var sparseDropped = Math.Max(0, filteredCandidateCount - finalCandidateCount);
             var finalSurvey = reachability.Survey with
             {
-                Candidates = filteredBlocks.SelectMany(block => block.Candidates).ToList(),
+                Candidates = finalBlocks.SelectMany(block => block.Candidates).ToList(),
                 ReachableCandidateCount = reachability.Survey.ReachabilityMode == SurveyReachabilityMode.NotChecked
                     ? reachability.Survey.ReachableCandidateCount
-                    : filteredBlocks.Sum(block => block.Candidates.Count),
+                    : finalCandidateCount,
+                ReachabilityNote = sparseDropped == 0
+                    ? reachability.Survey.ReachabilityNote
+                    : AppendNote(
+                        reachability.Survey.ReachabilityNote,
+                        $"最终稀疏化按块内 {FinalCandidateSparsifySpacingMeters:F1}m 间距丢弃过密候选 {sparseDropped} 个。"),
             };
-            var message = $"已扫描区域 {finalSurvey.TerritoryId}：原始 {finalSurvey.RawCandidateCount} 个，缓存 {finalSurvey.Candidates.Count} 个，丢弃不可达 {finalSurvey.UnreachableCandidateCount} 个，{filteredBlocks.Count} 个块。{finalSurvey.ReachabilityNote}";
+            var message = $"已扫描区域 {finalSurvey.TerritoryId}：原始 {finalSurvey.RawCandidateCount} 个，缓存 {finalSurvey.Candidates.Count} 个，丢弃不可达 {finalSurvey.UnreachableCandidateCount} 个，最终稀疏丢弃 {sparseDropped} 个，{finalBlocks.Count} 个块。{finalSurvey.ReachabilityNote}";
             progress.Report(new TerritoryScanProgress("完成", 1, 1, message));
-            return new TerritoryScanWorkResult(true, finalSurvey, filteredBlocks, message);
+            return new TerritoryScanWorkResult(true, finalSurvey, finalBlocks, message);
         }
         catch (OperationCanceledException)
         {
@@ -2454,6 +2480,126 @@ internal sealed class SpotWorkflowSession : IDisposable
             string.Empty);
     }
 
+    private static IReadOnlyList<SurveyBlock> SparsifyFinalCandidateBlocks(IReadOnlyList<SurveyBlock> blocks)
+    {
+        if (blocks.Count == 0)
+            return [];
+
+        return blocks
+            .Select(SparsifyFinalCandidateBlock)
+            .ToList();
+    }
+
+    private static SurveyBlock SparsifyFinalCandidateBlock(SurveyBlock block)
+    {
+        if (block.Candidates.Count < FinalCandidateSparsifyMinimumBlockSize)
+            return block;
+
+        var candidates = block.Candidates
+            .GroupBy(candidate => candidate.SurfaceGroupId, StringComparer.Ordinal)
+            .SelectMany(group =>
+            {
+                var groupCandidates = group.ToList();
+                return groupCandidates.Count < FinalCandidateSparsifyMinimumBlockSize
+                    ? groupCandidates
+                    : SparsifyFinalCandidates(
+                        groupCandidates,
+                        CalculateCandidateCenter(groupCandidates),
+                        FinalCandidateSparsifySpacingMeters);
+            })
+            .OrderBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+            .ToList();
+        return candidates.Count == block.Candidates.Count
+            ? block
+            : block with { Candidates = candidates };
+    }
+
+    private static IReadOnlyList<ApproachCandidate> SparsifyFinalCandidates(
+        IReadOnlyList<ApproachCandidate> candidates,
+        Point3 center,
+        float spacing)
+    {
+        var kept = new List<ApproachCandidate>();
+        var cells = new Dictionary<CandidateSparseGridCell, List<ApproachCandidate>>();
+        var spacingSquared = spacing * spacing;
+        foreach (var candidate in candidates
+            .OrderBy(candidate => HorizontalDistanceSquared(candidate.Position, center))
+            .ThenBy(candidate => candidate.CandidateId, StringComparer.Ordinal))
+        {
+            if (HasKeptCandidateWithin(candidate.Position, cells, spacing, spacingSquared))
+                continue;
+
+            kept.Add(candidate);
+            AddKeptCandidate(candidate, cells, spacing);
+        }
+
+        return kept
+            .OrderBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static bool HasKeptCandidateWithin(
+        Point3 position,
+        IReadOnlyDictionary<CandidateSparseGridCell, List<ApproachCandidate>> cells,
+        float spacing,
+        float spacingSquared)
+    {
+        var cell = CandidateSparseGridCell.From(position, spacing);
+        for (var x = cell.X - 1; x <= cell.X + 1; x++)
+        {
+            for (var z = cell.Z - 1; z <= cell.Z + 1; z++)
+            {
+                if (!cells.TryGetValue(new CandidateSparseGridCell(x, z), out var candidates))
+                    continue;
+
+                if (candidates.Any(candidate => HorizontalDistanceSquared(candidate.Position, position) < spacingSquared))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void AddKeptCandidate(
+        ApproachCandidate candidate,
+        Dictionary<CandidateSparseGridCell, List<ApproachCandidate>> cells,
+        float spacing)
+    {
+        var cell = CandidateSparseGridCell.From(candidate.Position, spacing);
+        if (!cells.TryGetValue(cell, out var candidates))
+        {
+            candidates = [];
+            cells[cell] = candidates;
+        }
+
+        candidates.Add(candidate);
+    }
+
+    private static Point3 CalculateCandidateCenter(IReadOnlyList<ApproachCandidate> candidates)
+    {
+        if (candidates.Count == 0)
+            return default;
+
+        var x = 0f;
+        var y = 0f;
+        var z = 0f;
+        foreach (var candidate in candidates)
+        {
+            x += candidate.Position.X;
+            y += candidate.Position.Y;
+            z += candidate.Position.Z;
+        }
+
+        return new Point3(x / candidates.Count, y / candidates.Count, z / candidates.Count);
+    }
+
+    private static float HorizontalDistanceSquared(Point3 left, Point3 right)
+    {
+        var dx = left.X - right.X;
+        var dz = left.Z - right.Z;
+        return (dx * dx) + (dz * dz);
+    }
+
     private static bool IsCloseEnoughToCandidateMesh(Vector3 candidate, Vector3 meshPoint)
     {
         var dx = candidate.X - meshPoint.X;
@@ -2618,13 +2764,13 @@ internal sealed class SpotWorkflowSession : IDisposable
         SpotScanDocument scan,
         bool forceProbe = false)
     {
+        var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
+        var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
         var candidates = GetSelectableCandidatePool(scan, GetMaintenanceRecord(target.Key));
         if (candidates.Count == 0)
             return null;
 
         var playerSnapshot = GetPlayerSnapshot();
-        var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
-        var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
         var candidate = PickDefaultCandidate(
             candidates,
             playerSnapshot?.Position,
@@ -2644,8 +2790,8 @@ internal sealed class SpotWorkflowSession : IDisposable
             candidates.Count,
             isTerritoryRecorded,
             isTerritoryRecorded
-                ? "当前候选来自领地内存候选；领地未记录候选已耗尽，正在回退到当前钓场未记录但领地已记录的混合风险点。"
-                : "当前候选来自领地内存候选；优先选择领地未记录点，再按距玩家排序；没有领地未记录点时才回退到当前钓场未记录点。");
+                ? "当前候选来自领地内存候选；该点已被其它钓场记录，本次抛竿确认后会用新证据覆盖旧自动范围记录。"
+                : "当前候选来自领地内存候选；优先选择领地未记录点，再按距玩家排序。");
     }
 
     private CandidateSelection? GetOrBuildCandidateSelection(
@@ -2666,7 +2812,7 @@ internal sealed class SpotWorkflowSession : IDisposable
                 GetRecordedCandidateFingerprints(maintenance, target.TerritoryId))
             && (!hasTerritoryUnrecordedCandidate
                 || !IsRecordedCandidate(current.Candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints))
-            && scan.Candidates.Any(candidate => string.Equals(
+            && selectableCandidates.Any(candidate => string.Equals(
                 candidate.CandidateFingerprint,
                 current.Candidate.CandidateFingerprint,
                 StringComparison.Ordinal)))
@@ -2679,7 +2825,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             {
                 IsTerritoryRecorded = isTerritoryRecorded,
                 Note = isTerritoryRecorded
-                    ? "当前候选来自领地内存候选；领地未记录候选已耗尽，正在回退到当前钓场未记录但领地已记录的混合风险点。"
+                    ? "当前候选来自领地内存候选；该点已被其它钓场记录，本次抛竿确认后会用新证据覆盖旧自动范围记录。"
                     : current.Note,
             };
         }
@@ -2693,10 +2839,13 @@ internal sealed class SpotWorkflowSession : IDisposable
     {
         var recordedCandidateIds = GetRecordedCandidateIds(maintenance, scan.Key.TerritoryId);
         var recordedCandidateFingerprints = GetRecordedCandidateFingerprints(maintenance, scan.Key.TerritoryId);
+        var disabledCandidateIds = GetDisabledCandidateIds(maintenance, scan.Key.TerritoryId);
+        var disabledCandidateFingerprints = GetDisabledCandidateFingerprints(maintenance, scan.Key.TerritoryId);
         var rejectedFingerprints = GetRejectedCandidateFingerprints(maintenance);
         return scan.Candidates
             .Where(IsSelectableCandidate)
             .Where(candidate => !IsRecordedCandidate(candidate, recordedCandidateIds, recordedCandidateFingerprints))
+            .Where(candidate => !IsRecordedCandidate(candidate, disabledCandidateIds, disabledCandidateFingerprints))
             .Where(candidate => !rejectedFingerprints.Contains(candidate.CandidateFingerprint))
             .ToList();
     }
@@ -2790,6 +2939,36 @@ internal sealed class SpotWorkflowSession : IDisposable
         return fingerprints;
     }
 
+    private static IReadOnlySet<string> GetDisabledCandidateIds(SpotMaintenanceRecord? maintenance, uint territoryId = 0)
+    {
+        if (maintenance is null)
+            return new HashSet<string>(StringComparer.Ordinal);
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var point in maintenance.ApproachPoints.Where(IsEffectiveDisabledApproachPoint))
+            AddRecordedCandidateIds(ids, territoryId, point);
+
+        return ids;
+    }
+
+    private static IReadOnlySet<string> GetDisabledCandidateFingerprints(SpotMaintenanceRecord? maintenance, uint territoryId = 0)
+    {
+        if (maintenance is null)
+            return new HashSet<string>(StringComparer.Ordinal);
+
+        var fingerprints = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var point in maintenance.ApproachPoints.Where(IsEffectiveDisabledApproachPoint))
+            AddRecordedCandidateFingerprints(fingerprints, territoryId, point);
+
+        return fingerprints;
+    }
+
+    private static bool IsEffectiveDisabledApproachPoint(ApproachPoint point)
+    {
+        return point.Status == ApproachPointStatus.Disabled
+            && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
+    }
+
     private static void AddRecordedCandidateIds(HashSet<string> ids, uint territoryId, ApproachPoint point)
     {
         AddIfNotBlank(ids, point.SourceCandidateId);
@@ -2828,7 +3007,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             .Select(evidence => evidence.CandidateFingerprint)
             .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
             .ToHashSet(StringComparer.Ordinal)
-            ?? [];
+            ?? new HashSet<string>(StringComparer.Ordinal);
     }
 
     private static string GetSpotCandidateGraphId(SpotCandidate candidate)
@@ -2954,7 +3133,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         SurveyBlock block,
         IReadOnlySet<string> blockCandidateIds,
         IReadOnlyList<uint> conflictSpotIds,
-        int disabledPointCount,
+        int resetPointCount,
         DateTimeOffset now,
         string note)
     {
@@ -2978,7 +3157,7 @@ internal sealed class SpotWorkflowSession : IDisposable
                 SurfaceGroupId = GetBlockSurfaceGroupId(block),
                 CandidateIds = candidateIds,
                 ConflictingFishingSpotIds = conflicts,
-                DisabledPointCount = disabledPointCount,
+                ResetPointCount = resetPointCount,
                 CreatedAt = now,
                 UpdatedAt = now,
                 Note = note,
@@ -3003,7 +3182,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var blockSurfaceGroupId = GetBlockSurfaceGroupId(block);
         var shouldSetBlockId = string.IsNullOrWhiteSpace(current.BlockId) && !string.IsNullOrWhiteSpace(block.BlockId);
         var shouldSetSurfaceGroupId = string.IsNullOrWhiteSpace(current.SurfaceGroupId) && !string.IsNullOrWhiteSpace(blockSurfaceGroupId);
-        var changed = disabledPointCount > 0
+        var changed = resetPointCount > 0
             || !current.CandidateIds.SequenceEqual(mergedCandidateIds)
             || !current.ConflictingFishingSpotIds.SequenceEqual(mergedConflicts)
             || shouldSetBlockId
@@ -3017,7 +3196,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             SurfaceGroupId = shouldSetSurfaceGroupId ? blockSurfaceGroupId : current.SurfaceGroupId,
             CandidateIds = mergedCandidateIds,
             ConflictingFishingSpotIds = mergedConflicts,
-            DisabledPointCount = current.DisabledPointCount + disabledPointCount,
+            ResetPointCount = current.ResetPointCount + resetPointCount,
             UpdatedAt = now,
             Note = AppendNote(current.Note, note),
         };
@@ -3512,6 +3691,13 @@ internal sealed class SpotWorkflowSession : IDisposable
             return target;
         }
 
+        if (CurrentTarget is { } current
+            && matches.Any(target => target.Key == current.Key))
+        {
+            resolutionNote = $"PlaceName {castPlaceNameId} 匹配多个目标，已使用当前点亮目标 FishingSpot {current.FishingSpotId}；";
+            return current;
+        }
+
         var selected = matches
             .OrderBy(target => GetTargetCenterDistance(target, playerPosition))
             .ThenBy(target => target.FishingSpotId)
@@ -3546,7 +3732,14 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     private sealed record FillBlockSelection(SurveyBlock Block, ApproachCandidate SeedCandidate, float Distance);
 
-    private sealed record MixedRiskBlockResetResult(int DisabledPointCount, IReadOnlyList<uint> RelatedFishingSpotIds)
+    private readonly record struct CandidateSparseGridCell(int X, int Z)
+    {
+        public static CandidateSparseGridCell From(Point3 point, float cellSize) => new(
+            (int)MathF.Floor(point.X / cellSize),
+            (int)MathF.Floor(point.Z / cellSize));
+    }
+
+    private sealed record MixedRiskBlockResetResult(int ResetPointCount, IReadOnlyList<uint> RelatedFishingSpotIds)
     {
         public static MixedRiskBlockResetResult Empty { get; } = new(0, Array.Empty<uint>());
     }

@@ -15,6 +15,9 @@ internal sealed class AutoSurveyRunner
     private const float CastAdjustArrivedDistanceMeters = 0.35f;
     private const float DismountRelocateMoveCloseRangeMeters = 0.5f;
     private const float DismountRelocateArrivedDistanceMeters = 0.75f;
+    private const float DismountRelocateMeshProbeHalfExtentXZ = 1f;
+    private const float DismountRelocateMeshProbeHalfExtentY = 2f;
+    private const float DismountRelocateMaximumVerticalSnapMeters = 1f;
     private const int MaximumMoveResendAttempts = 3;
     private static readonly TimeSpan ShortDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan LoopDelay = TimeSpan.FromSeconds(1);
@@ -55,6 +58,7 @@ internal sealed class AutoSurveyRunner
     private float currentLandingBackoffMeters = LandingBackoffMeters;
     private float currentLandingSideOffsetMeters;
     private float currentLandingForwardOffsetMeters;
+    private Point3? currentMoveDestinationOverride;
     private int castAdjustMoveCount;
     private DateTimeOffset dismountStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastDismountRelocateAttemptAt = DateTimeOffset.MinValue;
@@ -383,6 +387,7 @@ internal sealed class AutoSurveyRunner
         if (playerActions.DismountIfNeeded())
         {
             ResetDismountWait();
+            currentMoveDestinationOverride = null;
             StatusText = $"设置朝向：{CurrentCandidateText}";
             step = AutoSurveyStep.Face;
             return;
@@ -427,18 +432,36 @@ internal sealed class AutoSurveyRunner
 
         lastDismountRelocateAttemptAt = DateTimeOffset.UtcNow;
         var offset = DismountRelocateOffsets[dismountRelocateOffsetIndex];
-        var destination = GetMoveDestination(
+        var requestedDestination = GetMoveDestination(
             currentCandidate,
             currentLandingBackoffMeters,
             offset.SideMeters,
             offset.ForwardMeters);
+        dismountRelocateOffsetIndex++;
+        var meshResult = navmesh.QueryNearestReachablePoint(
+            requestedDestination.ToVector3(),
+            DismountRelocateMeshProbeHalfExtentXZ,
+            DismountRelocateMeshProbeHalfExtentY);
+        if (!meshResult.IsReachable)
+        {
+            failureMessage = $"备用落点没有可达 mesh：{meshResult.Message}";
+            return false;
+        }
+
+        var destination = Point3.From(meshResult.Point);
+        var verticalDelta = MathF.Abs(destination.Y - currentCandidate.Position.Y);
+        if (verticalDelta > DismountRelocateMaximumVerticalSnapMeters)
+        {
+            failureMessage = $"备用落点高度偏差过大：请求 {FormatPoint(requestedDestination)}，实际 {FormatPoint(destination)}，dy={verticalDelta:F2}m";
+            return false;
+        }
+
         var selection = session.CurrentCandidateSelection;
         var result = navmesh.MoveCloseTo(
             destination.ToVector3(),
             selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable,
             DismountRelocateMoveCloseRangeMeters);
 
-        dismountRelocateOffsetIndex++;
         if (!result.IsStarted)
         {
             failureMessage = result.Message;
@@ -448,6 +471,7 @@ internal sealed class AutoSurveyRunner
         ResetMoveResend();
         currentLandingSideOffsetMeters = offset.SideMeters;
         currentLandingForwardOffsetMeters = offset.ForwardMeters;
+        currentMoveDestinationOverride = destination;
         StatusText = $"长时间无法下坐骑：尝试附近同高落点 {dismountRelocateOffsetIndex}/{DismountRelocateOffsets.Length} {FormatPoint(destination)}";
         Delay(ShortDelay);
         step = AutoSurveyStep.DismountRelocateMove;
@@ -603,6 +627,7 @@ internal sealed class AutoSurveyRunner
 
         ResetMoveResend();
         currentLandingBackoffMeters = nextBackoff;
+        currentMoveDestinationOverride = null;
         castAdjustMoveCount++;
         StatusText = $"抛竿不可用：小步靠近 {castAdjustMoveCount}，目标 {CurrentCandidateText}";
         Delay(ShortDelay);
@@ -837,6 +862,8 @@ internal sealed class AutoSurveyRunner
     {
         if (currentCandidate is null)
             return default;
+        if (currentMoveDestinationOverride is { } destination)
+            return destination;
 
         return GetMoveDestination(
             currentCandidate,
@@ -872,6 +899,7 @@ internal sealed class AutoSurveyRunner
         currentLandingBackoffMeters = LandingBackoffMeters;
         currentLandingSideOffsetMeters = 0f;
         currentLandingForwardOffsetMeters = 0f;
+        currentMoveDestinationOverride = null;
         castAdjustMoveCount = 0;
         castRecordTimeoutRetryCount = 0;
         ResetMoveResend();
@@ -891,6 +919,7 @@ internal sealed class AutoSurveyRunner
             return false;
         }
 
+        currentMoveDestinationOverride = null;
         var result = navmesh.MoveCloseTo(GetCurrentMoveDestination().ToVector3(), fly, range);
         if (!result.IsStarted)
         {

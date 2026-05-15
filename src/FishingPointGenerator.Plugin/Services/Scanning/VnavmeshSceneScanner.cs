@@ -24,6 +24,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float WalkableStandingClearanceMeters = 5f;
     private const float OpenFishableClearanceMeters = 5f;
     private const float WalkableFishableMinimumVerticalDelta = 0f;
+    private const float CandidateRearClearanceRayHeight = 1f;
+    private const float CandidateRearClearanceDistance = 1f;
     private const float ProbeCacheCellSize = 0.25f;
     private const float CandidateCoverageCellSize = 2f;
     private const float SurfaceIndexCellSize = 8f;
@@ -1601,6 +1603,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 out var sector))
             return false;
 
+        if (!queryCache.HasClearCandidateRearLine(walkablePoint, hit.Angle))
+            return false;
+
         if (sector is not null)
             facingHints.Add(walkablePoint, sector);
         candidate = new CandidateScratch(walkablePoint, AngleMath.NormalizeRotation(hit.Angle), hit.SurfaceGroupId);
@@ -1642,6 +1647,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 facingHint,
                 out var hit,
                 out var sector))
+            return false;
+
+        if (!queryCache.HasClearCandidateRearLine(walkablePoint, hit.Angle))
             return false;
 
         if (sector is not null)
@@ -2253,6 +2261,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         target,
                         queryCache,
                         out var rotation))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.FacingRejects++;
+                    continue;
+                }
+
+                if (!queryCache.HasClearCandidateRearLine(position, rotation))
                 {
                     if (diagnostics is not null)
                         diagnostics.FacingRejects++;
@@ -3046,7 +3061,8 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     continue;
                 }
 
-                if (TryResolveLegalFacingRotation(position, target, queryCache, out var rotation))
+                if (TryResolveLegalFacingRotation(position, target, queryCache, out var rotation)
+                    && queryCache.HasClearCandidateRearLine(position, rotation))
                 {
                     summary.Successes++;
                     summary.FirstSuccessPosition ??= position;
@@ -3543,6 +3559,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         private readonly Dictionary<ProbePointKey, bool> fishableCovered = [];
         private readonly Dictionary<SightLineKey, bool> clearFacingCorridor = [];
         private readonly Dictionary<SightLineKey, bool> clearRayDropHorizontalLine = [];
+        private readonly Dictionary<SightLineKey, bool> clearCandidateRearLine = [];
 
         public ScanQueryCache(
             TriangleIndex walkableIndex,
@@ -3664,6 +3681,22 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             {
                 result = !collisionBlockerIndex.IntersectsSegment(start, rayPoint);
                 clearRayDropHorizontalLine[key] = result;
+            }
+
+            return result;
+        }
+
+        public bool HasClearCandidateRearLine(Vector3 candidatePosition, float rotation)
+        {
+            var direction = DirectionFromAngle(rotation);
+            var start = candidatePosition + new Vector3(0f, CandidateRearClearanceRayHeight, 0f);
+            var end = CreateProbePoint(candidatePosition, -direction, CandidateRearClearanceDistance)
+                + new Vector3(0f, CandidateRearClearanceRayHeight, 0f);
+            var key = SightLineKey.From(start, end);
+            if (!clearCandidateRearLine.TryGetValue(key, out var result))
+            {
+                result = !collisionBlockerIndex.IntersectsSegment(start, end);
+                clearCandidateRearLine[key] = result;
             }
 
             return result;

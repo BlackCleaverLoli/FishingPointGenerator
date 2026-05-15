@@ -27,7 +27,7 @@ public sealed record MixedRiskBlockRecord
     public string SurfaceGroupId { get; init; } = string.Empty;
     public List<string> CandidateIds { get; init; } = [];
     public List<uint> ConflictingFishingSpotIds { get; init; } = [];
-    public int DisabledPointCount { get; init; }
+    public int ResetPointCount { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
     public string Note { get; init; } = string.Empty;
