@@ -12,6 +12,7 @@ internal sealed class Move3Controller : IDisposable
     private MovementInputController? movement;
     private Vector3 targetPosition;
     private float stopDistance;
+    private float? lockedFaceRotation;
     private bool disposed;
     private readonly CompSig gameObjectSetRotationSig = new(
         "40 53 48 83 EC ?? F3 0F 10 81 ?? ?? ?? ?? 48 8B D9 0F 2E C1");
@@ -30,9 +31,8 @@ internal sealed class Move3Controller : IDisposable
     }
 
     public bool IsMoving { get; private set; }
-    public bool NoChangeFaceDirection { get; private set; }
 
-    public bool TryMoveTo(Vector3 target, float arrivalDistance, bool keepFacing, out string failureMessage)
+    public bool TryMoveTo(Vector3 target, float arrivalDistance, float? faceRotation, out string failureMessage)
     {
         failureMessage = string.Empty;
         if (disposed)
@@ -55,7 +55,9 @@ internal sealed class Move3Controller : IDisposable
 
         targetPosition = target;
         stopDistance = Math.Max(0.05f, arrivalDistance);
-        NoChangeFaceDirection = keepFacing;
+        lockedFaceRotation = faceRotation is { } rotation && float.IsFinite(rotation)
+            ? rotation
+            : null;
         IsMoving = true;
         movement.DesiredPosition = target;
         movement.Enabled = true;
@@ -65,7 +67,7 @@ internal sealed class Move3Controller : IDisposable
     public void Stop()
     {
         IsMoving = false;
-        NoChangeFaceDirection = false;
+        lockedFaceRotation = null;
         targetPosition = default;
         if (movement is not null)
             movement.Enabled = false;
@@ -92,8 +94,14 @@ internal sealed class Move3Controller : IDisposable
     private void GameObjectSetRotationDetour(nint obj, float value)
     {
         var player = DService.Instance().ObjectTable.LocalPlayer;
-        if (player is not null && obj == player.Address && NoChangeFaceDirection && IsMoving)
+        if (player is not null
+            && obj == player.Address
+            && IsMoving
+            && lockedFaceRotation is { } rotation)
+        {
+            gameObjectSetRotationHook?.Original(obj, rotation);
             return;
+        }
 
         gameObjectSetRotationHook?.Original(obj, value);
     }

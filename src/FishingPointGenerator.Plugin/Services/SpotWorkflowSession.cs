@@ -722,7 +722,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     public void StopAutoSurvey()
     {
-        autoSurveyRunner.Stop();
+        autoSurveyRunner.Stop(cancelPathfindingByReload: true);
         LastMessage = autoSurveyRunner.StatusText;
     }
 

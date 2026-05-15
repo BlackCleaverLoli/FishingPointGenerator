@@ -27,6 +27,8 @@ internal sealed class VnavmeshQueryService
         new("vnavmesh.Nav.PathfindInProgress", () => false);
     private readonly IPCSubscriber<int> navPathfindQueued =
         new("vnavmesh.Nav.PathfindNumQueued", () => 0);
+    private readonly IPCSubscriber<object> navPathfindCancelAll =
+        new("vnavmesh.Nav.PathfindCancelAll", () => null!);
     private readonly IPCSubscriber<float> navBuildProgress =
         new("vnavmesh.Nav.BuildProgress", () => -1f);
     private readonly IPCSubscriber<float> pathDistance = new("vnavmesh.Path.GetDistance", () => 0f);
@@ -92,17 +94,29 @@ internal sealed class VnavmeshQueryService
 
     public async Task<PathQueryResult> QueryPathAsync(Vector3 from, Vector3 to, bool fly, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!IsReady)
             return PathQueryResult.Unavailable("vnavmesh not ready");
 
         try
         {
-            var task = navPathfindCancelable.TryInvokeFunc(from, to, fly, cancellationToken)
-                ?? navPathfind.TryInvokeFunc(from, to, fly);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var task = navPathfindCancelable.TryInvokeFunc(from, to, fly, cancellationToken);
+            if (task is null)
+            {
+                if (cancellationToken.CanBeCanceled)
+                    return PathQueryResult.Unavailable("vnavmesh cancelable pathfind IPC unavailable");
+
+                task = navPathfind.TryInvokeFunc(from, to, fly);
+            }
+
             if (task is null)
                 return PathQueryResult.Unavailable("vnavmesh pathfind IPC unavailable");
 
-            var waypoints = await task.ConfigureAwait(false);
+            var waypoints = await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             if (waypoints.Count == 0)
                 return PathQueryResult.Unreachable("empty path");
 
@@ -144,6 +158,18 @@ internal sealed class VnavmeshQueryService
         catch
         {
             // vnavmesh may disappear while the user is stopping automation.
+        }
+    }
+
+    public void CancelPathfindingByReload()
+    {
+        try
+        {
+            navPathfindCancelAll.TryInvokeAction();
+        }
+        catch
+        {
+            // This is a best-effort user stop cleanup; vnavmesh may already be gone.
         }
     }
 

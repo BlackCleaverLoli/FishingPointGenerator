@@ -21,7 +21,6 @@ internal sealed class AutoSurveyRunner : IDisposable
     private const float CastAdjustMaximumHorizontalDistanceFromCandidateMeters = 3.25f;
     private const float CastAdjustMaximumVerticalSnapMeters = 1f;
     private const float FinalSettleTargetDistanceMeters = 1.3f;
-    private const float FinalSettleKeepFacingToleranceRadians = 0.20f;
     private const float InitialLandingFloorProbeHeight = 5f;
     private const float InitialLandingMeshProbeHalfExtentXZ = 3f;
     private const float InitialLandingMeshProbeHalfExtentY = 3f;
@@ -33,9 +32,9 @@ internal sealed class AutoSurveyRunner : IDisposable
     private const int InitialLandingMinimumSupportScore = 7;
     private const float DismountRelocateMoveCloseRangeMeters = 0.5f;
     private const float DismountRelocateArrivedDistanceMeters = 0.75f;
-    private const float DismountRelocateMeshProbeHalfExtentXZ = 1f;
-    private const float DismountRelocateMeshProbeHalfExtentY = 2f;
-    private const float DismountRelocateMaximumVerticalSnapMeters = 1f;
+    private const float DismountRelocateMeshProbeHalfExtentXZ = 2.25f;
+    private const float DismountRelocateMeshProbeHalfExtentY = 3f;
+    private const float DismountRelocateMaximumVerticalSnapMeters = 1.75f;
     private const int MaximumMoveResendAttempts = 3;
     private static readonly TimeSpan ShortDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan LoopDelay = TimeSpan.FromSeconds(1);
@@ -48,6 +47,20 @@ internal sealed class AutoSurveyRunner : IDisposable
     private static readonly TimeSpan InterruptFallbackDelay = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan InterruptGiveUpDelay = TimeSpan.FromSeconds(12);
     private static readonly float[] InitialLandingBackoffDistances = [1.5f, 2f, 2.5f, 3f];
+    private static readonly float[] CastFacingOffsetRadians =
+    [
+        0f,
+        DegreesToRadians(5f),
+        DegreesToRadians(-5f),
+        DegreesToRadians(10f),
+        DegreesToRadians(-10f),
+        DegreesToRadians(15f),
+        DegreesToRadians(-15f),
+        DegreesToRadians(22.5f),
+        DegreesToRadians(-22.5f),
+        DegreesToRadians(30f),
+        DegreesToRadians(-30f),
+    ];
     private static readonly LandingRelocateOffset[] DismountRelocateOffsets =
     [
         new(0.75f, 0f),
@@ -60,6 +73,16 @@ internal sealed class AutoSurveyRunner : IDisposable
         new(-0.75f, DefaultLandingBackoffMeters),
         new(1.25f, 0f),
         new(-1.25f, 0f),
+        new(0f, 1f),
+        new(0f, -1.25f),
+        new(1.25f, 1f),
+        new(-1.25f, 1f),
+        new(1.25f, -1.25f),
+        new(-1.25f, -1.25f),
+        new(1.75f, 0f),
+        new(-1.75f, 0f),
+        new(1.75f, -1f),
+        new(-1.75f, -1f),
     ];
 
     private readonly SpotWorkflowSession session;
@@ -88,6 +111,7 @@ internal sealed class AutoSurveyRunner : IDisposable
     private DateTimeOffset castReadySince = DateTimeOffset.MinValue;
     private DateTimeOffset lastMoveResendAttemptAt = DateTimeOffset.MinValue;
     private int moveResendAttemptCount;
+    private int castFacingAttemptIndex;
     private Move3Controller? castAdjustMove3;
     private bool currentCandidateMountCompleted;
     private bool disposed;
@@ -119,10 +143,11 @@ internal sealed class AutoSurveyRunner : IDisposable
         Start(AutoSurveyMode.Loop, "循环自动点亮：准备。");
     }
 
-    public void Stop(string message = "自动点亮已停止。")
+    public void Stop(string message = "自动点亮已停止。", bool cancelPathfindingByReload = false)
     {
-        if (IsRunning)
-            navmesh.StopMovement();
+        navmesh.StopMovement();
+        if (cancelPathfindingByReload)
+            navmesh.CancelPathfindingByReload();
         StopMove3();
 
         mode = AutoSurveyMode.None;
@@ -333,6 +358,7 @@ internal sealed class AutoSurveyRunner : IDisposable
         }
 
         currentCandidate = selection.Candidate;
+        navmesh.StopMovement();
         ResetCandidateApproach();
         var landingNote = TryPrepareInitialLandingApproach(out var landingMessage)
             ? $"，初始落点 {landingMessage}"
@@ -394,7 +420,7 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
-        if (TryBeginImmediateCastIfAvailable("移动中检测到抛竿可用"))
+        if (TryPauseForStableCastIfAvailable("移动中检测到抛竿可用"))
             return;
 
         if (IsNearCurrentCandidate())
@@ -467,13 +493,6 @@ internal sealed class AutoSurveyRunner : IDisposable
         dismountStartedAt = DateTimeOffset.MinValue;
         lastDismountRelocateAttemptAt = DateTimeOffset.MinValue;
 
-        if (TryBeginImmediateCastIfAvailable("已落地且抛竿可用"))
-            return;
-
-        var finalSettleFailure = string.Empty;
-        if (TryStartFinalSettleMove(out finalSettleFailure))
-            return;
-
         if (IsCastReadyStable())
         {
             ResetDismountWait();
@@ -484,6 +503,17 @@ internal sealed class AutoSurveyRunner : IDisposable
             step = AutoSurveyStep.Cast;
             return;
         }
+
+        if (playerActions.IsCastActionAvailable())
+        {
+            StatusText = $"抛竿动作可用：暂停移动等待稳定 {CurrentCandidateText}";
+            Delay(ShortDelay);
+            return;
+        }
+
+        var finalSettleFailure = string.Empty;
+        if (TryStartFinalSettleMove(out finalSettleFailure))
+            return;
 
         if (castReadyWaitStartedAt == DateTimeOffset.MinValue)
             castReadyWaitStartedAt = now;
@@ -638,7 +668,8 @@ internal sealed class AutoSurveyRunner : IDisposable
         }
 
         var adjustFailure = string.Empty;
-        if (castAttempt == FishingCastAttempt.ActionUnavailable && TryStartCastAdjustMove(out adjustFailure))
+        if ((castAttempt == FishingCastAttempt.ActionUnavailable || castAttempt == FishingCastAttempt.ActionRejected)
+            && TryStartCastAdjustMove(out adjustFailure))
             return;
 
         if (castAttempt == FishingCastAttempt.PlayerUnavailable)
@@ -655,6 +686,8 @@ internal sealed class AutoSurveyRunner : IDisposable
             FishingCastAttempt.ActionManagerUnavailable => $"等待动作系统可用：{CurrentCandidateText}",
             FishingCastAttempt.ActionUnavailable when !string.IsNullOrWhiteSpace(adjustFailure) =>
                 $"抛竿不可用，靠近移动失败：{adjustFailure}。目标 {CurrentCandidateText}",
+            FishingCastAttempt.ActionRejected when !string.IsNullOrWhiteSpace(adjustFailure) =>
+                $"抛竿动作被拒绝，调面向失败：{adjustFailure}。目标 {CurrentCandidateText}",
             FishingCastAttempt.ActionUnavailable => $"等待抛竿动作可用：{CurrentCandidateText}",
             FishingCastAttempt.ActionRejected => $"抛竿动作被拒绝，等待重试：{CurrentCandidateText}",
             _ => $"等待抛竿：{CurrentCandidateText}",
@@ -691,7 +724,7 @@ internal sealed class AutoSurveyRunner : IDisposable
         if (TryStartMove3To(
             destination,
             CastAdjustArrivedDistanceMeters,
-            keepFacing: false,
+            faceRotation: null,
             out var move3Failure))
         {
             usedMove3 = true;
@@ -713,6 +746,7 @@ internal sealed class AutoSurveyRunner : IDisposable
         }
 
         ResetMoveResend();
+        castFacingAttemptIndex = 0;
         currentLandingBackoffMeters = nextBackoff;
         currentMoveDestinationOverride = destination;
         castAdjustMoveCount++;
@@ -727,40 +761,57 @@ internal sealed class AutoSurveyRunner : IDisposable
     private bool TryStartFinalSettleMove(out string failureMessage)
     {
         failureMessage = string.Empty;
-        if (!TryBuildFinalSettleDestination(out var destination, out var keepFacing, out failureMessage))
-            return false;
-
-        if (!TryStartMove3To(
-            destination,
-            CastAdjustArrivedDistanceMeters,
-            keepFacing,
-            out failureMessage))
-            return false;
-
-        ResetMoveResend();
-        if (currentCandidate is not null)
+        if (currentCandidate is null)
         {
-            var remainingDistance = destination.HorizontalDistanceTo(currentCandidate.Position);
-            currentLandingBackoffMeters = MathF.Min(currentLandingBackoffMeters, MathF.Max(0f, remainingDistance));
+            failureMessage = "没有当前候选";
+            return false;
         }
 
-        currentMoveDestinationOverride = destination;
-        castAdjustMoveCount++;
-        StatusText = keepFacing
-            ? $"抛竿不可用：Move3 固定面向直走 {castAdjustMoveCount}，目标 {CurrentCandidateText}"
-            : $"抛竿不可用：Move3 最终直走调面向 {castAdjustMoveCount}，目标 {CurrentCandidateText}";
-        Delay(ShortDelay);
-        step = AutoSurveyStep.CastAdjustMove;
-        return true;
+        while (castFacingAttemptIndex < CastFacingOffsetRadians.Length)
+        {
+            var attemptIndex = castFacingAttemptIndex;
+            var offset = CastFacingOffsetRadians[attemptIndex];
+            var faceRotation = AngleMath.NormalizeRotation(currentCandidate.Rotation + offset);
+            var facingText = FormatFacingOffset(offset);
+            if (!TryBuildFinalSettleDestination(faceRotation, out var destination, out failureMessage))
+            {
+                castFacingAttemptIndex++;
+                continue;
+            }
+
+            if (!TryStartMove3To(
+                destination,
+                CastAdjustArrivedDistanceMeters,
+                faceRotation,
+                out failureMessage))
+                return false;
+
+            castFacingAttemptIndex++;
+            ResetMoveResend();
+            if (currentCandidate is not null)
+            {
+                var remainingDistance = destination.HorizontalDistanceTo(currentCandidate.Position);
+                currentLandingBackoffMeters = MathF.Min(currentLandingBackoffMeters, MathF.Max(0f, remainingDistance));
+            }
+
+            currentMoveDestinationOverride = destination;
+            castAdjustMoveCount++;
+            StatusText = $"抛竿不可用：Move3 尝试面向 {facingText} {attemptIndex + 1}/{CastFacingOffsetRadians.Length}，目标 {CurrentCandidateText}";
+            Delay(ShortDelay);
+            step = AutoSurveyStep.CastAdjustMove;
+            return true;
+        }
+
+        failureMessage = "指定面向附近角度已试完";
+        return false;
     }
 
     private bool TryBuildFinalSettleDestination(
+        float faceRotation,
         out Point3 destination,
-        out bool keepFacing,
         out string failureMessage)
     {
         destination = default;
-        keepFacing = false;
         failureMessage = string.Empty;
         if (currentCandidate is null)
         {
@@ -775,7 +826,7 @@ internal sealed class AutoSurveyRunner : IDisposable
             return false;
         }
 
-        var forward = GetForwardVector(currentCandidate.Rotation);
+        var forward = GetForwardVector(faceRotation);
         destination = new Point3(
             player.Position.X + (forward.X * FinalSettleTargetDistanceMeters),
             player.Position.Y,
@@ -788,8 +839,6 @@ internal sealed class AutoSurveyRunner : IDisposable
             return false;
         }
 
-        keepFacing = AngleMath.AngularDistance(player.Rotation, currentCandidate.Rotation)
-            <= FinalSettleKeepFacingToleranceRadians;
         return true;
     }
 
@@ -801,7 +850,7 @@ internal sealed class AutoSurveyRunner : IDisposable
             return;
         }
 
-        if (TryBeginImmediateCastIfAvailable("小步靠近后抛竿可用"))
+        if (TryPauseForStableCastIfAvailable("小步靠近后抛竿可用"))
             return;
 
         if (TryGetCurrentCandidateDistance(out var currentDistance)
@@ -1098,7 +1147,7 @@ internal sealed class AutoSurveyRunner : IDisposable
         return true;
     }
 
-    private bool TryBeginImmediateCastIfAvailable(string reason)
+    private bool TryPauseForStableCastIfAvailable(string reason)
     {
         if (!currentCandidateMountCompleted || !playerActions.IsCastActionAvailable())
             return false;
@@ -1106,12 +1155,8 @@ internal sealed class AutoSurveyRunner : IDisposable
         navmesh.StopMovement();
         StopMove3();
         ResetMoveResend();
-        ResetDismountWait();
-        ResetCastReadyWait();
         currentMoveDestinationOverride = null;
-        StatusText = $"{reason}：准备抛竿 {CurrentCandidateText}";
-        Delay(ShortDelay);
-        step = AutoSurveyStep.Cast;
+        BeginPostMove($"{reason}：已暂停移动，等待抛竿稳定 {CurrentCandidateText}");
         return true;
     }
 
@@ -1301,6 +1346,19 @@ internal sealed class AutoSurveyRunner : IDisposable
     private static Vector3 GetLeftVector(Vector3 forward) =>
         Vector3.Normalize(new Vector3(-forward.Z, 0f, forward.X));
 
+    private static float DegreesToRadians(float degrees) => degrees * (MathF.PI / 180f);
+
+    private static string FormatFacingOffset(float radians)
+    {
+        var degrees = radians * (180f / MathF.PI);
+        if (MathF.Abs(degrees) < 0.05f)
+            return "原面向";
+
+        return degrees > 0f
+            ? $"偏移 +{degrees:F1}度"
+            : $"偏移 {degrees:F1}度";
+    }
+
     private void ResetCandidateApproach()
     {
         currentLandingBackoffMeters = DefaultLandingBackoffMeters;
@@ -1309,6 +1367,7 @@ internal sealed class AutoSurveyRunner : IDisposable
         currentMoveDestinationOverride = null;
         castAdjustMoveCount = 0;
         castRecordTimeoutRetryCount = 0;
+        castFacingAttemptIndex = 0;
         currentCandidateMountCompleted = false;
         ResetMoveResend();
         ResetDismountWait();
@@ -1319,7 +1378,7 @@ internal sealed class AutoSurveyRunner : IDisposable
     private bool TryStartMove3To(
         Point3 destination,
         float arrivalDistance,
-        bool keepFacing,
+        float? faceRotation,
         out string failureMessage)
     {
         failureMessage = string.Empty;
@@ -1339,11 +1398,12 @@ internal sealed class AutoSurveyRunner : IDisposable
             return castAdjustMove3.TryMoveTo(
                 destination.ToVector3(),
                 arrivalDistance,
-                keepFacing,
+                faceRotation,
                 out failureMessage);
         }
         catch (Exception ex)
         {
+            castAdjustMove3?.Dispose();
             castAdjustMove3 = null;
             failureMessage = ex.Message;
             return false;
@@ -1418,6 +1478,7 @@ internal sealed class AutoSurveyRunner : IDisposable
         moveResendAttemptCount++;
         lastMoveResendAttemptAt = now;
         StopMove3();
+        navmesh.StopMovement();
         var result = navmesh.MoveCloseTo(GetCurrentMoveDestination().ToVector3(), fly, range);
         if (!result.IsStarted)
         {
