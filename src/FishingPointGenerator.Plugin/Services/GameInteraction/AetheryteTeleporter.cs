@@ -20,7 +20,7 @@ internal static unsafe class AetheryteTeleporter
 
         if (target.TerritoryId == 0)
         {
-            error = "已选钓场没有有效领地。";
+            error = "维护目标没有有效领地。";
             return false;
         }
 

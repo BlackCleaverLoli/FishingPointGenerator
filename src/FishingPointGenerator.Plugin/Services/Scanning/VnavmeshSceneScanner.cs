@@ -24,6 +24,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float WalkableStandingClearanceMeters = 5f;
     private const float OpenFishableClearanceMeters = 5f;
     private const float WalkableFishableMinimumVerticalDelta = 0f;
+    private const float SoftBankCoverMinimumNormalY = 0.75f;
+    private const float SoftBankCoverMinimumBelowWalkable = 0.15f;
+    private const float SoftBankCoverMaximumHeightAboveFishable = 2f;
     private const float CandidateRearClearanceRayHeight = 1f;
     private const float CandidateRearClearanceDistance = 1f;
     private const float ProbeCacheCellSize = 0.25f;
@@ -162,7 +165,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var nearbySurfaceMatches = CountNearbySurfaceMatches(
             fishableOuterEdges.Count > 0 ? fishableOuterEdges : fishableEdges,
             walkableTriangles);
-        var candidates = GenerateCandidates(territoryId, fishableTriangles, walkableTriangles, collisionBlockerTriangles, log: pluginLog)
+        var candidates = GenerateCandidates(
+                territoryId,
+                fishableTriangles,
+                walkableTriangles,
+                collisionBlockerTriangles,
+                log: pluginLog,
+                collectRayDropDetails: true)
             .Where(candidate => HorizontalDistance(candidate.Position.ToVector3(), playerPosition) <= radius)
             .ToList();
         var waterSummary = CreateWaterSurfaceSummary(playerPosition, fishableTriangles);
@@ -296,12 +305,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> collisionBlockerTriangles,
         IProgress<TerritoryScanProgress>? progress = null,
         CancellationToken cancellationToken = default,
-        IPluginLog? log = null)
+        IPluginLog? log = null,
+        bool collectRayDropDetails = false)
     {
         var totalStopwatch = Stopwatch.StartNew();
         var diagnostics = log is null
             ? null
-            : new CandidateGenerationDiagnostics(log, territoryId, fishableTriangles.Count, walkableTriangles.Count, collisionBlockerTriangles.Count);
+            : new CandidateGenerationDiagnostics(log, territoryId, fishableTriangles.Count, walkableTriangles.Count, collisionBlockerTriangles.Count, collectRayDropDetails);
         var candidateDedupe = new CandidateDedupeIndex();
         var candidates = new List<CandidateScratch>();
 
@@ -416,7 +426,13 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         stepStopwatch.Restart();
         progress?.Report(new TerritoryScanProgress("生成候选", 3, 5, $"正在筛选 {collisionBlockerTriangles.Count} 个相关碰撞面。"));
         var relevantCollisionBlockers = FilterRelevantCollisionBlockers(fishableTriangles, collisionBlockerTriangles);
-        diagnostics?.LogStep("filter-collision-blockers", stepStopwatch, $"input={collisionBlockerTriangles.Count} output={relevantCollisionBlockers.Count}");
+        var blockerDetails = diagnostics?.CollectRayDropDetails == true
+            ? $" fishableFlags={relevantCollisionBlockers.Count(triangle => triangle.IsFishable)} flyThroughFlags={relevantCollisionBlockers.Count(triangle => triangle.Flags.HasFlag(ScenePrimitiveFlags.FlyThrough))} walkableFlags={relevantCollisionBlockers.Count(triangle => triangle.IsWalkable)} top={FormatTriangleMaterialSummary(relevantCollisionBlockers, 4)}"
+            : string.Empty;
+        diagnostics?.LogStep(
+            "filter-collision-blockers",
+            stepStopwatch,
+            $"input={collisionBlockerTriangles.Count} output={relevantCollisionBlockers.Count}{blockerDetails}");
 
         stepStopwatch.Restart();
         var collisionBlockerIndex = new TriangleIndex(relevantCollisionBlockers, SurfaceIndexCellSize);
@@ -1371,10 +1387,11 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         position,
                         queryCache,
                         facingHints,
-                        out var candidate))
+                        out var candidate,
+                        out var failureReason))
                 {
                     if (diagnostics is not null)
-                        diagnostics.CandidateCreateFailures++;
+                        diagnostics.RecordCandidateCreateFailure(failureReason);
                     continue;
                 }
 
@@ -1460,7 +1477,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         diagnostics))
                 {
                     if (diagnostics is not null)
-                        diagnostics.CandidateCreateFailures++;
+                        diagnostics.RecordCandidateCreateFailure(CandidateCreateFailureReason.CoverageNoCandidate);
                     continue;
                 }
 
@@ -1531,10 +1548,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
                 if (diagnostics is not null)
                     diagnostics.CandidateCreateAttempts++;
-                if (!TryCreateRayDropCandidateForWalkableSample(position, nearbyBlocks, queryCache, facingHints, out var candidate))
+                if (!TryCreateRayDropCandidateForWalkableSample(
+                        position,
+                        nearbyBlocks,
+                        queryCache,
+                        facingHints,
+                        out var candidate,
+                        out var failureReason))
                 {
                     if (diagnostics is not null)
-                        diagnostics.CandidateCreateFailures++;
+                        diagnostics.RecordCandidateCreateFailure(failureReason);
                     continue;
                 }
 
@@ -1565,26 +1588,37 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         Vector3 walkablePoint,
         ScanQueryCache queryCache,
         RayDropFacingHintIndex facingHints,
-        out CandidateScratch candidate)
+        out CandidateScratch candidate,
+        out CandidateCreateFailureReason failureReason)
     {
         candidate = default;
+        failureReason = CandidateCreateFailureReason.None;
+        var attempt = new RayDropAttemptStats();
         DirectionalRayDropHit? Probe(float angle)
         {
             var direction = DirectionFromAngle(angle);
             var rayPoint = CreateProbePoint(walkablePoint, direction, CandidateFishableRayMaxDistance) + new Vector3(0f, CandidateFishableRayHeight, 0f);
             if (!queryCache.HasClearRayDropHorizontalLine(walkablePoint, rayPoint))
+            {
+                attempt.HorizontalBlocked++;
                 return null;
+            }
 
             var result = TryFindRayDropFishableTarget(
                 territoryId,
                 rayPoint,
+                walkablePoint,
                 fishableIndex,
                 fishableSurfaceGroupIds,
                 queryCache,
                 out var target);
-            if (result == RayDropProbeResult.Miss)
+            if (result != RayDropProbeResult.HitFishable)
+            {
+                attempt.RecordMiss(result);
                 return null;
+            }
 
+            attempt.Hits++;
             return new DirectionalRayDropHit(
                 NormalizeAngle(angle),
                 direction,
@@ -1601,10 +1635,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 facingHint,
                 out var hit,
                 out var sector))
+        {
+            failureReason = attempt.ResolveFacingFailureReason();
             return false;
+        }
 
         if (!queryCache.HasClearCandidateRearLine(walkablePoint, hit.Angle))
+        {
+            failureReason = CandidateCreateFailureReason.RearBlocked;
             return false;
+        }
 
         if (sector is not null)
             facingHints.Add(walkablePoint, sector);
@@ -1617,20 +1657,30 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<FishableSurfaceBlock> nearbyBlocks,
         ScanQueryCache queryCache,
         RayDropFacingHintIndex facingHints,
-        out CandidateScratch candidate)
+        out CandidateScratch candidate,
+        out CandidateCreateFailureReason failureReason)
     {
         candidate = default;
+        failureReason = CandidateCreateFailureReason.None;
+        var attempt = new RayDropAttemptStats();
         DirectionalRayDropHit? Probe(float angle)
         {
             var direction = DirectionFromAngle(angle);
             var rayPoint = CreateProbePoint(walkablePoint, direction, CandidateFishableRayMaxDistance) + new Vector3(0f, CandidateFishableRayHeight, 0f);
             if (!queryCache.HasClearRayDropHorizontalLine(walkablePoint, rayPoint))
+            {
+                attempt.HorizontalBlocked++;
                 return null;
+            }
 
             var result = TryFindRayDropFishableTarget(rayPoint, walkablePoint, nearbyBlocks, queryCache, out var target);
-            if (result == RayDropProbeResult.Miss)
+            if (result != RayDropProbeResult.HitFishable)
+            {
+                attempt.RecordMiss(result);
                 return null;
+            }
 
+            attempt.Hits++;
             return new DirectionalRayDropHit(
                 NormalizeAngle(angle),
                 direction,
@@ -1647,10 +1697,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 facingHint,
                 out var hit,
                 out var sector))
+        {
+            failureReason = attempt.ResolveFacingFailureReason();
             return false;
+        }
 
         if (!queryCache.HasClearCandidateRearLine(walkablePoint, hit.Angle))
+        {
+            failureReason = CandidateCreateFailureReason.RearBlocked;
             return false;
+        }
 
         if (sector is not null)
             facingHints.Add(walkablePoint, sector);
@@ -1898,6 +1954,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private static RayDropProbeResult TryFindRayDropFishableTarget(
         uint territoryId,
         Vector3 rayPoint,
+        Vector3 walkablePoint,
         TriangleIndex fishableIndex,
         IReadOnlyDictionary<ExtractedSceneTriangle, string> fishableSurfaceGroupIds,
         ScanQueryCache queryCache,
@@ -1910,18 +1967,53 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             out var fishableTriangle,
             out var fishablePoint);
 
-        if (queryCache.TryFindHighestCollisionBelow(rayPoint, out var collisionPoint)
-            && (!hitFishable || collisionPoint.Y >= fishablePoint.Y - SightLineIntersectionEpsilon))
-            return RayDropProbeResult.Miss;
+        if (queryCache.TryFindHighestCollisionBelow(rayPoint, out var collisionTriangle, out var collisionPoint))
+        {
+            if (!hitFishable)
+            {
+                queryCache.RecordRayDropCollisionWithoutFishable(rayPoint, collisionTriangle, collisionPoint);
+                return RayDropProbeResult.CollisionWithoutFishable;
+            }
+            if (collisionPoint.Y >= fishablePoint.Y - SightLineIntersectionEpsilon)
+            {
+                if (IsIgnorableSoftBankCover(walkablePoint, collisionTriangle, collisionPoint, fishablePoint))
+                {
+                    queryCache.RecordRayDropSoftBankCoverPass();
+                }
+                else
+                {
+                    queryCache.RecordRayDropCollisionAboveFishable(rayPoint, collisionTriangle, collisionPoint, fishableTriangle, fishablePoint);
+                    return RayDropProbeResult.CollisionAboveFishable;
+                }
+            }
+        }
 
         if (!hitFishable)
-            return RayDropProbeResult.Miss;
+            return RayDropProbeResult.NoFishable;
 
         var surfaceGroupId = fishableSurfaceGroupIds.TryGetValue(fishableTriangle, out var resolvedSurfaceGroupId)
             ? resolvedSurfaceGroupId
             : CreateFallbackFishableSurfaceGroupId(territoryId, fishablePoint);
         target = new RayDropFishableTarget(fishablePoint, fishableTriangle, surfaceGroupId);
         return RayDropProbeResult.HitFishable;
+    }
+
+    private static bool IsIgnorableSoftBankCover(
+        Vector3 walkablePoint,
+        ExtractedSceneTriangle collisionTriangle,
+        Vector3 collisionPoint,
+        Vector3 fishablePoint)
+    {
+        if (!collisionTriangle.IsWalkable
+            || collisionTriangle.Normal.Y < SoftBankCoverMinimumNormalY)
+            return false;
+
+        if (collisionPoint.Y > walkablePoint.Y - SoftBankCoverMinimumBelowWalkable)
+            return false;
+
+        var heightAboveFishable = collisionPoint.Y - fishablePoint.Y;
+        return heightAboveFishable >= -SightLineIntersectionEpsilon
+            && heightAboveFishable <= SoftBankCoverMaximumHeightAboveFishable;
     }
 
     private static string CreateFallbackFishableSurfaceGroupId(uint territoryId, Vector3 point) =>
@@ -1965,12 +2057,29 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             }
         }
 
-        if (queryCache.TryFindHighestCollisionBelow(rayPoint, out var collisionPoint)
-            && (bestBlock is null || collisionPoint.Y >= bestFishablePoint.Y - SightLineIntersectionEpsilon))
-            return RayDropProbeResult.Miss;
+        if (queryCache.TryFindHighestCollisionBelow(rayPoint, out var collisionTriangle, out var collisionPoint))
+        {
+            if (bestBlock is null)
+            {
+                queryCache.RecordRayDropCollisionWithoutFishable(rayPoint, collisionTriangle, collisionPoint);
+                return RayDropProbeResult.CollisionWithoutFishable;
+            }
+            if (collisionPoint.Y >= bestFishablePoint.Y - SightLineIntersectionEpsilon)
+            {
+                if (IsIgnorableSoftBankCover(walkablePoint, collisionTriangle, collisionPoint, bestFishablePoint))
+                {
+                    queryCache.RecordRayDropSoftBankCoverPass();
+                }
+                else
+                {
+                    queryCache.RecordRayDropCollisionAboveFishable(rayPoint, collisionTriangle, collisionPoint, bestTriangle, bestFishablePoint);
+                    return RayDropProbeResult.CollisionAboveFishable;
+                }
+            }
+        }
 
         if (bestBlock is not { } resultBlock)
-            return RayDropProbeResult.Miss;
+            return RayDropProbeResult.NoFishable;
 
         if (!TryGetNearestFishableBoundaryDirection(bestFishablePoint, resultBlock, out var preferredDirection))
             TryGetHorizontalDirection(bestFishablePoint - walkablePoint, out preferredDirection);
@@ -3001,6 +3110,26 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         return "0x" + material.ToString("X");
     }
 
+    private static string FormatTriangleMaterialSummary(IReadOnlyList<ExtractedSceneTriangle> triangles, int maxItems)
+    {
+        if (triangles.Count == 0)
+            return "none";
+
+        return string.Join(
+            ",",
+            triangles
+                .GroupBy(triangle => new TriangleMaterialSummaryKey(triangle.Material, triangle.MeshType, triangle.Flags))
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key.Material)
+                .Take(maxItems)
+                .Select(group => $"{FormatMaterial(group.Key.Material)}/{group.Key.MeshType}/{group.Key.Flags}:{group.Count()}"));
+    }
+
+    private readonly record struct TriangleMaterialSummaryKey(
+        ulong Material,
+        SceneMeshType MeshType,
+        ScenePrimitiveFlags Flags);
+
     private static DebugCellCounts GetDebugCell(
         Dictionary<GridCell, DebugCellCounts> cells,
         Vector3 origin,
@@ -3249,33 +3378,65 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         AccessBlocked,
     }
 
+    private enum CandidateCreateFailureReason
+    {
+        None,
+        HorizontalBlocked,
+        NoFishableHit,
+        CollisionWithoutFishable,
+        CollisionAboveFishable,
+        NoUsableSector,
+        RearBlocked,
+        CoverageNoCandidate,
+        Unknown,
+    }
+
     private sealed class CandidateGenerationDiagnostics
     {
+        private const int MaxRayDropCollisionSamples = 8;
+        private const int MaxRayDropCollisionSummaries = 8;
+
         private readonly IPluginLog log;
         private readonly uint territoryId;
         private readonly int fishableTriangles;
         private readonly int walkableTriangles;
         private readonly int collisionBlockerTriangles;
+        private readonly List<RayDropCollisionSample> collisionWithoutFishableSamples = [];
+        private readonly List<RayDropCollisionSample> collisionAboveFishableSamples = [];
+        private readonly Dictionary<RayDropCollisionSummaryKey, RayDropCollisionSummary> rayDropCollisionSummaries = [];
 
         public CandidateGenerationDiagnostics(
             IPluginLog log,
             uint territoryId,
             int fishableTriangles,
             int walkableTriangles,
-            int collisionBlockerTriangles)
+            int collisionBlockerTriangles,
+            bool collectRayDropDetails)
         {
             this.log = log;
             this.territoryId = territoryId;
             this.fishableTriangles = fishableTriangles;
             this.walkableTriangles = walkableTriangles;
             this.collisionBlockerTriangles = collisionBlockerTriangles;
+            CollectRayDropDetails = collectRayDropDetails;
         }
+
+        public bool CollectRayDropDetails { get; }
 
         public long CoverageTargets { get; set; }
         public long CoverageHits { get; set; }
         public long CandidateCreateAttempts { get; set; }
         public long CandidateCreates { get; set; }
         public long CandidateCreateFailures { get; set; }
+        public long FailureHorizontalBlocked { get; set; }
+        public long FailureNoFishableHit { get; set; }
+        public long FailureCollisionWithoutFishable { get; set; }
+        public long FailureCollisionAboveFishable { get; set; }
+        public long RayDropSoftBankCoverPasses { get; set; }
+        public long FailureNoUsableSector { get; set; }
+        public long FailureRearBlocked { get; set; }
+        public long FailureCoverageNoCandidate { get; set; }
+        public long FailureUnknown { get; set; }
         public long CandidateDedupeRejects { get; set; }
         public long ProbeAttempts { get; set; }
         public long WalkableLayerAttempts { get; set; }
@@ -3296,6 +3457,80 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         public long AccessCacheHits { get; set; }
         public long AccessBlocked { get; set; }
 
+        public void RecordCandidateCreateFailure(CandidateCreateFailureReason reason)
+        {
+            CandidateCreateFailures++;
+            switch (reason)
+            {
+                case CandidateCreateFailureReason.HorizontalBlocked:
+                    FailureHorizontalBlocked++;
+                    break;
+                case CandidateCreateFailureReason.NoFishableHit:
+                    FailureNoFishableHit++;
+                    break;
+                case CandidateCreateFailureReason.CollisionWithoutFishable:
+                    FailureCollisionWithoutFishable++;
+                    break;
+                case CandidateCreateFailureReason.CollisionAboveFishable:
+                    FailureCollisionAboveFishable++;
+                    break;
+                case CandidateCreateFailureReason.NoUsableSector:
+                    FailureNoUsableSector++;
+                    break;
+                case CandidateCreateFailureReason.RearBlocked:
+                    FailureRearBlocked++;
+                    break;
+                case CandidateCreateFailureReason.CoverageNoCandidate:
+                    FailureCoverageNoCandidate++;
+                    break;
+                default:
+                    FailureUnknown++;
+                    break;
+            }
+        }
+
+        public void RecordRayDropSoftBankCoverPass()
+        {
+            RayDropSoftBankCoverPasses++;
+        }
+
+        public void RecordRayDropCollisionSample(
+            CandidateCreateFailureReason reason,
+            Vector3 rayPoint,
+            ExtractedSceneTriangle collisionTriangle,
+            Vector3 collisionPoint,
+            ExtractedSceneTriangle? fishableTriangle,
+            Vector3? fishablePoint)
+        {
+            if (!CollectRayDropDetails)
+                return;
+
+            var summaryKey = RayDropCollisionSummaryKey.From(reason, collisionTriangle);
+            if (!rayDropCollisionSummaries.TryGetValue(summaryKey, out var summary))
+            {
+                summary = new RayDropCollisionSummary(rayPoint, collisionPoint);
+                rayDropCollisionSummaries[summaryKey] = summary;
+            }
+
+            summary.Record(fishablePoint is { } point ? collisionPoint.Y - point.Y : null);
+
+            var samples = reason switch
+            {
+                CandidateCreateFailureReason.CollisionWithoutFishable => collisionWithoutFishableSamples,
+                CandidateCreateFailureReason.CollisionAboveFishable => collisionAboveFishableSamples,
+                _ => null,
+            };
+            if (samples is null || samples.Count >= MaxRayDropCollisionSamples)
+                return;
+
+            samples.Add(new RayDropCollisionSample(
+                rayPoint,
+                collisionTriangle,
+                collisionPoint,
+                fishableTriangle,
+                fishablePoint));
+        }
+
         public void LogStep(string step, Stopwatch stopwatch, string details)
         {
             stopwatch.Stop();
@@ -3311,7 +3546,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         {
             stopwatch.Stop();
             log.Information(
-                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} collisionBlockers={CollisionBlockers} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} accessQueries={AccessQueries} accessCacheHits={AccessCacheHits} accessBlocked={AccessBlocked}",
+                "FPG candidate timing summary: territory={TerritoryId} totalMs={TotalMs:F1} fishableTriangles={FishableTriangles} walkableTriangles={WalkableTriangles} collisionBlockers={CollisionBlockers} candidates={Candidates} coverageTargets={CoverageTargets} coverageHits={CoverageHits} createAttempts={CreateAttempts} created={Created} createFailures={CreateFailures} failureHorizontalBlocked={FailureHorizontalBlocked} failureNoFishable={FailureNoFishable} failureCollisionBeforeFishable={FailureCollisionBeforeFishable} failureCollisionWithoutFishable={FailureCollisionWithoutFishable} failureCollisionAboveFishable={FailureCollisionAboveFishable} softBankCoverPasses={SoftBankCoverPasses} failureNoUsableSector={FailureNoUsableSector} failureRearBlocked={FailureRearBlocked} failureCoverageNoCandidate={FailureCoverageNoCandidate} failureUnknown={FailureUnknown} dedupeRejects={DedupeRejects} probes={Probes} walkableLayers={WalkableLayers} walkableMisses={WalkableMisses} walkableRejects={WalkableRejects} facingRejects={FacingRejects} walkableStackQueries={WalkableStackQueries} walkableStackCacheHits={WalkableStackCacheHits} standingClearanceQueries={StandingClearanceQueries} standingClearanceCacheHits={StandingClearanceCacheHits} facingFishableQueries={FacingFishableQueries} facingFishableCacheHits={FacingFishableCacheHits} facingFishableHits={FacingFishableHits} fishableCoveredQueries={FishableCoveredQueries} fishableCoveredCacheHits={FishableCoveredCacheHits} fishableCoveredHits={FishableCoveredHits} accessQueries={AccessQueries} accessCacheHits={AccessCacheHits} accessBlocked={AccessBlocked}",
                 territoryId,
                 stopwatch.Elapsed.TotalMilliseconds,
                 fishableTriangles,
@@ -3323,6 +3558,16 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 CandidateCreateAttempts,
                 CandidateCreates,
                 CandidateCreateFailures,
+                FailureHorizontalBlocked,
+                FailureNoFishableHit,
+                FailureCollisionWithoutFishable + FailureCollisionAboveFishable,
+                FailureCollisionWithoutFishable,
+                FailureCollisionAboveFishable,
+                RayDropSoftBankCoverPasses,
+                FailureNoUsableSector,
+                FailureRearBlocked,
+                FailureCoverageNoCandidate,
+                FailureUnknown,
                 CandidateDedupeRejects,
                 ProbeAttempts,
                 WalkableLayerAttempts,
@@ -3342,6 +3587,163 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 AccessQueries,
                 AccessCacheHits,
                 AccessBlocked);
+
+            if (CollectRayDropDetails)
+            {
+                LogRayDropCollisionSummaries();
+                LogRayDropCollisionSamples("collisionWithoutFishable", collisionWithoutFishableSamples);
+                LogRayDropCollisionSamples("collisionAboveFishable", collisionAboveFishableSamples);
+            }
+        }
+
+        private void LogRayDropCollisionSummaries()
+        {
+            var index = 0;
+            foreach (var item in rayDropCollisionSummaries
+                         .OrderByDescending(item => item.Value.Count)
+                         .ThenBy(item => item.Key.Material)
+                         .Take(MaxRayDropCollisionSummaries))
+            {
+                index++;
+                var key = item.Key;
+                var summary = item.Value;
+                log.Information(
+                    "FPG raydrop collision material summary: territory={TerritoryId} index={Index} reason={Reason} count={Count} collisionMaterial={CollisionMaterial} collisionMesh={CollisionMesh} collisionFlags={CollisionFlags} collisionIsFishable={CollisionIsFishable} collisionIsWalkable={CollisionIsWalkable} collisionIsFlyThrough={CollisionIsFlyThrough} collisionNormalY={CollisionNormalY:F2} firstRay=({RayX:F2},{RayY:F2},{RayZ:F2}) firstCollision=({CollisionX:F2},{CollisionY:F2},{CollisionZ:F2}) deltaYMin={DeltaYMin} deltaYMax={DeltaYMax}",
+                    territoryId,
+                    index,
+                    key.Reason,
+                    summary.Count,
+                    FormatMaterial(key.Material),
+                    key.MeshType,
+                    key.Flags,
+                    key.Flags.HasFlag(ScenePrimitiveFlags.Fishable),
+                    key.IsWalkable,
+                    key.Flags.HasFlag(ScenePrimitiveFlags.FlyThrough),
+                    key.NormalYBucket / 100f,
+                    summary.FirstRayPoint.X,
+                    summary.FirstRayPoint.Y,
+                    summary.FirstRayPoint.Z,
+                    summary.FirstCollisionPoint.X,
+                    summary.FirstCollisionPoint.Y,
+                    summary.FirstCollisionPoint.Z,
+                    FormatOptionalFloat(summary.MinDeltaY),
+                    FormatOptionalFloat(summary.MaxDeltaY));
+            }
+        }
+
+        private void LogRayDropCollisionSamples(string reason, IReadOnlyList<RayDropCollisionSample> samples)
+        {
+            for (var index = 0; index < samples.Count; index++)
+            {
+                var sample = samples[index];
+                if (sample.FishableTriangle is { } fishableTriangle && sample.FishablePoint is { } fishablePoint)
+                {
+                    log.Information(
+                        "FPG raydrop collision sample: territory={TerritoryId} reason={Reason} index={Index} ray=({RayX:F2},{RayY:F2},{RayZ:F2}) collision=({CollisionX:F2},{CollisionY:F2},{CollisionZ:F2}) fishable=({FishableX:F2},{FishableY:F2},{FishableZ:F2}) deltaY={DeltaY:F3} collisionMaterial={CollisionMaterial} collisionMesh={CollisionMesh} collisionFlags={CollisionFlags} collisionIsFishable={CollisionIsFishable} collisionIsWalkable={CollisionIsWalkable} collisionIsFlyThrough={CollisionIsFlyThrough} collisionArea={CollisionArea:F3} collisionNormalY={CollisionNormalY:F2} fishableMaterial={FishableMaterial} fishableMesh={FishableMesh} fishableFlags={FishableFlags} fishableIsFishable={FishableIsFishable} fishableArea={FishableArea:F3} fishableNormalY={FishableNormalY:F2}",
+                        territoryId,
+                        reason,
+                        index + 1,
+                        sample.RayPoint.X,
+                        sample.RayPoint.Y,
+                        sample.RayPoint.Z,
+                        sample.CollisionPoint.X,
+                        sample.CollisionPoint.Y,
+                        sample.CollisionPoint.Z,
+                        fishablePoint.X,
+                        fishablePoint.Y,
+                        fishablePoint.Z,
+                        sample.CollisionPoint.Y - fishablePoint.Y,
+                        FormatMaterial(sample.CollisionTriangle.Material),
+                        sample.CollisionTriangle.MeshType,
+                        sample.CollisionTriangle.Flags,
+                        sample.CollisionTriangle.IsFishable,
+                        sample.CollisionTriangle.IsWalkable,
+                        sample.CollisionTriangle.Flags.HasFlag(ScenePrimitiveFlags.FlyThrough),
+                        sample.CollisionTriangle.Area,
+                        sample.CollisionTriangle.Normal.Y,
+                        FormatMaterial(fishableTriangle.Material),
+                        fishableTriangle.MeshType,
+                        fishableTriangle.Flags,
+                        fishableTriangle.IsFishable,
+                        fishableTriangle.Area,
+                        fishableTriangle.Normal.Y);
+                    continue;
+                }
+
+                log.Information(
+                    "FPG raydrop collision sample: territory={TerritoryId} reason={Reason} index={Index} ray=({RayX:F2},{RayY:F2},{RayZ:F2}) collision=({CollisionX:F2},{CollisionY:F2},{CollisionZ:F2}) fishable=- collisionMaterial={CollisionMaterial} collisionMesh={CollisionMesh} collisionFlags={CollisionFlags} collisionIsFishable={CollisionIsFishable} collisionIsWalkable={CollisionIsWalkable} collisionIsFlyThrough={CollisionIsFlyThrough} collisionArea={CollisionArea:F3} collisionNormalY={CollisionNormalY:F2}",
+                    territoryId,
+                    reason,
+                    index + 1,
+                    sample.RayPoint.X,
+                    sample.RayPoint.Y,
+                    sample.RayPoint.Z,
+                    sample.CollisionPoint.X,
+                    sample.CollisionPoint.Y,
+                    sample.CollisionPoint.Z,
+                    FormatMaterial(sample.CollisionTriangle.Material),
+                    sample.CollisionTriangle.MeshType,
+                    sample.CollisionTriangle.Flags,
+                    sample.CollisionTriangle.IsFishable,
+                    sample.CollisionTriangle.IsWalkable,
+                    sample.CollisionTriangle.Flags.HasFlag(ScenePrimitiveFlags.FlyThrough),
+                    sample.CollisionTriangle.Area,
+                    sample.CollisionTriangle.Normal.Y);
+            }
+        }
+
+        private static string FormatOptionalFloat(float? value)
+        {
+            return value?.ToString("F3") ?? "-";
+        }
+
+        private readonly record struct RayDropCollisionSample(
+            Vector3 RayPoint,
+            ExtractedSceneTriangle CollisionTriangle,
+            Vector3 CollisionPoint,
+            ExtractedSceneTriangle? FishableTriangle,
+            Vector3? FishablePoint);
+
+        private readonly record struct RayDropCollisionSummaryKey(
+            CandidateCreateFailureReason Reason,
+            ulong Material,
+            SceneMeshType MeshType,
+            ScenePrimitiveFlags Flags,
+            bool IsWalkable,
+            int NormalYBucket)
+        {
+            public static RayDropCollisionSummaryKey From(CandidateCreateFailureReason reason, ExtractedSceneTriangle triangle) => new(
+                reason,
+                triangle.Material,
+                triangle.MeshType,
+                triangle.Flags,
+                triangle.IsWalkable,
+                (int)MathF.Round(triangle.Normal.Y * 100f, MidpointRounding.AwayFromZero));
+        }
+
+        private sealed class RayDropCollisionSummary
+        {
+            public RayDropCollisionSummary(Vector3 firstRayPoint, Vector3 firstCollisionPoint)
+            {
+                FirstRayPoint = firstRayPoint;
+                FirstCollisionPoint = firstCollisionPoint;
+            }
+
+            public long Count { get; private set; }
+            public Vector3 FirstRayPoint { get; }
+            public Vector3 FirstCollisionPoint { get; }
+            public float? MinDeltaY { get; private set; }
+            public float? MaxDeltaY { get; private set; }
+
+            public void Record(float? deltaY)
+            {
+                Count++;
+                if (deltaY is not { } value)
+                    return;
+
+                MinDeltaY = MinDeltaY is { } min ? MathF.Min(min, value) : value;
+                MaxDeltaY = MaxDeltaY is { } max ? MathF.Max(max, value) : value;
+            }
         }
     }
 
@@ -3612,19 +4014,51 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             return result;
         }
 
-        public bool TryFindHighestCollisionBelow(Vector3 rayPoint, out Vector3 collisionPoint)
+        public bool TryFindHighestCollisionBelow(
+            Vector3 rayPoint,
+            out ExtractedSceneTriangle collisionTriangle,
+            out Vector3 collisionPoint)
         {
-            collisionPoint = default;
-            foreach (var point in collisionBlockerIndex.FindContainingPoints(rayPoint))
-            {
-                if (rayPoint.Y - point.Y <= WalkableFishableMinimumVerticalDelta)
-                    continue;
+            return collisionBlockerIndex.TryFindHighestContainingPointBelow(
+                rayPoint,
+                WalkableFishableMinimumVerticalDelta,
+                out collisionTriangle,
+                out collisionPoint);
+        }
 
-                collisionPoint = point;
-                return true;
-            }
+        public void RecordRayDropCollisionWithoutFishable(
+            Vector3 rayPoint,
+            ExtractedSceneTriangle collisionTriangle,
+            Vector3 collisionPoint)
+        {
+            diagnostics?.RecordRayDropCollisionSample(
+                CandidateCreateFailureReason.CollisionWithoutFishable,
+                rayPoint,
+                collisionTriangle,
+                collisionPoint,
+                null,
+                null);
+        }
 
-            return false;
+        public void RecordRayDropCollisionAboveFishable(
+            Vector3 rayPoint,
+            ExtractedSceneTriangle collisionTriangle,
+            Vector3 collisionPoint,
+            ExtractedSceneTriangle fishableTriangle,
+            Vector3 fishablePoint)
+        {
+            diagnostics?.RecordRayDropCollisionSample(
+                CandidateCreateFailureReason.CollisionAboveFishable,
+                rayPoint,
+                collisionTriangle,
+                collisionPoint,
+                fishableTriangle,
+                fishablePoint);
+        }
+
+        public void RecordRayDropSoftBankCoverPass()
+        {
+            diagnostics?.RecordRayDropSoftBankCoverPass();
         }
 
         public bool TryFindFacingFishable(
@@ -4189,8 +4623,59 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
 
     private enum RayDropProbeResult
     {
-        Miss,
+        NoFishable,
+        CollisionWithoutFishable,
+        CollisionAboveFishable,
         HitFishable,
+    }
+
+    private sealed class RayDropAttemptStats
+    {
+        public int HorizontalBlocked { get; set; }
+        public int NoFishable { get; set; }
+        public int CollisionWithoutFishable { get; set; }
+        public int CollisionAboveFishable { get; set; }
+        public int Hits { get; set; }
+
+        public void RecordMiss(RayDropProbeResult result)
+        {
+            switch (result)
+            {
+                case RayDropProbeResult.CollisionWithoutFishable:
+                    CollisionWithoutFishable++;
+                    break;
+                case RayDropProbeResult.CollisionAboveFishable:
+                    CollisionAboveFishable++;
+                    break;
+                case RayDropProbeResult.NoFishable:
+                    NoFishable++;
+                    break;
+            }
+        }
+
+        public CandidateCreateFailureReason ResolveFacingFailureReason()
+        {
+            if (Hits > 0)
+                return CandidateCreateFailureReason.NoUsableSector;
+
+            if (HorizontalBlocked == 0
+                && NoFishable == 0
+                && CollisionWithoutFishable == 0
+                && CollisionAboveFishable == 0)
+                return CandidateCreateFailureReason.Unknown;
+
+            var collisionBeforeFishable = CollisionWithoutFishable + CollisionAboveFishable;
+            if (collisionBeforeFishable >= HorizontalBlocked && collisionBeforeFishable >= NoFishable)
+            {
+                return CollisionAboveFishable >= CollisionWithoutFishable
+                    ? CandidateCreateFailureReason.CollisionAboveFishable
+                    : CandidateCreateFailureReason.CollisionWithoutFishable;
+            }
+            if (HorizontalBlocked >= NoFishable)
+                return CandidateCreateFailureReason.HorizontalBlocked;
+
+            return CandidateCreateFailureReason.NoFishableHit;
+        }
     }
 
     private readonly record struct FishableCoverageTargetKey(string SurfaceGroupId, int X, int Y, int Z)

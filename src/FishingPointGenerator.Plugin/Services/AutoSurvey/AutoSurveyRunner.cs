@@ -13,6 +13,10 @@ internal sealed class AutoSurveyRunner
     private const float CastAdjustStepMeters = 0.25f;
     private const float CastAdjustMoveCloseRangeMeters = 0.2f;
     private const float CastAdjustArrivedDistanceMeters = 0.35f;
+    private const float CastAdjustMeshProbeHalfExtentXZ = 0.75f;
+    private const float CastAdjustMeshProbeHalfExtentY = 1.5f;
+    private const float CastAdjustMaximumHorizontalDistanceFromCandidateMeters = 2f;
+    private const float CastAdjustMaximumVerticalSnapMeters = 1f;
     private const float DismountRelocateMoveCloseRangeMeters = 0.5f;
     private const float DismountRelocateArrivedDistanceMeters = 0.75f;
     private const float DismountRelocateMeshProbeHalfExtentXZ = 1f;
@@ -278,7 +282,7 @@ internal sealed class AutoSurveyRunner
 
         if (!HasCurrentTargetScan())
         {
-            Stop($"自动点亮停止：无法派生当前钓场候选。{session.LastMessage}");
+            Stop($"自动点亮停止：无法派生维护目标候选。{session.LastMessage}");
             return;
         }
 
@@ -292,8 +296,8 @@ internal sealed class AutoSurveyRunner
         var selection = session.CurrentCandidateSelection;
         if (selection is null)
         {
-            if (!TryAdvanceToNextTarget("当前目标没有可用候选。"))
-                Stop($"自动点亮停止：当前目标没有可用候选。{session.LastMessage}");
+            if (!TryAdvanceToNextTarget("维护目标没有可用候选。"))
+                Stop($"自动点亮停止：维护目标没有可用候选。{session.LastMessage}");
             return;
         }
 
@@ -610,11 +614,14 @@ internal sealed class AutoSurveyRunner
         if (MathF.Abs(nextBackoff - currentLandingBackoffMeters) <= 0.001f)
             return false;
 
-        var destination = GetMoveDestination(
+        var requestedDestination = GetMoveDestination(
             currentCandidate,
             nextBackoff,
             currentLandingSideOffsetMeters,
             currentLandingForwardOffsetMeters);
+        if (!TryResolveCastAdjustDestination(requestedDestination, out var destination, out failureMessage))
+            return false;
+
         var result = navmesh.MoveCloseTo(
             destination.ToVector3(),
             fly: false,
@@ -627,7 +634,7 @@ internal sealed class AutoSurveyRunner
 
         ResetMoveResend();
         currentLandingBackoffMeters = nextBackoff;
-        currentMoveDestinationOverride = null;
+        currentMoveDestinationOverride = destination;
         castAdjustMoveCount++;
         StatusText = $"抛竿不可用：小步靠近 {castAdjustMoveCount}，目标 {CurrentCandidateText}";
         Delay(ShortDelay);
@@ -639,6 +646,18 @@ internal sealed class AutoSurveyRunner
     {
         if (currentCandidate is null)
         {
+            step = AutoSurveyStep.RefreshCandidate;
+            return;
+        }
+
+        if (TryGetCurrentCandidateDistance(out var currentDistance)
+            && currentDistance > CastAdjustMaximumHorizontalDistanceFromCandidateMeters)
+        {
+            navmesh.StopMovement();
+            ResetMoveResend();
+            currentMoveDestinationOverride = null;
+            StatusText = $"小步靠近偏离原候选过远：{currentDistance:F1}m，重新选择候选。";
+            Delay(ShortDelay);
             step = AutoSurveyStep.RefreshCandidate;
             return;
         }
@@ -672,6 +691,54 @@ internal sealed class AutoSurveyRunner
             Delay(ShortDelay);
             step = AutoSurveyStep.Face;
         }
+    }
+
+    private bool TryResolveCastAdjustDestination(
+        Point3 requestedDestination,
+        out Point3 destination,
+        out string failureMessage)
+    {
+        destination = default;
+        failureMessage = string.Empty;
+        if (currentCandidate is null)
+        {
+            failureMessage = "没有当前候选";
+            return false;
+        }
+
+        var requestedDistance = requestedDestination.HorizontalDistanceTo(currentCandidate.Position);
+        if (requestedDistance > CastAdjustMaximumHorizontalDistanceFromCandidateMeters)
+        {
+            failureMessage = $"小步目标离原候选过远：{requestedDistance:F1}m";
+            return false;
+        }
+
+        var meshResult = navmesh.QueryNearestReachablePoint(
+            requestedDestination.ToVector3(),
+            CastAdjustMeshProbeHalfExtentXZ,
+            CastAdjustMeshProbeHalfExtentY);
+        if (!meshResult.IsReachable)
+        {
+            failureMessage = $"小步目标没有可达 mesh：{meshResult.Message}";
+            return false;
+        }
+
+        destination = Point3.From(meshResult.Point);
+        var actualDistance = destination.HorizontalDistanceTo(currentCandidate.Position);
+        if (actualDistance > CastAdjustMaximumHorizontalDistanceFromCandidateMeters)
+        {
+            failureMessage = $"小步实际落点离原候选过远：请求 {FormatPoint(requestedDestination)}，实际 {FormatPoint(destination)}，dist={actualDistance:F1}m";
+            return false;
+        }
+
+        var verticalDelta = MathF.Abs(destination.Y - currentCandidate.Position.Y);
+        if (verticalDelta > CastAdjustMaximumVerticalSnapMeters)
+        {
+            failureMessage = $"小步实际落点高度偏差过大：请求 {FormatPoint(requestedDestination)}，实际 {FormatPoint(destination)}，dy={verticalDelta:F2}m";
+            return false;
+        }
+
+        return true;
     }
 
     private void WaitCastRecord()
@@ -856,6 +923,17 @@ internal sealed class AutoSurveyRunner
 
         return GetCurrentMoveDestination()
             .HorizontalDistanceTo(Point3.From(player.Position)) <= distanceMeters;
+    }
+
+    private bool TryGetCurrentCandidateDistance(out float distance)
+    {
+        distance = 0f;
+        var player = DService.Instance().ObjectTable.LocalPlayer;
+        if (player is null || currentCandidate is null)
+            return false;
+
+        distance = Point3.From(player.Position).HorizontalDistanceTo(currentCandidate.Position);
+        return true;
     }
 
     private Point3 GetCurrentMoveDestination()

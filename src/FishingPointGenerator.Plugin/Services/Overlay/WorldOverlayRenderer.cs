@@ -3,6 +3,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
+using FishingPointGenerator.Core;
 using FishingPointGenerator.Core.Models;
 using FishingPointGenerator.Plugin.Services;
 using FishingPointGenerator.Plugin.Services.Scanning;
@@ -16,7 +17,6 @@ internal sealed unsafe class WorldOverlayRenderer
     private const uint TerritoryCandidateColor = 0x66808080;
     private const uint CandidateColor = 0xffd0d0d0;
     private const uint ConfirmedColor = 0xff55d779;
-    private const uint SelectedCandidateColor = 0xff35f0ff;
     private const uint BlockLabelColor = 0xffc0a060;
     private const uint WarningColor = 0xff4080ff;
     private const uint FishableDebugFillColor = 0x3345a0ff;
@@ -61,18 +61,16 @@ internal sealed unsafe class WorldOverlayRenderer
             | ImGuiWindowFlags.NoBackground);
         ImGui.SetWindowSize(ImGui.GetIO().DisplaySize);
 
-        var territoryLimit = session.OverlayShowCandidates ? candidateLimit / 2 : candidateLimit;
-        var selectedLimit = session.OverlayShowTerritoryCache ? candidateLimit - territoryLimit : candidateLimit;
         var drawList = ImGui.GetWindowDrawList();
-        var canDrawSelectedTerritory = session.SelectedTerritoryIsCurrent;
-        if (session.CurrentTarget is not null && canDrawSelectedTerritory)
+        var canDrawCurrentTerritory = session.SelectedTerritoryIsCurrent;
+        if (session.CurrentTarget is not null && canDrawCurrentTerritory)
             DrawTarget(drawList, session, player.Position);
         if (session.OverlayShowFishableDebug || session.OverlayShowWalkableDebug)
             DrawSurfaceDebug(drawList, session, player.Position, drawDistance, Math.Min(candidateLimit, 512));
-        if (session.OverlayShowTerritoryCache && territoryLimit > 0 && canDrawSelectedTerritory)
-            DrawTerritoryCache(drawList, session, player.Position, drawDistance, territoryLimit);
-        if (session.OverlayShowCandidates && selectedLimit > 0 && canDrawSelectedTerritory)
-            DrawCandidates(drawList, session, player.Position, drawDistance, selectedLimit);
+        if (session.OverlayShowTerritoryCache && !session.OverlayShowCandidates && canDrawCurrentTerritory)
+            DrawTerritoryCache(drawList, session, player.Position, drawDistance, candidateLimit);
+        if (session.OverlayShowCandidates && canDrawCurrentTerritory)
+            DrawCandidates(drawList, session, player.Position, drawDistance, candidateLimit);
 
         ImGui.End();
         ImGui.PopStyleVar();
@@ -117,15 +115,15 @@ internal sealed unsafe class WorldOverlayRenderer
         float drawDistance,
         int candidateLimit)
     {
-        var scan = session.CurrentScan;
-        if (scan is null || scan.Candidates.Count == 0)
+        var survey = session.CurrentTerritorySurvey;
+        if (survey is null || survey.Candidates.Count == 0)
             return;
 
-        var selectedCandidateFingerprint = session.CurrentCandidateSelection?.Candidate.CandidateFingerprint;
-        var recordedCandidateIds = session.CurrentTerritoryRecordedCandidateIds;
-        var recordedCandidateFingerprints = session.CurrentTerritoryRecordedCandidateFingerprints;
+        var territoryId = survey.TerritoryId != 0 ? survey.TerritoryId : session.SelectedTerritoryId;
+        var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
 
-        var candidates = scan.Candidates
+        var recordedTotal = survey.Candidates.Count(candidate => GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0);
+        var visibleCandidates = survey.Candidates
             .Select(candidate => new
             {
                 Candidate = candidate,
@@ -133,73 +131,159 @@ internal sealed unsafe class WorldOverlayRenderer
             })
             .Where(item => item.Distance <= drawDistance)
             .OrderBy(item => item.Distance)
-            .ThenBy(item => item.Candidate.CandidateFingerprint, StringComparer.Ordinal)
+            .ThenBy(item => item.Candidate.CandidateId, StringComparer.Ordinal)
+            .ToList();
+        var candidates = visibleCandidates
             .Take(candidateLimit)
             .ToList();
 
-        var selection = session.CurrentCandidateSelection;
         var labelCount = 0;
         foreach (var item in candidates)
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var isSelectedCandidate = string.Equals(candidate.CandidateFingerprint, selectedCandidateFingerprint, StringComparison.Ordinal);
-            var isConfirmed = IsRecordedCandidate(candidate, recordedCandidateIds, recordedCandidateFingerprints);
-            var color = isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor;
-            var pointRadius = isSelectedCandidate ? 5f : isConfirmed ? 4f : 3f;
-            var lineThickness = isSelectedCandidate ? 2 : 1;
+            var recordedOwners = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey);
+            var isConfirmed = recordedOwners.Count > 0;
+            var color = isConfirmed ? ConfirmedColor : CandidateColor;
+            var pointRadius = isConfirmed ? 4f : 3f;
 
-            DrawFacingGuide(drawList, standing, candidate.Rotation, color, lineThickness);
+            DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, pointRadius, color, true);
 
-            if (isSelectedCandidate || isConfirmed || labelCount < MaxCandidateLabels)
+            if (isConfirmed || labelCount < MaxCandidateLabels)
             {
                 DrawWorldText(
                     drawList,
                     standing + new Vector3(0f, 1.6f, 0f),
-                    BuildCandidateLabel(candidate, item.Distance, isSelectedCandidate, isConfirmed, selection),
-                    isSelectedCandidate ? SelectedCandidateColor : isConfirmed ? ConfirmedColor : CandidateColor);
+                    BuildCandidateLabel(candidate, item.Distance, recordedOwners),
+                    isConfirmed ? ConfirmedColor : CandidateColor);
                 labelCount++;
             }
         }
 
-        if (scan.Candidates.Count > candidates.Count && TryWorldToScreen(playerPosition + new Vector3(0f, 2.5f, 0f), out var screen))
-            drawList.AddText(screen, WarningColor, $"FPG overlay {candidates.Count}/{scan.Candidates.Count}");
+        if (TryWorldToScreen(playerPosition + new Vector3(0f, 2.5f, 0f), out var screen))
+        {
+            var clippedText = visibleCandidates.Count > candidates.Count
+                ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
+                : string.Empty;
+            drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count}{clippedText}");
+        }
 
-        DrawTargetBlockLabels(drawList, session, playerPosition, drawDistance, recordedCandidateIds);
+        DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey);
     }
 
     private static string BuildCandidateLabel(
-        SpotCandidate candidate,
+        ApproachCandidate candidate,
         float distanceToPlayer,
-        bool isSelectedCandidate,
-        bool isConfirmed,
-        CandidateSelection? selection)
+        IReadOnlyList<CandidateRecordOwner> recordedOwners)
     {
-        var status = isSelectedCandidate && selection is not null
-            ? isConfirmed
-                ? $"当前/已记录/{selection.ModeText}"
-                : $"当前/{selection.ModeText}"
-            : isConfirmed
-                ? "已记录"
-                : "未记录";
-        var path = isSelectedCandidate && selection?.PathLengthMeters is { } pathLength
-            ? $" path={pathLength:F1}m"
-            : string.Empty;
-        return $"候选 {status} p={distanceToPlayer:F1}m c={candidate.DistanceToTargetCenterMeters:F1}m{path} b={ShortBlockId(candidate.BlockId)}";
+        var status = recordedOwners.Count > 0
+            ? $"已记录:{FormatRecordedOwners(recordedOwners)}"
+            : "未记录";
+        var reachability = candidate.Reachability switch
+        {
+            CandidateReachability.Flyable => "可飞",
+            CandidateReachability.WalkReachable => "可走",
+            _ => "未知",
+        };
+        var path = candidate.PathLengthMeters is { } pathLength ? $" path={pathLength:F1}m" : string.Empty;
+        return $"候选 {status}/{reachability} p={distanceToPlayer:F1}m{path} b={ShortBlockId(candidate.BlockId)}";
     }
 
-    private static bool IsRecordedCandidate(
-        SpotCandidate candidate,
-        IReadOnlySet<string> recordedCandidateIds,
-        IReadOnlySet<string> recordedCandidateFingerprints)
+    private static IReadOnlyList<CandidateRecordOwner> GetRecordedOwners(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey)
     {
-        var candidateId = !string.IsNullOrWhiteSpace(candidate.SourceCandidateId)
-            ? candidate.SourceCandidateId
-            : candidate.CandidateFingerprint;
-        return (!string.IsNullOrWhiteSpace(candidateId) && recordedCandidateIds.Contains(candidateId))
-            || (!string.IsNullOrWhiteSpace(candidate.CandidateFingerprint)
-                && recordedCandidateFingerprints.Contains(candidate.CandidateFingerprint));
+        if (recordedOwnersByKey.Count == 0)
+            return [];
+
+        var owners = new Dictionary<uint, CandidateRecordOwner>();
+        AddRecordedOwners(owners, recordedOwnersByKey, candidate.CandidateId);
+        AddRecordedOwners(owners, recordedOwnersByKey, GetTerritoryCandidateFingerprint(candidate, territoryId));
+        return owners.Values
+            .OrderBy(owner => owner.FishingSpotId)
+            .ToList();
+    }
+
+    private static Dictionary<string, List<CandidateRecordOwner>> BuildRecordedCandidateOwnerIndex(
+        TerritoryMaintenanceDocument? maintenance)
+    {
+        var ownersByKey = new Dictionary<string, List<CandidateRecordOwner>>(StringComparer.Ordinal);
+        if (maintenance is null)
+            return ownersByKey;
+
+        foreach (var spot in maintenance.Spots)
+        {
+            var owner = new CandidateRecordOwner(spot.FishingSpotId, spot.Name);
+            foreach (var point in spot.ApproachPoints.Where(point => point.Status == ApproachPointStatus.Confirmed))
+            {
+                AddRecordedOwner(ownersByKey, point.SourceCandidateId, owner);
+                AddRecordedOwner(ownersByKey, point.SourceCandidateFingerprint, owner);
+                if (maintenance.TerritoryId != 0)
+                {
+                    AddRecordedOwner(
+                        ownersByKey,
+                        SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                            maintenance.TerritoryId,
+                            point.Position,
+                            point.Rotation),
+                        owner);
+                }
+            }
+        }
+
+        return ownersByKey;
+    }
+
+    private static void AddRecordedOwners(
+        Dictionary<uint, CandidateRecordOwner> owners,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> ownersByKey,
+        string key)
+    {
+        if (string.IsNullOrWhiteSpace(key) || !ownersByKey.TryGetValue(key, out var matchedOwners))
+            return;
+
+        foreach (var owner in matchedOwners)
+            owners.TryAdd(owner.FishingSpotId, owner);
+    }
+
+    private static void AddRecordedOwner(
+        Dictionary<string, List<CandidateRecordOwner>> ownersByKey,
+        string key,
+        CandidateRecordOwner owner)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            return;
+
+        if (!ownersByKey.TryGetValue(key, out var owners))
+        {
+            owners = [];
+            ownersByKey.Add(key, owners);
+        }
+
+        if (!owners.Any(existing => existing.FishingSpotId == owner.FishingSpotId))
+            owners.Add(owner);
+    }
+
+    private static string GetTerritoryCandidateFingerprint(ApproachCandidate candidate, uint territoryId)
+    {
+        var effectiveTerritoryId = candidate.TerritoryId != 0 ? candidate.TerritoryId : territoryId;
+        return effectiveTerritoryId == 0
+            ? string.Empty
+            : SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                effectiveTerritoryId,
+                candidate.Position,
+                candidate.Rotation);
+    }
+
+    private static string FormatRecordedOwners(IReadOnlyList<CandidateRecordOwner> owners)
+    {
+        return string.Join(
+            ",",
+            owners.Take(4).Select(owner => string.IsNullOrWhiteSpace(owner.Name)
+                ? owner.FishingSpotId.ToString()
+                : $"{owner.Name}#{owner.FishingSpotId}"));
     }
 
     private void DrawSurfaceDebug(
@@ -360,18 +444,11 @@ internal sealed unsafe class WorldOverlayRenderer
         if (blocks.Count == 0)
             return;
 
-        IReadOnlySet<string> selectedSourceIds = session.OverlayShowCandidates
-            ? (session.CurrentScan?.Candidates
-                .Select(candidate => candidate.SourceCandidateId)
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .ToHashSet(StringComparer.Ordinal)
-                ?? [])
-            : [];
-        var recordedCandidateIds = session.CurrentTerritoryRecordedCandidateIds;
+        var territoryId = session.CurrentTerritorySurvey?.TerritoryId ?? session.SelectedTerritoryId;
+        var recordedOwnersByKey = BuildRecordedCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
         var playerPoint = Point3.From(playerPosition);
         var candidates = blocks
             .SelectMany(block => block.Candidates)
-            .Where(candidate => !selectedSourceIds.Contains(candidate.CandidateId))
             .Select(candidate => new
             {
                 Candidate = candidate,
@@ -387,25 +464,26 @@ internal sealed unsafe class WorldOverlayRenderer
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var isConfirmed = recordedCandidateIds.Contains(candidate.CandidateId);
+            var isConfirmed = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0;
             var color = isConfirmed ? ConfirmedColor : TerritoryCandidateColor;
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, isConfirmed ? 3f : 2f, color, true);
         }
     }
 
-    private void DrawTargetBlockLabels(
+    private void DrawTerritoryBlockLabels(
         ImDrawListPtr drawList,
         SpotWorkflowSession session,
         Vector3 playerPosition,
         float drawDistance,
-        IReadOnlySet<string> recordedCandidateIds)
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey)
     {
-        if (session.CurrentTargetBlocks.Count == 0)
+        if (session.CurrentTerritoryBlocks.Count == 0)
             return;
 
         var playerPoint = Point3.From(playerPosition);
-        foreach (var item in session.CurrentTargetBlocks
+        foreach (var item in session.CurrentTerritoryBlocks
             .Select(block => new
             {
                 Block = block,
@@ -417,7 +495,8 @@ internal sealed unsafe class WorldOverlayRenderer
             .ThenBy(item => item.Block.BlockId, StringComparer.Ordinal)
             .Take(32))
         {
-            var confirmedCount = item.Block.Candidates.Count(candidate => recordedCandidateIds.Contains(candidate.CandidateId));
+            var confirmedCount = item.Block.Candidates.Count(candidate =>
+                GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0);
             var label = $"{ShortBlockId(item.Block.BlockId)} {confirmedCount}/{item.Block.Candidates.Count}";
             DrawWorldText(drawList, ToVector3(item.Center) + new Vector3(0f, 2f, 0f), label, BlockLabelColor);
         }
@@ -572,4 +651,6 @@ internal sealed unsafe class WorldOverlayRenderer
 
         return value.Length <= 10 ? value : value[..10];
     }
+
+    private sealed record CandidateRecordOwner(uint FishingSpotId, string Name);
 }

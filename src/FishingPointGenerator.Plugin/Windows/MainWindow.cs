@@ -85,7 +85,7 @@ internal sealed class MainWindow : Window, IDisposable
         var tabLine = 0f;
         DrawMainTabButton("领地", MainTab.Territories, ref tabLine);
         DrawMainTabButton("钓场", MainTab.Spots, ref tabLine);
-        DrawMainTabButton("当前钓场", MainTab.Maintenance, ref tabLine);
+        DrawMainTabButton("维护", MainTab.Maintenance, ref tabLine);
         DrawMainTabButton("工具", MainTab.Tools, ref tabLine);
     }
 
@@ -105,7 +105,7 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.TextColored(MutedText, $"游戏区域: {session.CurrentTerritoryId}");
         ImGui.TextColored(MutedText, $"已选领地: {FormatTerritoryTitle(session.SelectedTerritoryId, session.SelectedTerritoryName)}");
         if (session.CurrentTarget is not null)
-            ImGui.TextColored(MutedText, $"已选钓场: {session.CurrentTargetDisplayName}");
+            ImGui.TextColored(MutedText, $"维护目标: {session.CurrentTargetDisplayName}");
 
         ImGui.PushTextWrapPos();
         ImGui.TextColored(GetMessageColor(), session.LastMessage);
@@ -230,7 +230,7 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.SetNextItemWidth(110f);
         ImGui.InputText("##target_id", ref targetIdText, 16);
         ImGui.SameLine();
-        if (ActionButton("选择"))
+        if (ActionButton("打开"))
         {
             if (uint.TryParse(targetIdText.Trim(), out var targetId))
             {
@@ -330,12 +330,12 @@ internal sealed class MainWindow : Window, IDisposable
 
     private void DrawSpotDetail()
     {
-        DrawSectionTitle("当前钓场");
+        DrawSectionTitle("维护目标");
 
         var target = session.CurrentTarget;
         if (target is null)
         {
-            ImGui.TextColored(MutedText, "未选择钓场。");
+            ImGui.TextColored(MutedText, "未打开维护目标。");
             return;
         }
 
@@ -520,7 +520,7 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.TextColored(AccentText, "报告");
         actionLine = 0f;
-        if (FlowActionButton("生成当前钓场报告", !hasTarget, ref actionLine))
+        if (FlowActionButton("生成维护目标报告", !hasTarget, ref actionLine))
             session.GenerateCurrentReport();
     }
 
@@ -630,7 +630,7 @@ internal sealed class MainWindow : Window, IDisposable
 
         ImGui.TextColored(WarnText, "按住 Ctrl 启用清理按钮。");
         var actionLine = 0f;
-        if (FlowActionButton("清当前钓场维护", !ctrlDown || !hasTarget, ref actionLine))
+        if (FlowActionButton("清维护目标数据", !ctrlDown || !hasTarget, ref actionLine))
             session.ClearCurrentSpotMaintenance();
         if (FlowActionButton("清当前领地维护", !ctrlDown || !hasTerritory, ref actionLine))
             session.ClearCurrentTerritoryMaintenance();
@@ -697,7 +697,7 @@ internal sealed class MainWindow : Window, IDisposable
         if (session.TargetCount == 0)
             return ("无目录", MutedText);
         if (session.CurrentTarget is null)
-            return ("未选钓场", WarnText);
+            return ("无维护目标", WarnText);
         if (session.CurrentApproachPoints.Any(point => point.Status == ApproachPointStatus.Confirmed))
             return ("维护中", GoodText);
         return ("待维护", WarnText);

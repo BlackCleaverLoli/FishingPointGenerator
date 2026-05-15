@@ -17,11 +17,11 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点
 1. 进入需要采集的地图。
 2. 运行 `/fpg catalog` 生成钓场目录。
 3. 运行 `/fpg refresh` 读取当前地图的目标钓场。
-4. 运行 `/fpg next`，或在界面中选择一个目标钓场。
+4. 运行 `/fpg next`，或在界面中打开一个维护目标。
 5. 运行 `/fpg scan` 扫描当前 Territory 全图候选点。
-6. 运行 `/fpg scantarget`，或在界面中为已选钓场从 Territory 缓存派生候选。
+6. 运行 `/fpg scantarget`，或在界面中为维护目标从 Territory 缓存派生候选。
 7. 使用 `/fpg refreshcandidate` 或 UI 查看当前候选；可飞区域按距钓场中心排序，不可飞区域优先检查从角色当前位置步行可达的候选。
-8. 移动到候选点附近并朝可钓碰撞面抛竿；抛竿日志命中当前钓场时会自动点亮同块的局部范围。
+8. 移动到候选点附近并朝可钓碰撞面抛竿；抛竿日志命中的钓场会自动点亮同块的局部范围。
 9. 如果需要手动记录，运行 `/fpg confirm` 写入玩家当前站位；如果当前候选确认不可用，运行 `/fpg rejectcandidate` 排除该候选。
 10. 运行 `/fpg export` 导出已确认点位。
 

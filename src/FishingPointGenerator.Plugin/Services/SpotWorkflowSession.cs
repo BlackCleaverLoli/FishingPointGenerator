@@ -445,7 +445,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
         CurrentTarget = target;
         SyncCurrentAnalysis();
-        LastMessage = $"已选择 FishingSpot {target.FishingSpotId}：{target.Name}。";
+        LastMessage = $"已打开维护目标 FishingSpot {target.FishingSpotId}：{target.Name}。";
         return true;
     }
 
@@ -457,14 +457,14 @@ internal sealed class SpotWorkflowSession : IDisposable
             CurrentTarget = CurrentTerritoryTargets.FirstOrDefault();
             SyncCurrentAnalysis();
             if (setMessage)
-                LastMessage = CurrentTarget is null ? "当前区域没有可用目标。" : "没有待处理目标；已选择目录第一行。";
+                LastMessage = CurrentTarget is null ? "当前区域没有可用目标。" : "没有待处理目标；已打开目录第一行。";
             return;
         }
 
         CurrentTarget = CurrentTerritoryTargets.FirstOrDefault(target => target.Key == next.Key);
         SyncCurrentAnalysis();
         if (setMessage && CurrentTarget is not null)
-            LastMessage = $"已选择下一个目标 {CurrentTarget.FishingSpotId}：{CurrentTarget.Name}。";
+            LastMessage = $"已打开下一个维护目标 {CurrentTarget.FishingSpotId}：{CurrentTarget.Name}。";
     }
 
     public void ScanCurrentTerritory()
@@ -606,7 +606,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var scan = CreateScanFromTerritory(target);
         if (scan is null)
         {
-            LastMessage = "当前区域没有内存候选。请先扫描当前区域，再为已选钓场派生候选。";
+            LastMessage = "当前区域没有内存候选。请先扫描当前区域，再为维护目标派生候选。";
             return;
         }
 
@@ -627,7 +627,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         if (scan is null)
         {
             CurrentCandidateSelection = null;
-            LastMessage = "已选目标没有可派生候选。请先扫描当前区域。";
+            LastMessage = "维护目标没有可派生候选。请先扫描当前区域。";
             return;
         }
 
@@ -699,7 +699,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
         if (scan is null)
         {
-            LastMessage = "无法输出候选点调试：已选目标没有可派生候选。请先扫描当前区域。";
+            LastMessage = "无法输出候选点调试：维护目标没有可派生候选。请先扫描当前区域。";
             return [LastMessage];
         }
 
@@ -878,7 +878,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var scan = EnsureScanForCurrentTarget();
         if (scan is null)
         {
-            LastMessage = "已选目标没有可派生候选。请先扫描当前区域。";
+            LastMessage = "维护目标没有可派生候选。请先扫描当前区域。";
             return;
         }
 
@@ -889,16 +889,12 @@ internal sealed class SpotWorkflowSession : IDisposable
             return;
         }
 
-        var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
-        var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
-        var candidatePool = GetSelectableCandidatePool(scan, GetMaintenanceRecord(target.Key));
+        var candidatePool = GetSelectableCandidatePool(scan);
         var candidate = candidatePool.Count == 0
             ? null
             : PickDefaultCandidate(
                 candidatePool,
-                playerSnapshot.Position,
-                territoryRecordedCandidateIds,
-                territoryRecordedCandidateFingerprints);
+                playerSnapshot.Position);
         if (candidate is null)
         {
             LastMessage = $"FishingSpot {target.FishingSpotId} 没有未记录候选可插旗。";
@@ -916,9 +912,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             return;
         }
 
-        var territoryRecorded = IsRecordedCandidate(candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints);
-        var recordScope = territoryRecorded ? "冲突待覆盖候选" : "领地未记录候选";
-        LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的{recordScope}插旗：距角色 {candidate.Position.HorizontalDistanceTo(playerSnapshot.Position):F1}m，距中心 {candidate.DistanceToTargetCenterMeters:F1}m。";
+        LastMessage = $"已为 FishingSpot {target.FishingSpotId} 的领地未记录候选插旗：距角色 {candidate.Position.HorizontalDistanceTo(playerSnapshot.Position):F1}m，距中心 {candidate.DistanceToTargetCenterMeters:F1}m。";
     }
 
     public bool RecordCastFill(uint castPlaceNameId)
@@ -1804,7 +1798,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var ensuredScan = EnsureScanForCurrentTarget();
         if (ensuredScan is null)
         {
-            LastMessage = "已选目标没有可派生候选。请先扫描当前区域。";
+            LastMessage = "维护目标没有可派生候选。请先扫描当前区域。";
             return false;
         }
 
@@ -1820,7 +1814,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var selectedCandidate = CurrentCandidateSelection?.Candidate;
         if (selectedCandidate is null || string.IsNullOrWhiteSpace(selectedCandidate.CandidateFingerprint))
         {
-            LastMessage = "已选目标没有可用候选。";
+            LastMessage = "维护目标没有可用候选。";
             return false;
         }
 
@@ -1852,7 +1846,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         if (CurrentTarget?.TerritoryId == CurrentTerritoryId)
             return true;
 
-        LastMessage = "已选钓场不在当前游戏区域，不能记录玩家当前位置。";
+        LastMessage = "维护目标不在当前游戏区域，不能记录玩家当前位置。";
         return false;
     }
 
@@ -2764,22 +2758,14 @@ internal sealed class SpotWorkflowSession : IDisposable
         SpotScanDocument scan,
         bool forceProbe = false)
     {
-        var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
-        var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
-        var candidates = GetSelectableCandidatePool(scan, GetMaintenanceRecord(target.Key));
+        var candidates = GetSelectableCandidatePool(scan);
         if (candidates.Count == 0)
             return null;
 
         var playerSnapshot = GetPlayerSnapshot();
         var candidate = PickDefaultCandidate(
             candidates,
-            playerSnapshot?.Position,
-            territoryRecordedCandidateIds,
-            territoryRecordedCandidateFingerprints);
-        var isTerritoryRecorded = IsRecordedCandidate(
-            candidate,
-            territoryRecordedCandidateIds,
-            territoryRecordedCandidateFingerprints);
+            playerSnapshot?.Position);
         return new CandidateSelection(
             candidate,
             GetCandidateSelectionMode(candidate),
@@ -2788,63 +2774,37 @@ internal sealed class SpotWorkflowSession : IDisposable
             playerSnapshot is null ? null : candidate.Position.HorizontalDistanceTo(playerSnapshot.Position),
             candidate.DistanceToTargetCenterMeters,
             candidates.Count,
-            isTerritoryRecorded,
-            isTerritoryRecorded
-                ? "当前候选来自领地内存候选；该点已被其它钓场记录，本次抛竿确认后会用新证据覆盖旧自动范围记录。"
-                : "当前候选来自领地内存候选；优先选择领地未记录点，再按距玩家排序。");
+            "当前候选来自领地内存候选；按领地维护数据排除已记录、禁用和拒绝点，再按距玩家排序。");
     }
 
     private CandidateSelection? GetOrBuildCandidateSelection(
         FishingSpotTarget target,
         SpotScanDocument scan)
     {
-        var maintenance = GetMaintenanceRecord(target.Key);
-        var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
-        var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
-        var selectableCandidates = GetSelectableCandidatePool(scan, maintenance);
-        var hasTerritoryUnrecordedCandidate = selectableCandidates.Any(candidate =>
-            !IsRecordedCandidate(candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints));
+        var selectableCandidates = GetSelectableCandidatePool(scan);
         if (CurrentCandidateSelection is { } current
             && current.Candidate.Key == target.Key
-            && !IsRecordedCandidate(
-                current.Candidate,
-                GetRecordedCandidateIds(maintenance, target.TerritoryId),
-                GetRecordedCandidateFingerprints(maintenance, target.TerritoryId))
-            && (!hasTerritoryUnrecordedCandidate
-                || !IsRecordedCandidate(current.Candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints))
             && selectableCandidates.Any(candidate => string.Equals(
                 candidate.CandidateFingerprint,
                 current.Candidate.CandidateFingerprint,
                 StringComparison.Ordinal)))
         {
-            var isTerritoryRecorded = IsRecordedCandidate(
-                current.Candidate,
-                territoryRecordedCandidateIds,
-                territoryRecordedCandidateFingerprints);
-            return current with
-            {
-                IsTerritoryRecorded = isTerritoryRecorded,
-                Note = isTerritoryRecorded
-                    ? "当前候选来自领地内存候选；该点已被其它钓场记录，本次抛竿确认后会用新证据覆盖旧自动范围记录。"
-                    : current.Note,
-            };
+            return current;
         }
 
         return BuildCandidateSelection(target, scan);
     }
 
-    private IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(
-        SpotScanDocument scan,
-        SpotMaintenanceRecord? maintenance)
+    private IReadOnlyList<SpotCandidate> GetSelectableCandidatePool(SpotScanDocument scan)
     {
-        var recordedCandidateIds = GetRecordedCandidateIds(maintenance, scan.Key.TerritoryId);
-        var recordedCandidateFingerprints = GetRecordedCandidateFingerprints(maintenance, scan.Key.TerritoryId);
-        var disabledCandidateIds = GetDisabledCandidateIds(maintenance, scan.Key.TerritoryId);
-        var disabledCandidateFingerprints = GetDisabledCandidateFingerprints(maintenance, scan.Key.TerritoryId);
-        var rejectedFingerprints = GetRejectedCandidateFingerprints(maintenance);
+        var territoryRecordedCandidateIds = CurrentTerritoryRecordedCandidateIds;
+        var territoryRecordedCandidateFingerprints = CurrentTerritoryRecordedCandidateFingerprints;
+        var disabledCandidateIds = GetDisabledCandidateIds(CurrentTerritoryMaintenance);
+        var disabledCandidateFingerprints = GetDisabledCandidateFingerprints(CurrentTerritoryMaintenance);
+        var rejectedFingerprints = GetRejectedCandidateFingerprints(CurrentTerritoryMaintenance);
         return scan.Candidates
             .Where(IsSelectableCandidate)
-            .Where(candidate => !IsRecordedCandidate(candidate, recordedCandidateIds, recordedCandidateFingerprints))
+            .Where(candidate => !IsRecordedCandidate(candidate, territoryRecordedCandidateIds, territoryRecordedCandidateFingerprints))
             .Where(candidate => !IsRecordedCandidate(candidate, disabledCandidateIds, disabledCandidateFingerprints))
             .Where(candidate => !rejectedFingerprints.Contains(candidate.CandidateFingerprint))
             .ToList();
@@ -2852,28 +2812,18 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     private static SpotCandidate PickDefaultCandidate(
         IReadOnlyList<SpotCandidate> candidates,
-        Point3? playerPosition,
-        IReadOnlySet<string> territoryRecordedCandidateIds,
-        IReadOnlySet<string> territoryRecordedCandidateFingerprints)
+        Point3? playerPosition)
     {
         if (playerPosition is { } position)
         {
             return candidates
-                .OrderBy(candidate => IsRecordedCandidate(
-                    candidate,
-                    territoryRecordedCandidateIds,
-                    territoryRecordedCandidateFingerprints))
-                .ThenBy(candidate => candidate.Position.HorizontalDistanceTo(position))
+                .OrderBy(candidate => candidate.Position.HorizontalDistanceTo(position))
                 .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
                 .First();
         }
 
         return candidates
-            .OrderBy(candidate => IsRecordedCandidate(
-                candidate,
-                territoryRecordedCandidateIds,
-                territoryRecordedCandidateFingerprints))
-            .ThenBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
+            .OrderBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .First();
     }
 
@@ -2951,6 +2901,20 @@ internal sealed class SpotWorkflowSession : IDisposable
         return ids;
     }
 
+    private static IReadOnlySet<string> GetDisabledCandidateIds(TerritoryMaintenanceDocument? maintenance)
+    {
+        if (maintenance is null)
+            return new HashSet<string>(StringComparer.Ordinal);
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var point in maintenance.Spots
+            .SelectMany(spot => spot.ApproachPoints)
+            .Where(IsEffectiveDisabledApproachPoint))
+            AddRecordedCandidateIds(ids, maintenance.TerritoryId, point);
+
+        return ids;
+    }
+
     private static IReadOnlySet<string> GetDisabledCandidateFingerprints(SpotMaintenanceRecord? maintenance, uint territoryId = 0)
     {
         if (maintenance is null)
@@ -2959,6 +2923,20 @@ internal sealed class SpotWorkflowSession : IDisposable
         var fingerprints = new HashSet<string>(StringComparer.Ordinal);
         foreach (var point in maintenance.ApproachPoints.Where(IsEffectiveDisabledApproachPoint))
             AddRecordedCandidateFingerprints(fingerprints, territoryId, point);
+
+        return fingerprints;
+    }
+
+    private static IReadOnlySet<string> GetDisabledCandidateFingerprints(TerritoryMaintenanceDocument? maintenance)
+    {
+        if (maintenance is null)
+            return new HashSet<string>(StringComparer.Ordinal);
+
+        var fingerprints = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var point in maintenance.Spots
+            .SelectMany(spot => spot.ApproachPoints)
+            .Where(IsEffectiveDisabledApproachPoint))
+            AddRecordedCandidateFingerprints(fingerprints, maintenance.TerritoryId, point);
 
         return fingerprints;
     }
@@ -3003,6 +2981,17 @@ internal sealed class SpotWorkflowSession : IDisposable
     private static IReadOnlySet<string> GetRejectedCandidateFingerprints(SpotMaintenanceRecord? maintenance)
     {
         return maintenance?.Evidence
+            .Where(evidence => evidence.EventType == SpotEvidenceEventType.Reject)
+            .Select(evidence => evidence.CandidateFingerprint)
+            .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
+            .ToHashSet(StringComparer.Ordinal)
+            ?? new HashSet<string>(StringComparer.Ordinal);
+    }
+
+    private static IReadOnlySet<string> GetRejectedCandidateFingerprints(TerritoryMaintenanceDocument? maintenance)
+    {
+        return maintenance?.Spots
+            .SelectMany(spot => spot.Evidence)
             .Where(evidence => evidence.EventType == SpotEvidenceEventType.Reject)
             .Select(evidence => evidence.CandidateFingerprint)
             .Where(fingerprint => !string.IsNullOrWhiteSpace(fingerprint))
