@@ -327,7 +327,7 @@ internal sealed class SpotWorkflowSession : IDisposable
             return;
 
         disposed = true;
-        autoSurveyRunner.Stop("自动点亮已因插件卸载停止。");
+        autoSurveyRunner.Dispose();
         ClearCurrentTerritoryRuntimeState();
         ReleaseTerritoryScanTask();
         TerritorySummaries = [];

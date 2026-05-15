@@ -6,15 +6,15 @@ using OmenTools;
 
 namespace FishingPointGenerator.Plugin.Services.AutoSurvey;
 
-internal sealed class AutoSurveyRunner
+internal sealed class AutoSurveyRunner : IDisposable
 {
     private const float MoveCloseRangeMeters = 0.8f;
     private const float ArrivedDistanceMeters = 1.2f;
     private const float DefaultLandingBackoffMeters = 0.5f;
     private const float MaximumLandingBackoffMeters = 3f;
     private const float CastAdjustStepMeters = 0.25f;
-    private const float CastAdjustMoveCloseRangeMeters = 0.2f;
-    private const float CastAdjustArrivedDistanceMeters = 0.35f;
+    private const float CastAdjustMoveCloseRangeMeters = 0.12f;
+    private const float CastAdjustArrivedDistanceMeters = 0.15f;
     private const float CastAdjustMeshProbeHalfExtentXZ = 0.75f;
     private const float CastAdjustMeshProbeHalfExtentY = 1.5f;
     private const float CastAdjustMaximumHorizontalDistanceFromCandidateMeters = 3.25f;
@@ -85,6 +85,8 @@ internal sealed class AutoSurveyRunner
     private DateTimeOffset castReadySince = DateTimeOffset.MinValue;
     private DateTimeOffset lastMoveResendAttemptAt = DateTimeOffset.MinValue;
     private int moveResendAttemptCount;
+    private Move3Controller? castAdjustMove3;
+    private bool disposed;
 
     public AutoSurveyRunner(
         SpotWorkflowSession session,
@@ -117,12 +119,24 @@ internal sealed class AutoSurveyRunner
     {
         if (IsRunning)
             navmesh.StopMovement();
+        StopMove3();
 
         mode = AutoSurveyMode.None;
         step = AutoSurveyStep.Idle;
         currentCandidate = null;
         ResetCandidateApproach();
         StatusText = message;
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+
+        disposed = true;
+        Stop("自动点亮已释放。");
+        castAdjustMove3?.Dispose();
+        castAdjustMove3 = null;
     }
 
     public void Poll()
@@ -516,6 +530,7 @@ internal sealed class AutoSurveyRunner
         }
 
         var selection = session.CurrentCandidateSelection;
+        StopMove3();
         var result = navmesh.MoveCloseTo(
             destination.ToVector3(),
             selection?.CanFly ?? currentCandidate.Reachability == CandidateReachability.Flyable,
@@ -649,21 +664,34 @@ internal sealed class AutoSurveyRunner
         if (!TryResolveCastAdjustDestination(requestedDestination, out var destination, out failureMessage))
             return false;
 
-        var result = navmesh.MoveCloseTo(
-            destination.ToVector3(),
-            fly: false,
-            range: CastAdjustMoveCloseRangeMeters);
-        if (!result.IsStarted)
+        var usedMove3 = false;
+        if (TryStartMove3To(destination, CastAdjustArrivedDistanceMeters, out var move3Failure))
         {
-            failureMessage = result.Message;
-            return false;
+            usedMove3 = true;
+        }
+        else
+        {
+            StopMove3();
+            var result = navmesh.MoveCloseTo(
+                destination.ToVector3(),
+                fly: false,
+                range: CastAdjustMoveCloseRangeMeters);
+            if (!result.IsStarted)
+            {
+                failureMessage = string.IsNullOrWhiteSpace(move3Failure)
+                    ? result.Message
+                    : $"Move3 不可用：{move3Failure}；vnavmesh：{result.Message}";
+                return false;
+            }
         }
 
         ResetMoveResend();
         currentLandingBackoffMeters = nextBackoff;
         currentMoveDestinationOverride = destination;
         castAdjustMoveCount++;
-        StatusText = $"抛竿不可用：小步靠近 {castAdjustMoveCount}，目标 {CurrentCandidateText}";
+        StatusText = usedMove3
+            ? $"抛竿不可用：Move3 直走小步靠近 {castAdjustMoveCount}，目标 {CurrentCandidateText}"
+            : $"抛竿不可用：vnavmesh 小步靠近 {castAdjustMoveCount}，目标 {CurrentCandidateText}";
         Delay(ShortDelay);
         step = AutoSurveyStep.CastAdjustMove;
         return true;
@@ -681,6 +709,7 @@ internal sealed class AutoSurveyRunner
             && currentDistance > CastAdjustMaximumHorizontalDistanceFromCandidateMeters)
         {
             navmesh.StopMovement();
+            StopMove3();
             ResetMoveResend();
             currentMoveDestinationOverride = null;
             StatusText = $"小步靠近偏离原候选过远：{currentDistance:F1}m，重新选择候选。";
@@ -692,10 +721,17 @@ internal sealed class AutoSurveyRunner
         if (IsNearCurrentMoveDestination(CastAdjustArrivedDistanceMeters))
         {
             navmesh.StopMovement();
+            StopMove3();
             ResetMoveResend();
             StatusText = $"已小步靠近：{CurrentCandidateText}，重新尝试抛竿。";
             Delay(ShortDelay);
             step = AutoSurveyStep.Cast;
+            return;
+        }
+
+        if (castAdjustMove3?.IsMoving == true)
+        {
+            StatusText = $"Move3 小步靠近中：目标 {CurrentCandidateText}";
             return;
         }
 
@@ -1160,6 +1196,39 @@ internal sealed class AutoSurveyRunner
         ResetMoveResend();
         ResetDismountWait();
         ResetCastReadyWait();
+        StopMove3();
+    }
+
+    private bool TryStartMove3To(Point3 destination, float arrivalDistance, out string failureMessage)
+    {
+        failureMessage = string.Empty;
+        if (navmesh.IsNavmeshBuildInProgress || navmesh.IsPathfindInProgress)
+        {
+            failureMessage = "vnavmesh 正在构建或寻路";
+            StopMove3();
+            return false;
+        }
+
+        if (navmesh.IsPathRunning)
+            navmesh.StopMovement();
+
+        try
+        {
+            castAdjustMove3 ??= new Move3Controller();
+            return castAdjustMove3.TryMoveTo(destination.ToVector3(), arrivalDistance, out failureMessage);
+        }
+        catch (Exception ex)
+        {
+            castAdjustMove3 = null;
+            failureMessage = ex.Message;
+            return false;
+        }
+    }
+
+    private void StopMove3()
+    {
+        if (castAdjustMove3?.IsMoving == true)
+            castAdjustMove3.Stop();
     }
 
     private bool TryStartCurrentMove(
@@ -1175,6 +1244,7 @@ internal sealed class AutoSurveyRunner
             return false;
         }
 
+        StopMove3();
         var result = navmesh.MoveCloseTo(GetCurrentMoveDestination().ToVector3(), fly, range);
         if (!result.IsStarted)
         {
@@ -1222,6 +1292,7 @@ internal sealed class AutoSurveyRunner
 
         moveResendAttemptCount++;
         lastMoveResendAttemptAt = now;
+        StopMove3();
         var result = navmesh.MoveCloseTo(GetCurrentMoveDestination().ToVector3(), fly, range);
         if (!result.IsStarted)
         {

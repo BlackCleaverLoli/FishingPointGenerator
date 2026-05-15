@@ -21,13 +21,32 @@ internal sealed class VnavmeshQueryService
     private readonly IPCSubscriber<Vector3, bool, float, bool> pathfindAndMoveCloseTo =
         new("vnavmesh.SimpleMove.PathfindAndMoveCloseTo", () => false);
     private readonly IPCSubscriber<bool> pathIsRunning = new("vnavmesh.Path.IsRunning", () => false);
-    private readonly IPCSubscriber<bool> pathfindInProgress = new("vnavmesh.SimpleMove.PathfindInProgress", () => false);
+    private readonly IPCSubscriber<bool> simpleMovePathfindInProgress =
+        new("vnavmesh.SimpleMove.PathfindInProgress", () => false);
+    private readonly IPCSubscriber<bool> navPathfindInProgress =
+        new("vnavmesh.Nav.PathfindInProgress", () => false);
+    private readonly IPCSubscriber<int> navPathfindQueued =
+        new("vnavmesh.Nav.PathfindNumQueued", () => 0);
+    private readonly IPCSubscriber<float> navBuildProgress =
+        new("vnavmesh.Nav.BuildProgress", () => -1f);
     private readonly IPCSubscriber<float> pathDistance = new("vnavmesh.Path.GetDistance", () => 0f);
     private readonly IPCSubscriber<object> pathStop = new("vnavmesh.Path.Stop", () => null!);
 
     public bool IsReady => navIsReady.TryInvokeFunc();
     public bool IsPathRunning => pathIsRunning.TryInvokeFunc();
-    public bool IsPathfindInProgress => pathfindInProgress.TryInvokeFunc();
+    public bool IsPathfindInProgress =>
+        simpleMovePathfindInProgress.TryInvokeFunc()
+        || navPathfindInProgress.TryInvokeFunc()
+        || navPathfindQueued.TryInvokeFunc() > 0;
+    public bool IsNavmeshBuildInProgress
+    {
+        get
+        {
+            var progress = navBuildProgress.TryInvokeFunc();
+            return progress is >= 0f and < 1f;
+        }
+    }
+
     public float PathLeftDistance => pathDistance.TryInvokeFunc();
 
     public MeshPointQueryResult QueryNearestReachablePoint(Vector3 point, float halfExtentXZ, float halfExtentY)
