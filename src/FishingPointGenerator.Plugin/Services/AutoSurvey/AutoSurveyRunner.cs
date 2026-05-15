@@ -292,7 +292,7 @@ internal sealed class AutoSurveyRunner
 
     private void RefreshCandidate()
     {
-        session.RefreshCandidateSelection();
+        session.RefreshAutoSurveyCandidateSelection();
         var selection = session.CurrentCandidateSelection;
         if (selection is null)
         {

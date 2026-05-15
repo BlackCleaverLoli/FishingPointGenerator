@@ -54,6 +54,8 @@ internal sealed class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
+        UpdateOverlayPointDisableUiBounds();
+
         DrawHeader();
         ImGui.Separator();
 
@@ -78,6 +80,13 @@ internal sealed class MainWindow : Window, IDisposable
                 DrawPaths();
                 break;
         }
+    }
+
+    private void UpdateOverlayPointDisableUiBounds()
+    {
+        var min = ImGui.GetWindowPos();
+        var max = min + ImGui.GetWindowSize();
+        session.SetOverlayPointDisableUiWindowBounds(min, max);
     }
 
     private void DrawMainTabs()
@@ -496,6 +505,8 @@ internal sealed class MainWindow : Window, IDisposable
             session.TeleportToCurrentTargetAetheryte();
         if (FlowActionButton("插旗钓场中心", !hasTarget || !sameTerritory, ref actionLine))
             session.PlaceCurrentTargetFlag();
+        if (FlowActionButton("插旗当前推荐", !hasTarget || !sameTerritory || !session.CurrentCandidateSelectionIsActionable, ref actionLine))
+            session.PlaceSelectedCandidateFlag();
 
         ImGui.Spacing();
         ImGui.TextColored(AccentText, "派生与确认");
@@ -578,6 +589,10 @@ internal sealed class MainWindow : Window, IDisposable
         var showCandidates = session.OverlayShowCandidates;
         if (ImGui.Checkbox("显示候选点", ref showCandidates))
             session.OverlayShowCandidates = showCandidates;
+
+        var pointDisableMode = session.OverlayPointDisableMode;
+        if (ImGui.Checkbox("overlay 点选禁用/恢复", ref pointDisableMode))
+            session.OverlayPointDisableMode = pointDisableMode;
 
         var showTerritoryCache = session.OverlayShowTerritoryCache;
         if (ImGui.Checkbox("显示领地内存候选", ref showTerritoryCache))

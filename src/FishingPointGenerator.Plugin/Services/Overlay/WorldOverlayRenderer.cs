@@ -29,16 +29,18 @@ internal sealed unsafe class WorldOverlayRenderer
     private const int CircleSegments = 48;
     private const float FacingGuideLengthMeters = 5f;
     private const float DebugSurfaceHatchSpacingMeters = 4f;
+    private const float CandidateClickRadiusPixels = 22f;
     private const int MaxSurfaceDebugLabels = 4;
     private const int MaxCandidateLabels = 18;
 
     private Matrix4x4 viewProj;
     private Vector4 nearPlane;
     private Vector2 viewportSize;
+    private bool previousLeftMouseDown;
 
     public void Draw(SpotWorkflowSession session)
     {
-        if (!session.OverlayEnabled)
+        if (!session.OverlayEnabled && !session.OverlayPointDisableMode)
             return;
 
         var player = DService.Instance().ObjectTable.LocalPlayer;
@@ -53,24 +55,26 @@ internal sealed unsafe class WorldOverlayRenderer
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
         ImGuiHelpers.ForceNextWindowMainViewport();
         ImGuiHelpers.SetNextWindowPosRelativeMainViewport(Vector2.Zero);
-        ImGui.Begin(
-            "fpg_world_overlay",
-            ImGuiWindowFlags.NoInputs
-            | ImGuiWindowFlags.NoNav
+        var windowFlags = ImGuiWindowFlags.NoNav
             | ImGuiWindowFlags.NoTitleBar
             | ImGuiWindowFlags.NoScrollbar
-            | ImGuiWindowFlags.NoBackground);
+            | ImGuiWindowFlags.NoBackground
+            | ImGuiWindowFlags.NoInputs;
+        ImGui.Begin(
+            "fpg_world_overlay",
+            windowFlags);
         ImGui.SetWindowSize(ImGui.GetIO().DisplaySize);
 
         var drawList = ImGui.GetWindowDrawList();
         var canDrawCurrentTerritory = session.SelectedTerritoryIsCurrent;
+        var showCandidates = session.OverlayShowCandidates || session.OverlayPointDisableMode;
         if (session.CurrentTarget is not null && canDrawCurrentTerritory)
             DrawTarget(drawList, session, player.Position);
         if (session.OverlayShowFishableDebug || session.OverlayShowWalkableDebug)
             DrawSurfaceDebug(drawList, session, player.Position, drawDistance, Math.Min(candidateLimit, 512));
-        if (session.OverlayShowTerritoryCache && !session.OverlayShowCandidates && canDrawCurrentTerritory)
+        if (session.OverlayShowTerritoryCache && !showCandidates && canDrawCurrentTerritory)
             DrawTerritoryCache(drawList, session, player.Position, drawDistance, candidateLimit);
-        if (session.OverlayShowCandidates && canDrawCurrentTerritory)
+        if (showCandidates && canDrawCurrentTerritory)
             DrawCandidates(drawList, session, player.Position, drawDistance, candidateLimit);
 
         ImGui.End();
@@ -125,9 +129,9 @@ internal sealed unsafe class WorldOverlayRenderer
         var riskOwnersByKey = BuildMixedRiskCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
         var disabledOwnersByKey = BuildDisabledCandidateOwnerIndex(session.CurrentTerritoryMaintenance);
 
-        var recordedTotal = survey.Candidates.Count(candidate => GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0);
-        var riskTotal = survey.Candidates.Count(candidate => GetRiskOwners(candidate, territoryId, riskOwnersByKey).Count > 0);
-        var disabledTotal = survey.Candidates.Count(candidate => GetDisabledOwners(candidate, territoryId, disabledOwnersByKey).Count > 0);
+        var recordedTotal = survey.Candidates.Count(candidate => HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
+        var riskTotal = survey.Candidates.Count(candidate => HasRiskOwner(candidate, territoryId, riskOwnersByKey));
+        var disabledTotal = survey.Candidates.Count(candidate => HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
         var visibleCandidates = survey.Candidates
             .Select(candidate => new
             {
@@ -142,25 +146,50 @@ internal sealed unsafe class WorldOverlayRenderer
             .Take(candidateLimit)
             .ToList();
 
+        var mousePosition = ImGui.GetIO().MousePos;
+        var leftMouseDown = IsGameLeftMouseDown();
+        var viewportMin = ImGuiHelpers.MainViewport.Pos;
+        var viewportMax = viewportMin + viewportSize;
+        var pointDisableClick = session.OverlayPointDisableMode
+            && leftMouseDown
+            && !previousLeftMouseDown
+            && !session.IsOverlayPointDisableMouseBlockedByUi(mousePosition)
+            && mousePosition.X >= viewportMin.X
+            && mousePosition.Y >= viewportMin.Y
+            && mousePosition.X <= viewportMax.X
+            && mousePosition.Y <= viewportMax.Y;
+        previousLeftMouseDown = leftMouseDown;
+        ApproachCandidate? clickedCandidate = null;
+        var clickedCandidateDistanceSq = CandidateClickRadiusPixels * CandidateClickRadiusPixels;
         var labelCount = 0;
         foreach (var item in candidates)
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var recordedOwners = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey);
-            var isConfirmed = recordedOwners.Count > 0;
-            var riskOwners = GetRiskOwners(candidate, territoryId, riskOwnersByKey);
-            var isRisk = riskOwners.Count > 0;
-            var disabledOwners = GetDisabledOwners(candidate, territoryId, disabledOwnersByKey);
-            var isDisabled = disabledOwners.Count > 0;
+            var isConfirmed = HasRecordedOwner(candidate, territoryId, recordedOwnersByKey);
+            var isRisk = HasRiskOwner(candidate, territoryId, riskOwnersByKey);
+            var isDisabled = HasDisabledOwner(candidate, territoryId, disabledOwnersByKey);
             var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : CandidateColor;
             var pointRadius = isDisabled ? 4f : isConfirmed ? 4f : isRisk ? 3.5f : 3f;
+
+            if (pointDisableClick && TryWorldToScreen(standing, out var candidateScreen))
+            {
+                var distanceSq = Vector2.DistanceSquared(mousePosition, candidateScreen);
+                if (distanceSq <= clickedCandidateDistanceSq)
+                {
+                    clickedCandidate = candidate;
+                    clickedCandidateDistanceSq = distanceSq;
+                }
+            }
 
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, pointRadius, color, true);
 
             if (isDisabled || isConfirmed || isRisk || labelCount < MaxCandidateLabels)
             {
+                var recordedOwners = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey);
+                var riskOwners = GetRiskOwners(candidate, territoryId, riskOwnersByKey);
+                var disabledOwners = GetDisabledOwners(candidate, territoryId, disabledOwnersByKey);
                 DrawWorldText(
                     drawList,
                     standing + new Vector3(0f, 1.6f, 0f),
@@ -175,10 +204,13 @@ internal sealed unsafe class WorldOverlayRenderer
             var clippedText = visibleCandidates.Count > candidates.Count
                 ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
                 : string.Empty;
-            drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{clippedText}");
+            var pointDisableText = session.OverlayPointDisableMode ? " 点选禁用/恢复" : string.Empty;
+            drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{pointDisableText}{clippedText}");
         }
 
         DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey, riskOwnersByKey, disabledOwnersByKey);
+        if (clickedCandidate is not null)
+            session.ToggleOverlayCandidateDisabled(clickedCandidate);
     }
 
     private static string BuildCandidateLabel(
@@ -207,6 +239,51 @@ internal sealed unsafe class WorldOverlayRenderer
         };
         var path = candidate.PathLengthMeters is { } pathLength ? $" path={pathLength:F1}m" : string.Empty;
         return $"候选 {status}/{reachability} p={distanceToPlayer:F1}m{path} b={ShortBlockId(candidate.BlockId)}";
+    }
+
+    private static bool HasRecordedOwner(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> recordedOwnersByKey)
+    {
+        return HasOwner(candidate, territoryId, recordedOwnersByKey, includeBlock: false);
+    }
+
+    private static bool HasRiskOwner(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> riskOwnersByKey)
+    {
+        return HasOwner(candidate, territoryId, riskOwnersByKey, includeBlock: true);
+    }
+
+    private static bool HasDisabledOwner(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> disabledOwnersByKey)
+    {
+        return HasOwner(candidate, territoryId, disabledOwnersByKey, includeBlock: false);
+    }
+
+    private static bool HasOwner(
+        ApproachCandidate candidate,
+        uint territoryId,
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> ownersByKey,
+        bool includeBlock)
+    {
+        if (ownersByKey.Count == 0)
+            return false;
+
+        return HasOwnerKey(ownersByKey, candidate.CandidateId)
+            || (includeBlock && HasOwnerKey(ownersByKey, candidate.BlockId))
+            || HasOwnerKey(ownersByKey, GetTerritoryCandidateFingerprint(candidate, territoryId));
+    }
+
+    private static bool HasOwnerKey(
+        IReadOnlyDictionary<string, List<CandidateRecordOwner>> ownersByKey,
+        string key)
+    {
+        return !string.IsNullOrWhiteSpace(key) && ownersByKey.ContainsKey(key);
     }
 
     private static IReadOnlyList<CandidateRecordOwner> GetRecordedOwners(
@@ -324,7 +401,6 @@ internal sealed unsafe class WorldOverlayRenderer
             {
                 AddRecordedOwner(ownersByKey, point.SourceCandidateId, owner);
                 AddRecordedOwner(ownersByKey, point.SourceCandidateFingerprint, owner);
-                AddRecordedOwner(ownersByKey, point.SourceBlockId, owner);
                 if (maintenance.TerritoryId != 0)
                 {
                     AddRecordedOwner(
@@ -375,6 +451,18 @@ internal sealed unsafe class WorldOverlayRenderer
     {
         return point.Status == ApproachPointStatus.Disabled
             && point.SourceKind != ApproachPointSourceKind.AutoCastFill;
+    }
+
+    private static bool IsGameLeftMouseDown()
+    {
+        try
+        {
+            return InputManager.IsLeftMouseDown();
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string GetTerritoryCandidateFingerprint(ApproachCandidate candidate, uint territoryId)
@@ -577,9 +665,9 @@ internal sealed unsafe class WorldOverlayRenderer
         {
             var candidate = item.Candidate;
             var standing = ToVector3(candidate.Position);
-            var isConfirmed = GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0;
-            var isRisk = GetRiskOwners(candidate, territoryId, riskOwnersByKey).Count > 0;
-            var isDisabled = GetDisabledOwners(candidate, territoryId, disabledOwnersByKey).Count > 0;
+            var isConfirmed = HasRecordedOwner(candidate, territoryId, recordedOwnersByKey);
+            var isRisk = HasRiskOwner(candidate, territoryId, riskOwnersByKey);
+            var isDisabled = HasDisabledOwner(candidate, territoryId, disabledOwnersByKey);
             var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : TerritoryCandidateColor;
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, isDisabled ? 3f : isConfirmed ? 3f : isRisk ? 2.5f : 2f, color, true);
@@ -613,11 +701,11 @@ internal sealed unsafe class WorldOverlayRenderer
             .Take(32))
         {
             var confirmedCount = item.Block.Candidates.Count(candidate =>
-                GetRecordedOwners(candidate, territoryId, recordedOwnersByKey).Count > 0);
+                HasRecordedOwner(candidate, territoryId, recordedOwnersByKey));
             var riskCount = item.Block.Candidates.Count(candidate =>
-                GetRiskOwners(candidate, territoryId, riskOwnersByKey).Count > 0);
+                HasRiskOwner(candidate, territoryId, riskOwnersByKey));
             var disabledCount = item.Block.Candidates.Count(candidate =>
-                GetDisabledOwners(candidate, territoryId, disabledOwnersByKey).Count > 0);
+                HasDisabledOwner(candidate, territoryId, disabledOwnersByKey));
             var label = $"{ShortBlockId(item.Block.BlockId)} {confirmedCount}/{item.Block.Candidates.Count}";
             if (riskCount > 0)
                 label += $" r{riskCount}";
