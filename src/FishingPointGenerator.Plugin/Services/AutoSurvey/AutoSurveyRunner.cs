@@ -11,6 +11,9 @@ internal sealed class AutoSurveyRunner
     private const float ArrivedDistanceMeters = 1.2f;
     private static readonly TimeSpan ShortDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan LoopDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan CastRecordTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan InterruptFallbackDelay = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan InterruptGiveUpDelay = TimeSpan.FromSeconds(12);
 
     private readonly SpotWorkflowSession session;
     private readonly VnavmeshQueryService navmesh;
@@ -19,6 +22,10 @@ internal sealed class AutoSurveyRunner
     private AutoSurveyMode mode;
     private AutoSurveyStep step;
     private DateTimeOffset waitUntil;
+    private DateTimeOffset castStartedAt;
+    private DateTimeOffset interruptStartedAt;
+    private AutoSurveyStep stepAfterInterrupt;
+    private bool completeRoundAfterInterrupt;
     private SpotCandidate? currentCandidate;
     private int observedCastRecordVersion;
 
@@ -86,6 +93,10 @@ internal sealed class AutoSurveyRunner
         waitUntil = default;
         currentCandidate = null;
         observedCastRecordVersion = 0;
+        castStartedAt = DateTimeOffset.MinValue;
+        interruptStartedAt = DateTimeOffset.MinValue;
+        stepAfterInterrupt = AutoSurveyStep.Idle;
+        completeRoundAfterInterrupt = false;
         CompletedRounds = 0;
         StatusText = message;
     }
@@ -130,8 +141,8 @@ internal sealed class AutoSurveyRunner
             case AutoSurveyStep.WaitCastRecord:
                 WaitCastRecord();
                 break;
-            case AutoSurveyStep.QuitFishing:
-                QuitFishing();
+            case AutoSurveyStep.InterruptFishing:
+                InterruptFishing();
                 break;
             case AutoSurveyStep.LoopDelay:
                 step = AutoSurveyStep.EnsureSpotScan;
@@ -247,6 +258,15 @@ internal sealed class AutoSurveyRunner
 
     private void Mount()
     {
+        if (playerActions.IsFishingActive())
+        {
+            BeginInterrupt(
+                completeRound: false,
+                nextStep: AutoSurveyStep.Mount,
+                $"检测到钓鱼状态：准备中断后上坐骑 {CurrentCandidateText}");
+            return;
+        }
+
         if (playerActions.MountIfNeeded())
         {
             StatusText = $"移动到候选：{CurrentCandidateText}";
@@ -329,6 +349,13 @@ internal sealed class AutoSurveyRunner
             return;
         }
 
+        if (!playerActions.IsFreeForAutoSurvey())
+        {
+            StatusText = $"等待角色自由态：{CurrentCandidateText}";
+            Delay(ShortDelay);
+            return;
+        }
+
         if (!playerActions.Face(currentCandidate.Rotation))
         {
             Stop("自动点亮停止：没有可用玩家对象，无法设置朝向。");
@@ -342,8 +369,22 @@ internal sealed class AutoSurveyRunner
 
     private void Cast()
     {
+        if (!playerActions.IsFreeForAutoSurvey())
+        {
+            StatusText = $"等待自由态后抛竿：{CurrentCandidateText}";
+            Delay(ShortDelay);
+            return;
+        }
+
         observedCastRecordVersion = session.CastRecordVersion;
-        playerActions.Cast();
+        if (!playerActions.CastIfReady())
+        {
+            StatusText = $"等待抛竿节流：{CurrentCandidateText}";
+            Delay(ShortDelay);
+            return;
+        }
+
+        castStartedAt = DateTimeOffset.UtcNow;
         StatusText = $"已发送抛竿：等待日志记录 {CurrentCandidateText}";
         Delay(ShortDelay);
         step = AutoSurveyStep.WaitCastRecord;
@@ -353,19 +394,90 @@ internal sealed class AutoSurveyRunner
     {
         if (session.CastRecordVersion == observedCastRecordVersion)
         {
+            if (DateTimeOffset.UtcNow - castStartedAt >= CastRecordTimeout)
+            {
+                BeginInterrupt(
+                    completeRound: false,
+                    nextStep: AutoSurveyStep.Cast,
+                    $"等待抛竿日志超时：准备中断后重试 {CurrentCandidateText}");
+                return;
+            }
+
             StatusText = $"等待抛竿日志：{CurrentCandidateText}";
             return;
         }
 
-        StatusText = $"已记录抛竿：准备中断 {CurrentCandidateText}";
-        step = AutoSurveyStep.QuitFishing;
+        castStartedAt = DateTimeOffset.MinValue;
+        BeginInterrupt(
+            completeRound: true,
+            nextStep: AutoSurveyStep.LoopDelay,
+            $"已记录抛竿：准备中断 {CurrentCandidateText}");
     }
 
-    private void QuitFishing()
+    private void BeginInterrupt(bool completeRound, AutoSurveyStep nextStep, string statusText)
     {
-        playerActions.QuitFishing();
+        interruptStartedAt = DateTimeOffset.UtcNow;
+        completeRoundAfterInterrupt = completeRound;
+        stepAfterInterrupt = nextStep;
+        StatusText = statusText;
+        step = AutoSurveyStep.InterruptFishing;
+        Delay(ShortDelay);
+    }
+
+    private void InterruptFishing()
+    {
+        var interruptResult = playerActions.InterruptFishingIfNeeded();
+        if (interruptResult == FishingInterruptAttempt.Idle)
+        {
+            FinishInterrupt();
+            return;
+        }
+
+        var elapsed = DateTimeOffset.UtcNow - interruptStartedAt;
+        if (elapsed >= InterruptGiveUpDelay)
+        {
+            Stop($"自动点亮停止：中断后未能回到自由态。目标 {CurrentCandidateText}");
+            return;
+        }
+
+        if (elapsed >= InterruptFallbackDelay)
+        {
+            playerActions.QuitFishingCommandIfNeeded();
+            StatusText = $"等待收竿回到自由态：{CurrentCandidateText}";
+            Delay(ShortDelay);
+            return;
+        }
+
+        StatusText = interruptResult == FishingInterruptAttempt.Issued
+            ? $"已发送中断技能：等待自由态 {CurrentCandidateText}"
+            : $"等待可中断状态：{CurrentCandidateText}";
+        Delay(ShortDelay);
+    }
+
+    private void FinishInterrupt()
+    {
+        interruptStartedAt = DateTimeOffset.MinValue;
+        if (completeRoundAfterInterrupt)
+        {
+            FinishRound();
+            return;
+        }
+
+        completeRoundAfterInterrupt = false;
+        StatusText = $"已回到自由态：{CurrentCandidateText}";
+        step = stepAfterInterrupt;
+        stepAfterInterrupt = AutoSurveyStep.Idle;
+        Delay(ShortDelay);
+    }
+
+    private void FinishRound()
+    {
         CompletedRounds++;
         currentCandidate = null;
+        castStartedAt = DateTimeOffset.MinValue;
+        interruptStartedAt = DateTimeOffset.MinValue;
+        completeRoundAfterInterrupt = false;
+        stepAfterInterrupt = AutoSurveyStep.Idle;
 
         if (mode == AutoSurveyMode.Once)
         {
@@ -451,6 +563,6 @@ internal enum AutoSurveyStep
     Face,
     Cast,
     WaitCastRecord,
-    QuitFishing,
+    InterruptFishing,
     LoopDelay,
 }

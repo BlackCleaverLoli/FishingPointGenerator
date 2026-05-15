@@ -17,8 +17,6 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float FishableProjectionBlockerVerticalEpsilon = 0f;
     private const float WalkableBlockCandidateSampleSpacing = 2f;
     private const float CandidateFishableRayHeight = 0.5f;
-    private const float CandidateFishableRayMinDistance = 0.5f;
-    private const float CandidateFishableRayStep = 0.5f;
     private const float CandidateFishableRayMaxDistance = MaximumCandidateDistanceFromFishableSurface;
     private const float FishableCoverageSatisfiedDistance = 2f;
     private const float FishableCoverageTargetKeyCellSize = 0.5f;
@@ -29,8 +27,9 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const float CandidateCoverageCellSize = 2f;
     private const float SurfaceIndexCellSize = 8f;
     private const float CandidateDedupeCellSize = 1.25f;
+    private const float CandidateDedupeVerticalCellSize = 2f;
     private const float CandidateStartPointYCellSize = 0.5f;
-    private const float CandidateRotationDedupeRadians = 0.15f;
+    private const float CandidateFacingHintCellSize = CandidateDedupeCellSize;
     private const float FishableCenterProbeStep = 0.5f;
     private const float FishableCenterProbeMaxDistance = 96f;
     private const int FishableCenterBoundaryRefineSteps = 6;
@@ -53,7 +52,10 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
     private const int MaxDebugWalkableLayerValues = 8;
     private const int MaxDebugWaterMaterials = 8;
     private const int MaxDebugWaterSamples = 8;
-    private const int CandidateFishableRayDirectionCount = 16;
+    private const float CandidateFacingLocalRefineOffsetRadians = MathF.PI / 6f;
+    private const float CandidateFacingSectorMergeGapRadians = MathF.PI / 3f + 0.001f;
+    private const int CandidateFacingHintSearchRadiusCells = 1;
+    private const int MaxCandidateFacingHintsPerCell = 4;
     private static readonly FishableCoverageRound[] FishableCoverageRounds =
     [
         new("粗扫", 4f, 8),
@@ -297,10 +299,10 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         var diagnostics = log is null
             ? null
             : new CandidateGenerationDiagnostics(log, territoryId, fishableTriangles.Count, walkableTriangles.Count, collisionBlockerTriangles.Count);
-        var candidateKeys = new HashSet<CandidateKey>();
+        var candidateDedupe = new CandidateDedupeIndex();
         var candidates = new List<CandidateScratch>();
 
-        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, collisionBlockerTriangles, candidateKeys, candidates, progress, cancellationToken, diagnostics);
+        AddWalkableSurfaceCandidates(territoryId, fishableTriangles, walkableTriangles, collisionBlockerTriangles, candidateDedupe, candidates, progress, cancellationToken, diagnostics);
 
         var orderStopwatch = Stopwatch.StartNew();
         var orderedCandidates = candidates
@@ -375,7 +377,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> fishableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> walkableTriangles,
         IReadOnlyList<ExtractedSceneTriangle> collisionBlockerTriangles,
-        HashSet<CandidateKey> candidateKeys,
+        CandidateDedupeIndex candidateDedupe,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
         CancellationToken cancellationToken,
@@ -423,7 +425,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             walkableSurfaces,
             walkableIndex,
             collisionBlockerIndex,
-            candidateKeys,
+            candidateDedupe,
             candidates,
             progress,
             cancellationToken,
@@ -1302,7 +1304,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> walkableSurfaces,
         TriangleIndex walkableIndex,
         TriangleIndex collisionBlockerIndex,
-        HashSet<CandidateKey> candidateKeys,
+        CandidateDedupeIndex candidateDedupe,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
         CancellationToken cancellationToken,
@@ -1312,6 +1314,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             return;
 
         var queryCache = new ScanQueryCache(walkableIndex, collisionBlockerIndex, diagnostics);
+        var facingHints = new RayDropFacingHintIndex();
         var sampledPoints = new HashSet<WalkableCandidateStartKey>();
         var progressTotal = Math.Max(1, walkableSurfaces.Count);
         for (var surfaceIndex = 0; surfaceIndex < walkableSurfaces.Count; surfaceIndex++)
@@ -1353,37 +1356,32 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     continue;
                 }
 
-                foreach (var direction in EnumerateCandidateFishableRayDirections())
+                if (diagnostics is not null)
+                    diagnostics.CandidateCreateAttempts++;
+                if (!TryCreateRayDropCandidateForWalkableSample(
+                        territoryId,
+                        fishableIndex,
+                        fishableSurfaceGroupIds,
+                        position,
+                        queryCache,
+                        facingHints,
+                        out var candidate))
                 {
                     if (diagnostics is not null)
-                        diagnostics.CandidateCreateAttempts++;
-                    if (!TryCreateRayDropCandidateForWalkableSample(
-                            territoryId,
-                            fishableIndex,
-                            fishableSurfaceGroupIds,
-                            position,
-                            direction,
-                            queryCache,
-                            out var candidate))
-                    {
-                        if (diagnostics is not null)
-                            diagnostics.CandidateCreateFailures++;
-                        continue;
-                    }
-
-                    var key = CandidateKey.From(candidate.Position, candidate.Rotation);
-                    if (!candidateKeys.Add(key))
-                    {
-                        if (diagnostics is not null)
-                            diagnostics.CandidateDedupeRejects++;
-                        break;
-                    }
-
-                    candidates.Add(candidate);
-                    if (diagnostics is not null)
-                        diagnostics.CandidateCreates++;
-                    break;
+                        diagnostics.CandidateCreateFailures++;
+                    continue;
                 }
+
+                if (!candidateDedupe.TryAdd(candidate))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.CandidateDedupeRejects++;
+                    continue;
+                }
+
+                candidates.Add(candidate);
+                if (diagnostics is not null)
+                    diagnostics.CandidateCreates++;
             }
         }
     }
@@ -1393,7 +1391,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> walkableSurfaces,
         TriangleIndex walkableIndex,
         TriangleIndex collisionBlockerIndex,
-        HashSet<CandidateKey> candidateKeys,
+        CandidateDedupeIndex candidateDedupe,
         List<CandidateScratch> candidates,
         IProgress<TerritoryScanProgress>? progress,
         CancellationToken cancellationToken,
@@ -1407,7 +1405,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             walkableSurfaces,
             queryCache,
             coverageIndex,
-            candidateKeys,
+            candidateDedupe,
             candidates,
             cancellationToken,
             diagnostics);
@@ -1451,7 +1449,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                         target,
                         round,
                         queryCache,
-                        candidateKeys,
+                        candidateDedupe,
                         out var candidate,
                         diagnostics))
                 {
@@ -1460,8 +1458,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     continue;
                 }
 
-                var key = CandidateKey.From(candidate.Position, candidate.Rotation);
-                if (!candidateKeys.Add(key))
+                if (!candidateDedupe.TryAdd(candidate))
                 {
                     if (diagnostics is not null)
                         diagnostics.CandidateDedupeRejects++;
@@ -1489,7 +1486,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         IReadOnlyList<ExtractedSceneTriangle> walkableSurfaces,
         ScanQueryCache queryCache,
         CandidateCoverageIndex coverageIndex,
-        HashSet<CandidateKey> candidateKeys,
+        CandidateDedupeIndex candidateDedupe,
         List<CandidateScratch> candidates,
         CancellationToken cancellationToken,
         CandidateGenerationDiagnostics? diagnostics)
@@ -1498,6 +1495,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             return;
 
         var blockIndex = new FishableBlockIndex(fishableBlocks);
+        var facingHints = new RayDropFacingHintIndex();
         var sampledPoints = new HashSet<WalkableCandidateStartKey>();
         foreach (var walkableSurface in walkableSurfaces)
         {
@@ -1525,50 +1523,33 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                     continue;
                 }
 
-                foreach (var direction in EnumerateCandidateFishableRayDirections())
+                if (diagnostics is not null)
+                    diagnostics.CandidateCreateAttempts++;
+                if (!TryCreateRayDropCandidateForWalkableSample(position, nearbyBlocks, queryCache, facingHints, out var candidate))
                 {
                     if (diagnostics is not null)
-                        diagnostics.CandidateCreateAttempts++;
-                    if (!TryCreateRayDropCandidateForWalkableSample(position, direction, nearbyBlocks, queryCache, out var candidate))
-                    {
-                        if (diagnostics is not null)
-                            diagnostics.CandidateCreateFailures++;
-                        continue;
-                    }
-
-                    var key = CandidateKey.From(candidate.Position, candidate.Rotation);
-                    if (!candidateKeys.Add(key))
-                    {
-                        if (diagnostics is not null)
-                            diagnostics.CandidateDedupeRejects++;
-                        break;
-                    }
-
-                    candidates.Add(candidate);
-                    coverageIndex.Add(candidate);
-                    if (diagnostics is not null)
-                        diagnostics.CandidateCreates++;
-                    break;
+                        diagnostics.CandidateCreateFailures++;
+                    continue;
                 }
-            }
-        }
-    }
 
-    private static IEnumerable<Vector2> EnumerateCandidateFishableRayDirections()
-    {
-        for (var index = 0; index < CandidateFishableRayDirectionCount; index++)
-        {
-            var angle = MathF.Tau * index / CandidateFishableRayDirectionCount;
-            yield return new Vector2(MathF.Sin(angle), MathF.Cos(angle));
+                if (!candidateDedupe.TryAdd(candidate))
+                {
+                    if (diagnostics is not null)
+                        diagnostics.CandidateDedupeRejects++;
+                    continue;
+                }
+
+                candidates.Add(candidate);
+                coverageIndex.Add(candidate);
+                if (diagnostics is not null)
+                    diagnostics.CandidateCreates++;
+            }
         }
     }
 
     private static IEnumerable<float> EnumerateCandidateFishableRayOffsets()
     {
-        for (var offset = CandidateFishableRayMaxDistance;
-             offset >= CandidateFishableRayMinDistance - 0.001f;
-             offset -= CandidateFishableRayStep)
-            yield return offset;
+        yield return CandidateFishableRayMaxDistance;
     }
 
     private static bool TryCreateRayDropCandidateForWalkableSample(
@@ -1576,14 +1557,15 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         TriangleIndex fishableIndex,
         IReadOnlyDictionary<ExtractedSceneTriangle, string> fishableSurfaceGroupIds,
         Vector3 walkablePoint,
-        Vector2 direction,
         ScanQueryCache queryCache,
+        RayDropFacingHintIndex facingHints,
         out CandidateScratch candidate)
     {
         candidate = default;
-        foreach (var offset in EnumerateCandidateFishableRayOffsets())
+        DirectionalRayDropHit? Probe(float angle)
         {
-            var rayPoint = CreateProbePoint(walkablePoint, direction, offset) + new Vector3(0f, CandidateFishableRayHeight, 0f);
+            var direction = DirectionFromAngle(angle);
+            var rayPoint = CreateProbePoint(walkablePoint, direction, CandidateFishableRayMaxDistance) + new Vector3(0f, CandidateFishableRayHeight, 0f);
             var result = TryFindRayDropFishableTarget(
                 territoryId,
                 rayPoint,
@@ -1592,48 +1574,308 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 queryCache,
                 out var target);
             if (result == RayDropProbeResult.Miss)
-                continue;
+                return null;
 
-            if (!queryCache.HasClearFishableAccess(walkablePoint, target.Point))
-                continue;
-
-            candidate = new CandidateScratch(
-                walkablePoint,
-                AngleMath.NormalizeRotation(MathF.Atan2(direction.X, direction.Y)),
-                target.SurfaceGroupId);
-            return true;
+            return new DirectionalRayDropHit(
+                NormalizeAngle(angle),
+                direction,
+                target.SurfaceGroupId,
+                target.Point);
         }
 
-        return false;
+        var facingHint = facingHints.TryFindBest(walkablePoint, out var resolvedHint)
+            ? resolvedHint
+            : (RayDropFacingHint?)null;
+        if (!TryResolveBestRayDropFacing(
+                Probe,
+                hit => queryCache.HasClearFishableAccess(walkablePoint, hit.FishablePoint),
+                facingHint,
+                out var hit,
+                out var sector))
+            return false;
+
+        if (sector is not null)
+            facingHints.Add(walkablePoint, sector);
+        candidate = new CandidateScratch(walkablePoint, AngleMath.NormalizeRotation(hit.Angle), hit.SurfaceGroupId);
+        return true;
     }
 
     private static bool TryCreateRayDropCandidateForWalkableSample(
         Vector3 walkablePoint,
-        Vector2 direction,
         IReadOnlyList<FishableSurfaceBlock> nearbyBlocks,
         ScanQueryCache queryCache,
+        RayDropFacingHintIndex facingHints,
         out CandidateScratch candidate)
     {
         candidate = default;
-        foreach (var offset in EnumerateCandidateFishableRayOffsets())
+        DirectionalRayDropHit? Probe(float angle)
         {
-            var rayPoint = CreateProbePoint(walkablePoint, direction, offset) + new Vector3(0f, CandidateFishableRayHeight, 0f);
+            var direction = DirectionFromAngle(angle);
+            var rayPoint = CreateProbePoint(walkablePoint, direction, CandidateFishableRayMaxDistance) + new Vector3(0f, CandidateFishableRayHeight, 0f);
             var result = TryFindRayDropFishableTarget(rayPoint, walkablePoint, nearbyBlocks, queryCache, out var target);
             if (result == RayDropProbeResult.Miss)
+                return null;
+
+            return new DirectionalRayDropHit(
+                NormalizeAngle(angle),
+                direction,
+                target.Block.SurfaceGroupId,
+                target.Point);
+        }
+
+        var facingHint = facingHints.TryFindBest(walkablePoint, out var resolvedHint)
+            ? resolvedHint
+            : (RayDropFacingHint?)null;
+        if (!TryResolveBestRayDropFacing(
+                Probe,
+                hit => queryCache.HasClearFishableAccess(walkablePoint, hit.FishablePoint),
+                facingHint,
+                out var hit,
+                out var sector))
+            return false;
+
+        if (sector is not null)
+            facingHints.Add(walkablePoint, sector);
+        candidate = new CandidateScratch(walkablePoint, AngleMath.NormalizeRotation(hit.Angle), hit.SurfaceGroupId);
+        return true;
+    }
+
+    private static bool TryResolveBestRayDropFacing(
+        Func<float, DirectionalRayDropHit?> probe,
+        Func<DirectionalRayDropHit, bool> isUsable,
+        RayDropFacingHint? facingHint,
+        out DirectionalRayDropHit selected,
+        out DirectionalRayDropSector? selectedSector)
+    {
+        selected = default;
+        selectedSector = null;
+        if (facingHint is { } hint)
+        {
+            var hintHits = new List<DirectionalRayDropHit>(8);
+            var hintTestedAngles = new HashSet<int>();
+            ProbeAngles(probe, hintHits, hintTestedAngles, GetRayDropFacingHintProbeAngles(hint));
+            if (hintHits.Count > 0
+                && TryResolveBestRayDropSector(probe, isUsable, hintHits, hintTestedAngles, out selected, out selectedSector))
+                return true;
+        }
+
+        var hits = new List<DirectionalRayDropHit>(12);
+        var testedAngles = new HashSet<int>();
+
+        ProbeAngles(probe, hits, testedAngles, [0f, MathF.PI / 2f, MathF.PI, MathF.PI * 3f / 2f]);
+        ProbeAngles(probe, hits, testedAngles, [MathF.PI / 4f, MathF.PI * 3f / 4f, MathF.PI * 5f / 4f, MathF.PI * 7f / 4f]);
+        if (hits.Count == 0)
+            return false;
+
+        return TryResolveBestRayDropSector(probe, isUsable, hits, testedAngles, out selected, out selectedSector);
+    }
+
+    private static bool TryResolveBestRayDropSector(
+        Func<float, DirectionalRayDropHit?> probe,
+        Func<DirectionalRayDropHit, bool> isUsable,
+        List<DirectionalRayDropHit> hits,
+        HashSet<int> testedAngles,
+        out DirectionalRayDropHit selected,
+        out DirectionalRayDropSector? selectedSector)
+    {
+        selected = default;
+        selectedSector = null;
+        var coarseSector = BuildDirectionalRayDropSectors(hits)
+            .OrderByDescending(sector => sector.Hits.Count)
+            .ThenByDescending(sector => sector.Width)
+            .ThenBy(sector => sector.CenterAngle)
+            .FirstOrDefault();
+        if (coarseSector is null)
+            return false;
+
+        ProbeAngles(probe, hits, testedAngles, GetDirectionalRayDropSectorRefineAngles(coarseSector));
+
+        var sector = BuildDirectionalRayDropSectors(hits)
+            .Where(sector => string.Equals(sector.SurfaceGroupId, coarseSector.SurfaceGroupId, StringComparison.Ordinal)
+                && sector.Hits.Any(hit => coarseSector.Hits.Any(coarseHit => AngularDistance(hit.Angle, coarseHit.Angle) <= FacingDirectionDedupeRadians)))
+            .OrderByDescending(sector => sector.Hits.Count)
+            .ThenByDescending(sector => sector.Width)
+            .ThenBy(sector => sector.CenterAngle)
+            .FirstOrDefault();
+        if (sector is null)
+            return false;
+        selectedSector = sector;
+
+        var sampledCenter = sector.Hits
+            .OrderBy(hit => AngularDistance(hit.Angle, sector.CenterAngle))
+            .ThenBy(hit => hit.Angle)
+            .FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(sampledCenter.SurfaceGroupId)
+            && AngularDistance(sampledCenter.Angle, sector.CenterAngle) <= FacingDirectionDedupeRadians
+            && isUsable(sampledCenter))
+        {
+            selected = sampledCenter;
+            return true;
+        }
+
+        var centerHit = probe(sector.CenterAngle);
+        if (centerHit is { } resolvedCenter
+            && string.Equals(resolvedCenter.SurfaceGroupId, sector.SurfaceGroupId, StringComparison.Ordinal)
+            && isUsable(resolvedCenter))
+        {
+            selected = resolvedCenter;
+            return true;
+        }
+
+        foreach (var fallback in sector.Hits
+            .OrderBy(hit => AngularDistance(hit.Angle, sector.CenterAngle))
+            .ThenBy(hit => hit.Angle))
+        {
+            if (!isUsable(fallback))
                 continue;
 
-            if (!queryCache.HasClearFishableAccess(walkablePoint, target.Point))
-                continue;
-
-            candidate = new CandidateScratch(
-                walkablePoint,
-                AngleMath.NormalizeRotation(MathF.Atan2(direction.X, direction.Y)),
-                target.Block.SurfaceGroupId);
+            selected = fallback;
             return true;
         }
 
         return false;
     }
+
+    private static IReadOnlyList<float> GetRayDropFacingHintProbeAngles(RayDropFacingHint hint) =>
+    [
+        hint.EndAngle + CandidateFacingLocalRefineOffsetRadians,
+        hint.EndAngle,
+        hint.CenterAngle,
+        hint.StartAngle,
+        hint.StartAngle - CandidateFacingLocalRefineOffsetRadians,
+    ];
+
+    private static IReadOnlyList<float> GetDirectionalRayDropSectorRefineAngles(DirectionalRayDropSector sector) =>
+    [
+        sector.StartAngle - CandidateFacingLocalRefineOffsetRadians,
+        sector.EndAngle + CandidateFacingLocalRefineOffsetRadians,
+    ];
+
+    private static void ProbeAngles(
+        Func<float, DirectionalRayDropHit?> probe,
+        List<DirectionalRayDropHit> hits,
+        HashSet<int> testedAngles,
+        IReadOnlyList<float> angles)
+    {
+        foreach (var angle in angles)
+        {
+            var normalized = NormalizeAngle(angle);
+            if (!testedAngles.Add(QuantizeFacingAngle(normalized)))
+                continue;
+
+            var hit = probe(normalized);
+            if (hit is { } resolvedHit)
+                hits.Add(resolvedHit);
+        }
+    }
+
+    private static IReadOnlyList<DirectionalRayDropSector> BuildDirectionalRayDropSectors(IReadOnlyList<DirectionalRayDropHit> hits)
+    {
+        if (hits.Count == 0)
+            return [];
+
+        var orderedHits = hits
+            .OrderBy(hit => hit.Angle)
+            .ToList();
+        var sectorHits = new List<List<DirectionalRayDropHit>>();
+        foreach (var hit in orderedHits)
+        {
+            if (sectorHits.Count == 0)
+            {
+                sectorHits.Add([hit]);
+                continue;
+            }
+
+            var current = sectorHits[^1];
+            var previous = current[^1];
+            if (string.Equals(previous.SurfaceGroupId, hit.SurfaceGroupId, StringComparison.Ordinal)
+                && AngularForwardDistance(previous.Angle, hit.Angle) <= CandidateFacingSectorMergeGapRadians)
+                current.Add(hit);
+            else
+                sectorHits.Add([hit]);
+        }
+
+        if (sectorHits.Count > 1)
+        {
+            var first = sectorHits[0];
+            var last = sectorHits[^1];
+            if (string.Equals(first[0].SurfaceGroupId, last[^1].SurfaceGroupId, StringComparison.Ordinal)
+                && AngularForwardDistance(last[^1].Angle, first[0].Angle) <= CandidateFacingSectorMergeGapRadians)
+            {
+                last.AddRange(first);
+                sectorHits.RemoveAt(0);
+            }
+        }
+
+        return sectorHits
+            .Select(CreateDirectionalRayDropSector)
+            .ToList();
+    }
+
+    private static DirectionalRayDropSector CreateDirectionalRayDropSector(IReadOnlyList<DirectionalRayDropHit> hits)
+    {
+        var ordered = hits
+            .OrderBy(hit => hit.Angle)
+            .ToList();
+        if (ordered.Count == 1)
+            return new DirectionalRayDropSector(
+                ordered[0].SurfaceGroupId,
+                ordered,
+                ordered[0].Angle,
+                ordered[0].Angle,
+                ordered[0].Angle,
+                0f);
+
+        var largestGap = -1f;
+        var gapStartIndex = 0;
+        for (var index = 0; index < ordered.Count; index++)
+        {
+            var next = (index + 1) % ordered.Count;
+            var gap = AngularForwardDistance(ordered[index].Angle, ordered[next].Angle);
+            if (gap <= largestGap)
+                continue;
+
+            largestGap = gap;
+            gapStartIndex = index;
+        }
+
+        var start = ordered[(gapStartIndex + 1) % ordered.Count].Angle;
+        var end = ordered[gapStartIndex].Angle;
+        if (end < start)
+            end += MathF.Tau;
+        var width = end - start;
+        var center = NormalizeAngle(start + (width * 0.5f));
+        return new DirectionalRayDropSector(
+            ordered[0].SurfaceGroupId,
+            ordered,
+            NormalizeAngle(start),
+            NormalizeAngle(end),
+            center,
+            width);
+    }
+
+    private static Vector2 DirectionFromAngle(float angle) => new(MathF.Sin(angle), MathF.Cos(angle));
+
+    private static float NormalizeAngle(float angle)
+    {
+        angle %= MathF.Tau;
+        return angle < 0f ? angle + MathF.Tau : angle;
+    }
+
+    private static float AngularForwardDistance(float from, float to)
+    {
+        var distance = NormalizeAngle(to) - NormalizeAngle(from);
+        return distance < 0f ? distance + MathF.Tau : distance;
+    }
+
+    private static float AngularDistance(float left, float right)
+    {
+        var distance = MathF.Abs(NormalizeAngle(left) - NormalizeAngle(right));
+        return MathF.Min(distance, MathF.Tau - distance);
+    }
+
+    private static int QuantizeFacingAngle(float angle) =>
+        (int)MathF.Round(NormalizeAngle(angle) / FacingDirectionDedupeRadians, MidpointRounding.AwayFromZero);
 
     private static RayDropProbeResult TryFindRayDropFishableTarget(
         uint territoryId,
@@ -1967,7 +2209,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         FishableCoverageTarget target,
         FishableCoverageRound round,
         ScanQueryCache queryCache,
-        IReadOnlySet<CandidateKey> candidateKeys,
+        CandidateDedupeIndex candidateDedupe,
         out CandidateScratch candidate,
         CandidateGenerationDiagnostics? diagnostics)
     {
@@ -2008,7 +2250,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 }
 
                 var candidateScratch = new CandidateScratch(position, rotation, target.Block.SurfaceGroupId);
-                if (candidateKeys.Contains(CandidateKey.From(candidateScratch.Position, candidateScratch.Rotation)))
+                if (candidateDedupe.ContainsNear(candidateScratch.Position))
                 {
                     if (diagnostics is not null)
                         diagnostics.CandidateDedupeRejects++;
@@ -2583,7 +2825,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             .Min();
 
         pluginLog.Debug(
-            "FPG nearby candidate diagnostics: territory={TerritoryId} fishableSurfaceGroups={FishableSurfaceGroups} walkableSurfaces={WalkableSurfaces} nearestWalkableDistance={NearestWalkableDistance:F1} fishableIndexCells={FishableIndexCells} walkableIndexCells={WalkableIndexCells} collisionBlockers={CollisionBlockers} relevantCollisionBlockers={RelevantCollisionBlockers} collisionIndexCells={CollisionIndexCells} rayHeight={RayHeight:F1} rayMin={RayMin:F1} rayStep={RayStep:F1} rayMax={RayMax:F1} directions={Directions} standingClearance={StandingClearance:F1}",
+            "FPG nearby candidate diagnostics: territory={TerritoryId} fishableSurfaceGroups={FishableSurfaceGroups} walkableSurfaces={WalkableSurfaces} nearestWalkableDistance={NearestWalkableDistance:F1} fishableIndexCells={FishableIndexCells} walkableIndexCells={WalkableIndexCells} collisionBlockers={CollisionBlockers} relevantCollisionBlockers={RelevantCollisionBlockers} collisionIndexCells={CollisionIndexCells} rayHeight={RayHeight:F1} rayDistance={RayDistance:F1} directionPlan=\"xz hint + 8-way sector + local\" standingClearance={StandingClearance:F1}",
             territoryId,
             surfaceGroupCount,
             walkableSurfaces.Count,
@@ -2594,10 +2836,7 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             relevantCollisionBlockers.Count,
             collisionBlockerIndex.CellCount,
             CandidateFishableRayHeight,
-            CandidateFishableRayMinDistance,
-            CandidateFishableRayStep,
             CandidateFishableRayMaxDistance,
-            CandidateFishableRayDirectionCount,
             WalkableStandingClearanceMeters);
     }
 
@@ -3146,6 +3385,62 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         }
     }
 
+    private sealed class CandidateDedupeIndex
+    {
+        private readonly Dictionary<CandidateDedupeCellKey, List<CandidateScratch>> cells = [];
+
+        public bool TryAdd(CandidateScratch candidate)
+        {
+            if (ContainsNear(candidate.Position))
+                return false;
+
+            AddUnchecked(candidate);
+            return true;
+        }
+
+        public bool ContainsNear(Vector3 position)
+        {
+            var center = CandidateDedupeCellKey.From(position);
+            for (var x = center.X - 1; x <= center.X + 1; x++)
+            {
+                for (var y = center.Y - 1; y <= center.Y + 1; y++)
+                {
+                    for (var z = center.Z - 1; z <= center.Z + 1; z++)
+                    {
+                        if (!cells.TryGetValue(new CandidateDedupeCellKey(x, y, z), out var candidates))
+                            continue;
+
+                        foreach (var candidate in candidates)
+                        {
+                            if (AreCandidatesTooClose(position, candidate.Position))
+                                return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private void AddUnchecked(CandidateScratch candidate)
+        {
+            var key = CandidateDedupeCellKey.From(candidate.Position);
+            if (!cells.TryGetValue(key, out var candidates))
+            {
+                candidates = [];
+                cells[key] = candidates;
+            }
+
+            candidates.Add(candidate);
+        }
+
+        private static bool AreCandidatesTooClose(Vector3 left, Vector3 right)
+        {
+            return MathF.Abs(left.Y - right.Y) <= CandidateDedupeVerticalCellSize
+                && HorizontalDistance(left, right) < CandidateDedupeCellSize;
+        }
+    }
+
     private sealed class CandidateCoverageIndex
     {
         private readonly Dictionary<CandidateCoverageCellKey, List<CandidateScratch>> cells = [];
@@ -3406,6 +3701,70 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
                 diagnostics.FishableCoveredHits++;
 
             return result;
+        }
+    }
+
+    private sealed class RayDropFacingHintIndex
+    {
+        private readonly Dictionary<RayDropFacingHintKey, List<RayDropFacingHint>> hintsByCell = [];
+
+        public void Add(Vector3 position, DirectionalRayDropSector sector)
+        {
+            var key = RayDropFacingHintKey.From(position);
+            if (!hintsByCell.TryGetValue(key, out var hints))
+            {
+                hints = [];
+                hintsByCell[key] = hints;
+            }
+
+            hints.Add(new RayDropFacingHint(
+                position,
+                sector.SurfaceGroupId,
+                sector.StartAngle,
+                sector.EndAngle,
+                sector.CenterAngle,
+                sector.Width));
+            hints.Sort(static (left, right) =>
+            {
+                var widthComparison = right.Width.CompareTo(left.Width);
+                if (widthComparison != 0)
+                    return widthComparison;
+
+                return string.Compare(left.SurfaceGroupId, right.SurfaceGroupId, StringComparison.Ordinal);
+            });
+            if (hints.Count > MaxCandidateFacingHintsPerCell)
+                hints.RemoveRange(MaxCandidateFacingHintsPerCell, hints.Count - MaxCandidateFacingHintsPerCell);
+        }
+
+        public bool TryFindBest(Vector3 position, out RayDropFacingHint hint)
+        {
+            hint = default;
+            var found = false;
+            var bestDistance = float.MaxValue;
+            var key = RayDropFacingHintKey.From(position);
+            for (var dx = -CandidateFacingHintSearchRadiusCells; dx <= CandidateFacingHintSearchRadiusCells; dx++)
+            {
+                for (var dz = -CandidateFacingHintSearchRadiusCells; dz <= CandidateFacingHintSearchRadiusCells; dz++)
+                {
+                    if (!hintsByCell.TryGetValue(key.Offset(dx, dz), out var hints))
+                        continue;
+
+                    foreach (var candidate in hints)
+                    {
+                        var distance = HorizontalDistance(position, candidate.Position);
+                        if (found
+                            && (candidate.Width < hint.Width
+                                || (candidate.Width <= hint.Width + 0.001f && distance >= bestDistance)))
+                            continue;
+
+                        hint = candidate;
+                        bestDistance = distance;
+                        found = true;
+                    }
+                }
+            }
+
+            return found;
         }
     }
 
@@ -3730,6 +4089,28 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         ExtractedSceneTriangle Triangle,
         string SurfaceGroupId);
 
+    private readonly record struct DirectionalRayDropHit(
+        float Angle,
+        Vector2 Direction,
+        string SurfaceGroupId,
+        Vector3 FishablePoint);
+
+    private sealed record DirectionalRayDropSector(
+        string SurfaceGroupId,
+        IReadOnlyList<DirectionalRayDropHit> Hits,
+        float StartAngle,
+        float EndAngle,
+        float CenterAngle,
+        float Width);
+
+    private readonly record struct RayDropFacingHint(
+        Vector3 Position,
+        string SurfaceGroupId,
+        float StartAngle,
+        float EndAngle,
+        float CenterAngle,
+        float Width);
+
     private enum FishableCoverageTargetKind
     {
         Boundary,
@@ -3795,6 +4176,17 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
         private static int QuantizeVertical(float value) => (int)MathF.Floor(value / CandidateStartPointYCellSize);
     }
 
+    private readonly record struct RayDropFacingHintKey(int X, int Z)
+    {
+        public static RayDropFacingHintKey From(Vector3 point) => new(
+            Quantize(point.X),
+            Quantize(point.Z));
+
+        public RayDropFacingHintKey Offset(int dx, int dz) => new(X + dx, Z + dz);
+
+        private static int Quantize(float value) => (int)MathF.Floor(value / CandidateFacingHintCellSize);
+    }
+
     private readonly record struct FacingFishableQueryKey(string SurfaceGroupId, ProbePointKey Candidate, HorizontalProbeKey Probe)
     {
         public static FacingFishableQueryKey From(string surfaceGroupId, Vector3 candidate, Vector3 probe) => new(
@@ -3853,13 +4245,12 @@ internal sealed class VnavmeshSceneScanner : ICurrentTerritoryScanner
             left <= right ? new TrianglePairKey(left, right) : new TrianglePairKey(right, left);
     }
 
-    private readonly record struct CandidateKey(int X, int Y, int Z, int Rotation)
+    private readonly record struct CandidateDedupeCellKey(int X, int Y, int Z)
     {
-        public static CandidateKey From(Vector3 position, float rotation) => new(
+        public static CandidateDedupeCellKey From(Vector3 position) => new(
             (int)MathF.Floor(position.X / CandidateDedupeCellSize),
-            (int)MathF.Floor(position.Y / 2f),
-            (int)MathF.Floor(position.Z / CandidateDedupeCellSize),
-            (int)MathF.Floor(AngleMath.NormalizeRotation(rotation) / CandidateRotationDedupeRadians));
+            (int)MathF.Floor(position.Y / CandidateDedupeVerticalCellSize),
+            (int)MathF.Floor(position.Z / CandidateDedupeCellSize));
     }
 
     private readonly record struct EdgeKey(EdgeVertexKey A, EdgeVertexKey B)
