@@ -1,7 +1,6 @@
 using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using OmenTools;
-using OmenTools.Interop.Game.ExecuteCommand.Implementations;
 using OmenTools.Interop.Game.Models.Native;
 
 namespace FishingPointGenerator.Plugin.Services.GameInteraction;
@@ -81,16 +80,6 @@ internal sealed unsafe class PlayerFishingActionService
         return false;
     }
 
-    public bool Face(float rotation)
-    {
-        var player = DService.Instance().ObjectTable.LocalPlayer;
-        if (player is null)
-            return false;
-
-        player.ToStruct()->SetRotation(rotation);
-        return true;
-    }
-
     public bool IsFreeForAutoSurvey()
     {
         var condition = DService.Instance().Condition;
@@ -119,12 +108,22 @@ internal sealed unsafe class PlayerFishingActionService
             || IsPlayerFlying();
     }
 
-    public FishingCastAttempt TryCast(float rotation)
+    public bool IsCastActionAvailable()
+    {
+        if (!IsFreeForAutoSurvey())
+            return false;
+
+        var actionManager = ActionManager.Instance();
+        return actionManager != null
+            && actionManager->GetActionStatus(ActionType.Action, FishingCastActionId) == 0;
+    }
+
+    public FishingCastAttempt TryCast()
     {
         if (!IsFreeForAutoSurvey())
             return FishingCastAttempt.NotFree;
 
-        if (!Face(rotation))
+        if (DService.Instance().ObjectTable.LocalPlayer is null)
             return FishingCastAttempt.PlayerUnavailable;
 
         if (DateTimeOffset.UtcNow - lastCastAttemptAt < CastRetryDelay)
@@ -172,19 +171,6 @@ internal sealed unsafe class PlayerFishingActionService
         return actionManager->UseAction(ActionType.Action, FishingInterruptActionId, 0)
             ? FishingInterruptAttempt.Issued
             : FishingInterruptAttempt.Waiting;
-    }
-
-    public bool QuitFishingCommandIfNeeded()
-    {
-        if (IsFreeForAutoSurvey())
-            return true;
-
-        if (DateTimeOffset.UtcNow - lastInterruptAttemptAt < InterruptRetryDelay)
-            return false;
-
-        lastInterruptAttemptAt = DateTimeOffset.UtcNow;
-        FishingCommand.Quit();
-        return false;
     }
 
     private static bool IsPlayerFlying()

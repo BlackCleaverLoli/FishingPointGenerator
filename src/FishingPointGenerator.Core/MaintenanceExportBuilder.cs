@@ -6,7 +6,7 @@ public sealed class MaintenanceExportBuilder
 {
     private const int ExportFloatDigits = 2;
 
-    public ExportDocument Build(
+    public List<ExportedApproachPoint> Build(
         IEnumerable<SpotAnalysis> analyses,
         IEnumerable<TerritoryMaintenanceDocument> maintenanceDocuments)
     {
@@ -33,6 +33,7 @@ public sealed class MaintenanceExportBuilder
                         key,
                         new ExportedApproachPoint
                         {
+                            FishingSpot = key.FishingSpotId,
                             PositionX = RoundExportFloat(point.Position.X),
                             PositionY = RoundExportFloat(point.Position.Y),
                             PositionZ = RoundExportFloat(point.Position.Z),
@@ -42,26 +43,15 @@ public sealed class MaintenanceExportBuilder
             }
         }
 
-        return new ExportDocument
-        {
-            FishingSpots = exported
-                .GroupBy(item => item.Key)
-                .OrderBy(group => group.Key.TerritoryId)
-                .ThenBy(group => group.Key.FishingSpotId)
-                .Select(group => new ExportFishingSpot
-                {
-                    TerritoryId = group.Key.TerritoryId,
-                    FishingSpotId = group.Key.FishingSpotId,
-                    Points = group
-                        .Select(item => item.Point)
-                        .OrderBy(point => point.PositionX)
-                        .ThenBy(point => point.PositionY)
-                        .ThenBy(point => point.PositionZ)
-                        .ThenBy(point => point.Rotation)
-                        .ToList(),
-                })
-                .ToList(),
-        };
+        return exported
+            .OrderBy(item => item.Key.TerritoryId)
+            .ThenBy(item => item.Key.FishingSpotId)
+            .ThenBy(item => item.Point.PositionX)
+            .ThenBy(item => item.Point.PositionY)
+            .ThenBy(item => item.Point.PositionZ)
+            .ThenBy(item => item.Point.Rotation)
+            .Select(item => item.Point)
+            .ToList();
     }
 
     private static float RoundExportFloat(float value)

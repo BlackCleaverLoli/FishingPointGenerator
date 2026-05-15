@@ -86,6 +86,20 @@ data/exports/FishingSpotApproachPoints.json
 
 - 只导出 `confirmed` 的 `SpotKey`。
 - `weakCoverage`、`mixedRisk`、`noCandidate`、`ignored` 默认不导出。
-- 导出文档保留 `version` 作为 schema 版本，当前为 `2`。
-- 每个钓场按 `territoryId`、`fishingSpotId` 分组；每个点只保留 `PositionX`、`PositionY`、`PositionZ`、`Rotation`。
+- 导出文件是顶层数组，不保留 schema 版本、生成时间或 Territory 分组。
+- 每个点只保留 `FishingSpot`、`PositionX`、`PositionY`、`PositionZ`、`Rotation`。
 - 来源证据、候选和扫描信息只保留在维护层，不进入导出文件。
+
+示例：
+
+```json
+[
+  {
+    "FishingSpot": 2,
+    "PositionX": 105.01,
+    "PositionY": -11.22,
+    "PositionZ": 94.6,
+    "Rotation": 4.82
+  }
+]
+```

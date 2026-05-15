@@ -59,6 +59,9 @@ internal sealed class MainWindow : Window, IDisposable
         DrawHeader();
         ImGui.Separator();
 
+        DrawFieldWorkflowPanel();
+        ImGui.Separator();
+
         DrawMainTabs();
         ImGui.Separator();
 
@@ -111,11 +114,6 @@ internal sealed class MainWindow : Window, IDisposable
         ImGui.SameLine();
         DrawStatusBadge();
 
-        ImGui.TextColored(MutedText, $"游戏区域: {session.CurrentTerritoryId}");
-        ImGui.TextColored(MutedText, $"已选领地: {FormatTerritoryTitle(session.SelectedTerritoryId, session.SelectedTerritoryName)}");
-        if (session.CurrentTarget is not null)
-            ImGui.TextColored(MutedText, $"维护目标: {session.CurrentTargetDisplayName}");
-
         ImGui.PushTextWrapPos();
         ImGui.TextColored(GetMessageColor(), session.LastMessage);
         ImGui.PopTextWrapPos();
@@ -126,6 +124,44 @@ internal sealed class MainWindow : Window, IDisposable
             var text = progress is null ? "扫描进行中" : $"{progress.Stage}: {progress.Message}";
             ImGui.ProgressBar(session.TerritoryScanProgressFraction, new Vector2(-1f, 0f), text);
         }
+    }
+
+    private void DrawFieldWorkflowPanel()
+    {
+        var hasTarget = session.CurrentTarget is not null;
+        var sameTerritory = session.SelectedTerritoryIsCurrent;
+        var hasCurrentTerritory = session.CurrentTerritoryId != 0;
+        var statusText = hasTarget
+            ? $"{session.CurrentTargetDisplayName} / {FormatStatus(session.CurrentAnalysis?.Status)}"
+            : "-";
+
+        DrawSectionTitle("现场操作");
+        DrawSummaryRow(
+            "区域",
+            $"{session.CurrentTerritoryId} / {FormatTerritoryTitle(session.SelectedTerritoryId, session.SelectedTerritoryName)}");
+        DrawSummaryRow("目标", statusText, GetStatusColor(session.CurrentAnalysis?.Status));
+        DrawSummaryRow("自动", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
+
+        var actionLine = 0f;
+        if (FlowActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
+            session.StartAutoSurveyOnce();
+        if (FlowActionButton("循环点亮", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
+            session.StartAutoSurveyLoop();
+        if (FlowActionButton("停止自动", !session.AutoSurveyRunning, ref actionLine))
+            session.StopAutoSurvey();
+        if (FlowActionButton("传送水晶", !hasTarget, ref actionLine))
+            session.TeleportToCurrentTargetAetheryte();
+        if (FlowActionButton("钓场插旗", !hasTarget || !sameTerritory, ref actionLine))
+            session.PlaceCurrentTargetFlag();
+        if (FlowActionButton(
+                "推荐插旗",
+                !hasTarget || !sameTerritory || !session.CurrentCandidateSelectionIsActionable,
+                ref actionLine))
+            session.PlaceSelectedCandidateFlag();
+
+        var pointDisableMode = session.OverlayPointDisableMode;
+        if (FlowCheckbox("点选/框选禁用/恢复", ref pointDisableMode, ref actionLine))
+            session.OverlayPointDisableMode = pointDisableMode;
     }
 
     private void DrawTerritoryDrawer()
@@ -141,8 +177,6 @@ internal sealed class MainWindow : Window, IDisposable
             session.ScanCurrentTerritory();
         if (FlowActionButton("取消扫描", !session.TerritoryScanInProgress, ref actionLine))
             session.CancelTerritoryScan();
-
-        DrawAutoSurvey();
 
         DrawFilterInput("过滤", "##territory_filter", ref territoryFilterText);
 
@@ -475,42 +509,14 @@ internal sealed class MainWindow : Window, IDisposable
         DrawSummaryRow("说明", string.IsNullOrWhiteSpace(selection.Note) ? "-" : selection.Note);
     }
 
-    private void DrawAutoSurvey()
-    {
-        ImGui.Spacing();
-        ImGui.TextColored(AccentText, "当前区域自动点亮");
-        DrawSummaryRow("状态", session.AutoSurveyStatusText, session.AutoSurveyRunning ? AccentText : MutedText);
-        DrawSummaryRow("候选", session.AutoSurveyCandidateText);
-        DrawSummaryRow("完成", session.AutoSurveyCompletedRounds.ToString());
-
-        var hasCurrentTerritory = session.CurrentTerritoryId != 0;
-        var actionLine = 0f;
-        if (FlowActionButton("自动一次", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
-            session.StartAutoSurveyOnce();
-        if (FlowActionButton("循环点亮", session.AutoSurveyRunning || !hasCurrentTerritory, ref actionLine))
-            session.StartAutoSurveyLoop();
-        if (FlowActionButton("停止自动", !session.AutoSurveyRunning, ref actionLine))
-            session.StopAutoSurvey();
-    }
-
     private void DrawTargetActions(SpotAnalysis? analysis)
     {
         var hasTarget = session.CurrentTarget is not null;
         var sameTerritory = session.SelectedTerritoryIsCurrent;
 
         ImGui.Spacing();
-        ImGui.TextColored(AccentText, "定位");
-        var actionLine = 0f;
-        if (FlowActionButton("传送水晶", !hasTarget, ref actionLine))
-            session.TeleportToCurrentTargetAetheryte();
-        if (FlowActionButton("插旗钓场中心", !hasTarget || !sameTerritory, ref actionLine))
-            session.PlaceCurrentTargetFlag();
-        if (FlowActionButton("插旗当前推荐", !hasTarget || !sameTerritory || !session.CurrentCandidateSelectionIsActionable, ref actionLine))
-            session.PlaceSelectedCandidateFlag();
-
-        ImGui.Spacing();
         ImGui.TextColored(AccentText, "派生与确认");
-        actionLine = 0f;
+        var actionLine = 0f;
         if (FlowActionButton("派生候选", !hasTarget || session.TerritoryCandidateCount == 0, ref actionLine))
             session.ScanCurrentTarget();
         if (FlowActionButton("刷新推荐候选", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
@@ -549,14 +555,11 @@ internal sealed class MainWindow : Window, IDisposable
     {
         var hasTarget = session.CurrentTarget is not null;
         var hasCandidateSelection = session.CurrentCandidateSelection?.Candidate is not null;
-        var actionableCandidateSelection = session.CurrentCandidateSelectionIsActionable;
         var sameTerritory = session.SelectedTerritoryIsCurrent;
 
         ImGui.Spacing();
         ImGui.TextColored(AccentText, "点位操作");
         var actionLine = 0f;
-        if (FlowActionButton("插旗推荐候选", !actionableCandidateSelection || !sameTerritory, ref actionLine))
-            session.PlaceSelectedCandidateFlag();
         if (FlowActionButton("插旗未记录候选", !hasTarget || !sameTerritory || session.CurrentScan is null, ref actionLine))
             session.PlaceNearestUnrecordedCandidateFlag();
         if (FlowActionButton("排除推荐候选", !hasCandidateSelection || !sameTerritory, ref actionLine))
@@ -589,10 +592,6 @@ internal sealed class MainWindow : Window, IDisposable
         var showCandidates = session.OverlayShowCandidates;
         if (ImGui.Checkbox("显示候选点", ref showCandidates))
             session.OverlayShowCandidates = showCandidates;
-
-        var pointDisableMode = session.OverlayPointDisableMode;
-        if (ImGui.Checkbox("overlay 点选禁用/恢复", ref pointDisableMode))
-            session.OverlayPointDisableMode = pointDisableMode;
 
         var showTerritoryCache = session.OverlayShowTerritoryCache;
         if (ImGui.Checkbox("显示领地内存候选", ref showTerritoryCache))
@@ -888,6 +887,19 @@ internal sealed class MainWindow : Window, IDisposable
         var clicked = ActionButton(label, disabled);
         lineWidth += width;
         return clicked;
+    }
+
+    private static bool FlowCheckbox(string label, ref bool value, ref float lineWidth)
+    {
+        var width = ImGui.CalcTextSize(label).X + ImGui.GetFrameHeight() + 14f;
+        if (lineWidth > 0f && lineWidth + width <= ImGui.GetContentRegionAvail().X)
+            ImGui.SameLine();
+        else if (lineWidth > 0f)
+            lineWidth = 0f;
+
+        var changed = ImGui.Checkbox(label, ref value);
+        lineWidth += width;
+        return changed;
     }
 
     private static void DrawFilterInput(string label, string id, ref string text)

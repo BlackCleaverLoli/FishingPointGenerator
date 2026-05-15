@@ -30,6 +30,9 @@ internal sealed unsafe class WorldOverlayRenderer
     private const float FacingGuideLengthMeters = 5f;
     private const float DebugSurfaceHatchSpacingMeters = 4f;
     private const float CandidateClickRadiusPixels = 22f;
+    private const float CandidateSelectionDragThresholdPixels = 8f;
+    private const uint CandidateSelectionFillColor = 0x334080ff;
+    private const uint CandidateSelectionEdgeColor = 0xff4080ff;
     private const int MaxSurfaceDebugLabels = 4;
     private const int MaxCandidateLabels = 18;
 
@@ -37,6 +40,9 @@ internal sealed unsafe class WorldOverlayRenderer
     private Vector4 nearPlane;
     private Vector2 viewportSize;
     private bool previousLeftMouseDown;
+    private bool candidateSelectionActive;
+    private Vector2 candidateSelectionStart;
+    private Vector2 candidateSelectionEnd;
 
     public void Draw(SpotWorkflowSession session)
     {
@@ -150,17 +156,35 @@ internal sealed unsafe class WorldOverlayRenderer
         var leftMouseDown = IsGameLeftMouseDown();
         var viewportMin = ImGuiHelpers.MainViewport.Pos;
         var viewportMax = viewportMin + viewportSize;
-        var pointDisableClick = session.OverlayPointDisableMode
-            && leftMouseDown
-            && !previousLeftMouseDown
-            && !session.IsOverlayPointDisableMouseBlockedByUi(mousePosition)
-            && mousePosition.X >= viewportMin.X
+        var mouseInViewport = mousePosition.X >= viewportMin.X
             && mousePosition.Y >= viewportMin.Y
             && mousePosition.X <= viewportMax.X
             && mousePosition.Y <= viewportMax.Y;
-        previousLeftMouseDown = leftMouseDown;
-        ApproachCandidate? clickedCandidate = null;
-        var clickedCandidateDistanceSq = CandidateClickRadiusPixels * CandidateClickRadiusPixels;
+        var canStartPointDisableSelection = session.OverlayPointDisableMode
+            && leftMouseDown
+            && !previousLeftMouseDown
+            && !session.IsOverlayPointDisableMouseBlockedByUi(mousePosition)
+            && mouseInViewport;
+        var finishPointDisableSelection = session.OverlayPointDisableMode
+            && !leftMouseDown
+            && previousLeftMouseDown
+            && candidateSelectionActive;
+        if (!session.OverlayPointDisableMode)
+            candidateSelectionActive = false;
+        if (canStartPointDisableSelection)
+        {
+            candidateSelectionActive = true;
+            candidateSelectionStart = mousePosition;
+            candidateSelectionEnd = mousePosition;
+        }
+        else if (candidateSelectionActive && leftMouseDown)
+        {
+            candidateSelectionEnd = mousePosition;
+        }
+
+        List<OverlayCandidateScreenPoint> selectableCandidates = session.OverlayPointDisableMode
+            ? new List<OverlayCandidateScreenPoint>(candidates.Count)
+            : [];
         var labelCount = 0;
         foreach (var item in candidates)
         {
@@ -172,15 +196,8 @@ internal sealed unsafe class WorldOverlayRenderer
             var color = isDisabled ? DisabledColor : isConfirmed ? ConfirmedColor : isRisk ? WarningColor : CandidateColor;
             var pointRadius = isDisabled ? 4f : isConfirmed ? 4f : isRisk ? 3.5f : 3f;
 
-            if (pointDisableClick && TryWorldToScreen(standing, out var candidateScreen))
-            {
-                var distanceSq = Vector2.DistanceSquared(mousePosition, candidateScreen);
-                if (distanceSq <= clickedCandidateDistanceSq)
-                {
-                    clickedCandidate = candidate;
-                    clickedCandidateDistanceSq = distanceSq;
-                }
-            }
+            if (session.OverlayPointDisableMode && TryWorldToScreen(standing, out var candidateScreen))
+                selectableCandidates.Add(new OverlayCandidateScreenPoint(candidate, candidateScreen));
 
             DrawFacingGuide(drawList, standing, candidate.Rotation, color);
             DrawWorldPoint(drawList, standing, pointRadius, color, true);
@@ -199,18 +216,78 @@ internal sealed unsafe class WorldOverlayRenderer
             }
         }
 
+        if (candidateSelectionActive && leftMouseDown)
+            DrawCandidateSelectionRect(drawList, candidateSelectionStart, candidateSelectionEnd);
+
         if (TryWorldToScreen(playerPosition + new Vector3(0f, 2.5f, 0f), out var screen))
         {
             var clippedText = visibleCandidates.Count > candidates.Count
                 ? $" 显示截断 {candidates.Count}/{visibleCandidates.Count}"
                 : string.Empty;
-            var pointDisableText = session.OverlayPointDisableMode ? " 点选禁用/恢复" : string.Empty;
+            var pointDisableText = session.OverlayPointDisableMode ? " 点选/框选禁用/恢复" : string.Empty;
             drawList.AddText(screen, WarningColor, $"FPG overlay 已记录 {recordedTotal}/{survey.Candidates.Count} 风险 {riskTotal} 屏蔽 {disabledTotal}{pointDisableText}{clippedText}");
         }
 
         DrawTerritoryBlockLabels(drawList, session, playerPosition, drawDistance, territoryId, recordedOwnersByKey, riskOwnersByKey, disabledOwnersByKey);
-        if (clickedCandidate is not null)
-            session.ToggleOverlayCandidateDisabled(clickedCandidate);
+        if (finishPointDisableSelection)
+        {
+            var selectedCandidates = SelectOverlayCandidates(selectableCandidates, candidateSelectionStart, candidateSelectionEnd, mousePosition);
+            candidateSelectionActive = false;
+            if (selectedCandidates.Count > 0)
+                session.ToggleOverlayCandidatesDisabled(selectedCandidates);
+        }
+
+        previousLeftMouseDown = leftMouseDown;
+    }
+
+    private static IReadOnlyList<ApproachCandidate> SelectOverlayCandidates(
+        IReadOnlyList<OverlayCandidateScreenPoint> candidates,
+        Vector2 selectionStart,
+        Vector2 selectionEnd,
+        Vector2 mousePosition)
+    {
+        if (Vector2.DistanceSquared(selectionStart, selectionEnd) < CandidateSelectionDragThresholdPixels * CandidateSelectionDragThresholdPixels)
+        {
+            ApproachCandidate? clickedCandidate = null;
+            var clickedCandidateDistanceSq = CandidateClickRadiusPixels * CandidateClickRadiusPixels;
+            foreach (var item in candidates)
+            {
+                var distanceSq = Vector2.DistanceSquared(mousePosition, item.ScreenPosition);
+                if (distanceSq > clickedCandidateDistanceSq)
+                    continue;
+
+                clickedCandidate = item.Candidate;
+                clickedCandidateDistanceSq = distanceSq;
+            }
+
+            return clickedCandidate is null ? [] : [clickedCandidate];
+        }
+
+        var min = new Vector2(
+            MathF.Min(selectionStart.X, selectionEnd.X),
+            MathF.Min(selectionStart.Y, selectionEnd.Y));
+        var max = new Vector2(
+            MathF.Max(selectionStart.X, selectionEnd.X),
+            MathF.Max(selectionStart.Y, selectionEnd.Y));
+        return candidates
+            .Where(item =>
+                item.ScreenPosition.X >= min.X
+                && item.ScreenPosition.Y >= min.Y
+                && item.ScreenPosition.X <= max.X
+                && item.ScreenPosition.Y <= max.Y)
+            .Select(item => item.Candidate)
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateId))
+            .GroupBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+    }
+
+    private static void DrawCandidateSelectionRect(ImDrawListPtr drawList, Vector2 start, Vector2 end)
+    {
+        var min = new Vector2(MathF.Min(start.X, end.X), MathF.Min(start.Y, end.Y));
+        var max = new Vector2(MathF.Max(start.X, end.X), MathF.Max(start.Y, end.Y));
+        drawList.AddRectFilled(min, max, CandidateSelectionFillColor);
+        drawList.AddRect(min, max, CandidateSelectionEdgeColor, 0f, ImDrawFlags.None, 1.5f);
     }
 
     private static string BuildCandidateLabel(
@@ -866,4 +943,5 @@ internal sealed unsafe class WorldOverlayRenderer
     }
 
     private sealed record CandidateRecordOwner(uint FishingSpotId, string Name);
+    private sealed record OverlayCandidateScreenPoint(ApproachCandidate Candidate, Vector2 ScreenPosition);
 }

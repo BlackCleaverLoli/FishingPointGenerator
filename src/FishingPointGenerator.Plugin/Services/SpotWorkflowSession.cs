@@ -1341,6 +1341,128 @@ internal sealed class SpotWorkflowSession : IDisposable
         return changed;
     }
 
+    public bool ToggleOverlayCandidatesDisabled(IReadOnlyList<ApproachCandidate> candidates)
+    {
+        var selected = candidates
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateId))
+            .GroupBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+        if (selected.Count == 0)
+        {
+            LastMessage = "框选区域内没有可维护的 overlay 候选。";
+            return false;
+        }
+
+        if (selected.Count == 1)
+            return ToggleOverlayCandidateDisabled(selected[0]);
+
+        if (!SelectedTerritoryIsCurrent)
+        {
+            LastMessage = "当前选择区域不在游戏区域，不能框选维护 overlay 点。";
+            return false;
+        }
+
+        if (CurrentTerritorySurvey is null || CurrentTerritorySurvey.TerritoryId != CurrentTerritoryId)
+        {
+            LastMessage = "当前区域没有可用于维护的 overlay 候选缓存。";
+            return false;
+        }
+
+        var territoryId = CurrentTerritorySurvey.TerritoryId != 0
+            ? CurrentTerritorySurvey.TerritoryId
+            : CurrentTerritoryId;
+        var document = CurrentTerritoryMaintenance is { } current && current.TerritoryId == territoryId
+            ? current
+            : maintenanceStore.LoadTerritory(territoryId);
+        var alreadyDisabled = selected
+            .Where(candidate => IsOverlayCandidateDisabled(document, territoryId, candidate))
+            .Select(candidate => candidate.CandidateId)
+            .ToHashSet(StringComparer.Ordinal);
+        if (alreadyDisabled.Count == selected.Count)
+        {
+            var restored = RemoveOverlayCandidatesDisabled(selected);
+            LastMessage = restored > 0
+                ? $"已框选取消禁用 overlay 候选：恢复 {restored} 个维护点（候选 {selected.Count} 个）。"
+                : $"框选的 {selected.Count} 个 overlay 候选没有可恢复的禁用记录。";
+            return restored > 0;
+        }
+
+        if (!EnsureCurrentTarget())
+            return false;
+        if (!EnsureSelectedTargetIsCurrentTerritory())
+            return false;
+
+        var target = CurrentTarget!;
+        var scan = EnsureScanForCurrentTarget();
+        if (scan is null)
+        {
+            LastMessage = "当前维护目标没有可派生候选，不能框选禁用 overlay 点。";
+            return false;
+        }
+
+        var toDisable = selected
+            .Where(candidate => !alreadyDisabled.Contains(candidate.CandidateId))
+            .ToList();
+        if (toDisable.Count == 0)
+        {
+            LastMessage = $"框选的 {selected.Count} 个 overlay 候选都已是禁用状态。";
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var changedCount = 0;
+        UpdateMaintenanceSpot(target, spot =>
+        {
+            var points = spot.ApproachPoints.ToList();
+            var evidence = spot.Evidence.ToList();
+            foreach (var candidate in toDisable)
+            {
+                var eventId = Guid.NewGuid().ToString("N");
+                var pointId = SpotFingerprint.CreateApproachPointId(target.Key, candidate.Position, candidate.Rotation);
+                var hadConfirmedPoint = points.Any(point =>
+                    string.Equals(point.PointId, pointId, StringComparison.Ordinal)
+                    && point.Status == ApproachPointStatus.Confirmed);
+                var note = hadConfirmedPoint
+                    ? $"{ManualOverlayDisableNote}; {ManualOverlayDisablePreviousConfirmedNote}"
+                    : ManualOverlayDisableNote;
+                if (!UpsertDisabledApproachPoint(target, points, candidate, scan, eventId, note, now))
+                    continue;
+
+                changedCount++;
+                evidence.Add(new SpotEvidenceEvent
+                {
+                    EventId = eventId,
+                    EventType = SpotEvidenceEventType.Review,
+                    Position = candidate.Position,
+                    Rotation = candidate.Rotation,
+                    CandidateFingerprint = candidate.CandidateId,
+                    SourceSurfaceGroupId = candidate.SurfaceGroupId,
+                    SourceScanId = scan.ScanId,
+                    SourceScannerVersion = scan.ScannerVersion,
+                    Note = ManualOverlayDisableNote,
+                    CreatedAt = now,
+                });
+            }
+
+            return spot with
+            {
+                ApproachPoints = points
+                    .OrderBy(point => point.PointId, StringComparer.Ordinal)
+                    .ToList(),
+                Evidence = evidence
+                    .OrderBy(item => item.CreatedAt)
+                    .ThenBy(item => item.EventId, StringComparer.Ordinal)
+                    .ToList(),
+            };
+        });
+
+        LastMessage = changedCount > 0
+            ? $"已框选禁用 FishingSpot {target.FishingSpotId} 的 overlay 候选：新增屏蔽 {changedCount} 个（选择 {selected.Count}，跳过已屏蔽 {alreadyDisabled.Count}）。"
+            : $"框选的 {selected.Count} 个 overlay 候选没有新增禁用记录。";
+        return changedCount > 0;
+    }
+
     public void IgnoreCurrentTarget()
     {
         if (!EnsureCurrentTarget())
@@ -1464,7 +1586,7 @@ internal sealed class SpotWorkflowSession : IDisposable
 
         var export = maintenanceExportBuilder.Build(analyses, maintenanceDocuments);
         store.SaveExport(export);
-        LastMessage = $"已导出 {export.FishingSpots.Sum(spot => spot.Points.Count)} 个已确认点位。";
+        LastMessage = $"已导出 {export.Count} 个已确认点位。";
     }
 
     public void ClearSpotPointCache(uint fishingSpotId)
@@ -2287,6 +2409,111 @@ internal sealed class SpotWorkflowSession : IDisposable
                 Note = ManualOverlayUndisableNote,
                 CreatedAt = now,
             });
+
+            spots[index] = spot with
+            {
+                ApproachPoints = points
+                    .OrderBy(point => point.PointId, StringComparer.Ordinal)
+                    .ToList(),
+                Evidence = evidence
+                    .OrderBy(item => item.CreatedAt)
+                    .ThenBy(item => item.EventId, StringComparer.Ordinal)
+                    .ToList(),
+                UpdatedAt = now,
+            };
+        }
+
+        if (changedCount == 0)
+            return 0;
+
+        document = document with
+        {
+            UpdatedAt = now,
+            Spots = spots
+                .OrderBy(spot => spot.FishingSpotId)
+                .ToList(),
+        };
+        maintenanceStore.SaveTerritory(document);
+        if (SelectedTerritoryId == territoryId)
+            CurrentTerritoryMaintenance = document;
+
+        RebuildTerritorySummaries();
+        RebuildAnalyses();
+        SyncCurrentAnalysis();
+        return changedCount;
+    }
+
+    private int RemoveOverlayCandidatesDisabled(IReadOnlyList<ApproachCandidate> candidates)
+    {
+        var territoryId = candidates
+            .Select(candidate => candidate.TerritoryId)
+            .FirstOrDefault(id => id != 0);
+        if (territoryId == 0)
+            territoryId = CurrentTerritoryId;
+        if (territoryId == 0)
+            return 0;
+
+        var document = CurrentTerritoryMaintenance is { } current && current.TerritoryId == territoryId
+            ? current
+            : maintenanceStore.LoadTerritory(territoryId);
+        if (document.Spots.Count == 0)
+            return 0;
+
+        var matches = candidates
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.CandidateId))
+            .GroupBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .Select(candidate => new OverlayCandidateMatch(candidate, GetOverlayCandidateMatchIds(candidate, territoryId)))
+            .Where(match => match.CandidateIds.Count > 0)
+            .ToList();
+        if (matches.Count == 0)
+            return 0;
+
+        var now = DateTimeOffset.UtcNow;
+        var changedCount = 0;
+        var spots = document.Spots.ToList();
+        for (var index = 0; index < spots.Count; index++)
+        {
+            var spot = spots[index];
+            var changedSpot = false;
+            var points = new List<ApproachPoint>();
+            var evidence = spot.Evidence.ToList();
+            foreach (var point in spot.ApproachPoints)
+            {
+                var matchedCandidate = FindOverlayCandidateMatch(point, territoryId, matches);
+                if (!IsEffectiveDisabledApproachPoint(point) || matchedCandidate is null)
+                {
+                    points.Add(point);
+                    continue;
+                }
+
+                changedSpot = true;
+                changedCount++;
+                if (!string.IsNullOrWhiteSpace(point.Note)
+                    && point.Note.Contains(ManualOverlayDisablePreviousConfirmedNote, StringComparison.Ordinal))
+                {
+                    points.Add(point with
+                    {
+                        Status = ApproachPointStatus.Confirmed,
+                        UpdatedAt = now,
+                        Note = AppendNote(point.Note, ManualOverlayUndisableNote),
+                    });
+                }
+
+                evidence.Add(new SpotEvidenceEvent
+                {
+                    EventType = SpotEvidenceEventType.Review,
+                    Position = matchedCandidate.Position,
+                    Rotation = matchedCandidate.Rotation,
+                    CandidateFingerprint = matchedCandidate.CandidateId,
+                    SourceSurfaceGroupId = matchedCandidate.SurfaceGroupId,
+                    Note = ManualOverlayUndisableNote,
+                    CreatedAt = now,
+                });
+            }
+
+            if (!changedSpot)
+                continue;
 
             spots[index] = spot with
             {
@@ -3985,6 +4212,35 @@ internal sealed class SpotWorkflowSession : IDisposable
         return ids;
     }
 
+    private static bool IsOverlayCandidateDisabled(
+        TerritoryMaintenanceDocument document,
+        uint territoryId,
+        ApproachCandidate candidate)
+    {
+        var candidateIds = GetOverlayCandidateMatchIds(candidate, territoryId);
+        if (candidateIds.Count == 0)
+            return false;
+
+        return document.Spots
+            .SelectMany(spot => spot.ApproachPoints)
+            .Where(IsEffectiveDisabledApproachPoint)
+            .Any(point => IsApproachPointForOverlayCandidate(point, territoryId, candidateIds));
+    }
+
+    private static ApproachCandidate? FindOverlayCandidateMatch(
+        ApproachPoint point,
+        uint territoryId,
+        IReadOnlyList<OverlayCandidateMatch> matches)
+    {
+        foreach (var match in matches)
+        {
+            if (IsApproachPointForOverlayCandidate(point, territoryId, match.CandidateIds))
+                return match.Candidate;
+        }
+
+        return null;
+    }
+
     private static bool IsApproachPointForOverlayCandidate(
         ApproachPoint point,
         uint territoryId,
@@ -4812,6 +5068,8 @@ internal sealed class SpotWorkflowSession : IDisposable
     }
 
     private sealed record PlayerSnapshot(Point3 Position, float Rotation);
+
+    private sealed record OverlayCandidateMatch(ApproachCandidate Candidate, IReadOnlySet<string> CandidateIds);
 
     private sealed record FillBlockSelection(SurveyBlock Block, ApproachCandidate SeedCandidate, float Distance);
 

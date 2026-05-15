@@ -146,11 +146,11 @@ public sealed class SpotJsonStore
         WriteJson(GetReportPath(report.Key), report with { GeneratedAt = DateTimeOffset.UtcNow });
     }
 
-    public void SaveExport(ExportDocument document)
+    public void SaveExport(List<ExportedApproachPoint> points)
     {
-        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(points);
 
-        WriteJson(GetExportPath(), document with { GeneratedAt = DateTimeOffset.UtcNow });
+        WriteJson(GetExportPath(), points);
     }
 
     private void WriteJson<T>(string path, T value)

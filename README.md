@@ -10,7 +10,7 @@ FishingPointGenerator 是一个用于采集和维护 FINAL FANTASY XIV 钓场点
 - 扫描当前 Territory 的全图可抛竿候选点。
 - 以客户端已有 Territory -> FishingSpot 层级维护真实可钓点和面向。
 - 支持当前候选插旗、可达性提示、抛竿自动点亮、人工确认、候选排除、忽略/复核状态和验证报告。
-- 只导出已确认点位，并保留来源信息便于回溯。
+- 只导出已确认点位；来源信息保留在维护数据中便于回溯。
 
 ## 使用流程
 
@@ -76,7 +76,7 @@ FishingPointGenerator 默认只导出经过验证的数据。
 - `weakCoverage`、`mixedRisk`、`noCandidate`、`ignored` 默认不会导出。
 - 弱覆盖数据可通过 `/fpg allowweak` 显式允许导出。
 - 混合风险数据可通过 `/fpg allowrisk` 显式复核后允许导出。
-- 导出按 `territoryId`、`fishingSpotId` 分组；每个点只保留 `PositionX/Y/Z` 和 `Rotation`。来源证据、候选和冲突信息只保留在维护数据中。
+- 导出是顶层数组；每个点只保留 `FishingSpot`、`PositionX/Y/Z` 和 `Rotation`。来源证据、候选和冲突信息只保留在维护数据中。
 
 ## 文档
 
