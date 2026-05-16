@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FishingPointGenerator.Core.Models;
@@ -8,6 +10,8 @@ public sealed class TerritoryMaintenanceStore
 {
     private readonly string rootDirectory;
     private readonly JsonSerializerOptions jsonOptions;
+
+    public event Action<TerritoryMaintenanceSaveMetrics>? TerritorySaved;
 
     public TerritoryMaintenanceStore(string rootDirectory)
     {
@@ -73,9 +77,10 @@ public sealed class TerritoryMaintenanceStore
         if (document.TerritoryId == 0)
             throw new ArgumentException("TerritoryId 必须非 0。", nameof(document));
 
-        WriteJson(
+        var metrics = WriteJson(
             GetTerritoryMaintenancePath(document.TerritoryId),
             ToSlimDocument(document));
+        TerritorySaved?.Invoke(metrics with { TerritoryId = document.TerritoryId });
     }
 
     public bool DeleteTerritory(uint territoryId)
@@ -113,13 +118,32 @@ public sealed class TerritoryMaintenanceStore
         }
     }
 
-    private void WriteJson<T>(string path, T value)
+    private TerritoryMaintenanceSaveMetrics WriteJson<T>(string path, T value)
     {
+        var total = Stopwatch.StartNew();
+        var prepare = Stopwatch.StartNew();
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
+        prepare.Stop();
 
-        File.WriteAllText(path, JsonSerializer.Serialize(value, jsonOptions) + "\n");
+        var serialize = Stopwatch.StartNew();
+        var json = JsonSerializer.Serialize(value, jsonOptions) + "\n";
+        serialize.Stop();
+
+        var write = Stopwatch.StartNew();
+        File.WriteAllText(path, json);
+        write.Stop();
+        total.Stop();
+
+        return new TerritoryMaintenanceSaveMetrics(
+            0,
+            path,
+            Encoding.UTF8.GetByteCount(json),
+            prepare.Elapsed.TotalMilliseconds,
+            serialize.Elapsed.TotalMilliseconds,
+            write.Elapsed.TotalMilliseconds,
+            total.Elapsed.TotalMilliseconds);
     }
 
     private static bool DeleteFile(string path)
@@ -480,3 +504,12 @@ public sealed class TerritoryMaintenanceStore
         ManualDisable,
     }
 }
+
+public sealed record TerritoryMaintenanceSaveMetrics(
+    uint TerritoryId,
+    string Path,
+    int ByteCount,
+    double PrepareMs,
+    double SerializeMs,
+    double WriteMs,
+    double TotalMs);

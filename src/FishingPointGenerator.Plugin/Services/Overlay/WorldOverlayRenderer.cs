@@ -57,6 +57,7 @@ internal sealed unsafe class WorldOverlayRenderer
     private uint cachedStatusTerritoryId;
     private OverlayCandidateStatusIndex cachedStatusIndex = OverlayCandidateStatusIndex.Empty;
     private DateTimeOffset lastOverlayPerfFrameLogAt = DateTimeOffset.MinValue;
+    private DateTimeOffset overlayPerfWindowStartedAt = DateTimeOffset.MinValue;
     private OverlayPerfFrameSample maxOverlayPerfFrameSample = OverlayPerfFrameSample.Empty;
     private int overlayPerfFrameCount;
     private int overlayPerfSlowFrameCount;
@@ -92,6 +93,7 @@ internal sealed unsafe class WorldOverlayRenderer
         if (!collectPerfStats)
         {
             lastOverlayPerfFrameLogAt = DateTimeOffset.MinValue;
+            overlayPerfWindowStartedAt = DateTimeOffset.MinValue;
             maxOverlayPerfFrameSample = OverlayPerfFrameSample.Empty;
             overlayPerfFrameCount = 0;
             overlayPerfSlowFrameCount = 0;
@@ -197,6 +199,10 @@ internal sealed unsafe class WorldOverlayRenderer
             return;
 
         var now = DateTimeOffset.UtcNow;
+        if (overlayPerfWindowStartedAt == DateTimeOffset.MinValue)
+            overlayPerfWindowStartedAt = now;
+
+        var windowStartedAt = overlayPerfWindowStartedAt;
         var currentSample = new OverlayPerfFrameSample(
             totalMs,
             targetMs,
@@ -207,7 +213,8 @@ internal sealed unsafe class WorldOverlayRenderer
             drawDistance,
             candidateLimit,
             canDrawCurrentTerritory,
-            showCandidates);
+            showCandidates,
+            now);
         overlayPerfFrameCount++;
         if (totalMs >= OverlaySlowFrameLogThresholdMs)
             overlayPerfSlowFrameCount++;
@@ -222,16 +229,23 @@ internal sealed unsafe class WorldOverlayRenderer
         var logSample = maxOverlayPerfFrameSample.HasData ? maxOverlayPerfFrameSample : currentSample;
         var frameCount = overlayPerfFrameCount;
         var slowFrameCount = overlayPerfSlowFrameCount;
+        var windowMs = Math.Max(0d, (now - windowStartedAt).TotalMilliseconds);
+        var maxFrameOffsetMs = Math.Max(0d, (logSample.SampledAt - windowStartedAt).TotalMilliseconds);
+        var maxFrameAgeMs = Math.Max(0d, (now - logSample.SampledAt).TotalMilliseconds);
         maxOverlayPerfFrameSample = OverlayPerfFrameSample.Empty;
         overlayPerfFrameCount = 0;
         overlayPerfSlowFrameCount = 0;
+        overlayPerfWindowStartedAt = now;
         var remainingSeconds = Math.Max(0d, (session.OverlayPerformanceDebugUntil - now).TotalSeconds);
         DService.Instance().Log.Information(
-            "FPG overlay perf sample: maxTotal={TotalMs:F2}ms maxSlow={IsSlow} frames={FrameCount} slowFrames={SlowFrameCount} remain={RemainingSeconds:F1}s territory={TerritoryId} selected={SelectedTerritoryId} canDraw={CanDrawCurrentTerritory} showCandidates={ShowCandidates} pointDisable={PointDisable} showCache={ShowCache} surfaces={ShowFishable}/{ShowWalkable} target={HasTarget} distance={DrawDistance:F1} limit={CandidateLimit}; maxStages target={TargetMs:F2}ms surface={SurfaceDebugMs:F2}ms territoryCache={TerritoryCacheMs:F2}ms candidates={CandidateMs:F2}ms; {CandidateStats}; {TerritoryCacheStats}; {SurfaceStats}",
+            "FPG overlay perf sample: maxTotal={TotalMs:F2}ms maxSlow={IsSlow} frames={FrameCount} slowFrames={SlowFrameCount} window={WindowMs:F0}ms maxOffset={MaxFrameOffsetMs:F0}ms maxAge={MaxFrameAgeMs:F0}ms remain={RemainingSeconds:F1}s territory={TerritoryId} selected={SelectedTerritoryId} canDraw={CanDrawCurrentTerritory} showCandidates={ShowCandidates} pointDisable={PointDisable} showCache={ShowCache} surfaces={ShowFishable}/{ShowWalkable} target={HasTarget} distance={DrawDistance:F1} limit={CandidateLimit}; maxStages target={TargetMs:F2}ms surface={SurfaceDebugMs:F2}ms territoryCache={TerritoryCacheMs:F2}ms candidates={CandidateMs:F2}ms; {CandidateStats}; {TerritoryCacheStats}; {SurfaceStats}",
             logSample.TotalMs,
             logSample.TotalMs >= OverlaySlowFrameLogThresholdMs,
             frameCount,
             slowFrameCount,
+            windowMs,
+            maxFrameOffsetMs,
+            maxFrameAgeMs,
             remainingSeconds,
             session.CurrentTerritoryId,
             session.SelectedTerritoryId,
@@ -1562,7 +1576,8 @@ internal sealed unsafe class WorldOverlayRenderer
         float DrawDistance,
         int CandidateLimit,
         bool CanDrawCurrentTerritory,
-        bool ShowCandidates)
+        bool ShowCandidates,
+        DateTimeOffset SampledAt)
     {
         public static OverlayPerfFrameSample Empty { get; } = new(
             0d,
@@ -1574,7 +1589,8 @@ internal sealed unsafe class WorldOverlayRenderer
             0f,
             0,
             false,
-            false);
+            false,
+            DateTimeOffset.MinValue);
 
         public bool HasData => TotalMs > 0d;
     }

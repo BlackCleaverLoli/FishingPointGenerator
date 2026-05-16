@@ -27,7 +27,7 @@ public sealed class Plugin : IDalamudPlugin
         + "/fpg scantarget - 从 Territory 缓存为维护目标派生候选\n"
         + "/fpg debugnear [radius] - 只分析角色附近碰撞面，输出调试日志并显示 Fishable/Walkable overlay\n"
         + "/fpg debugcandidates [radius] [limit] - 输出维护目标附近候选点、块和点亮范围调试日志\n"
-        + "/fpg debugoverlayperf [seconds] - 固定采样 overlay 分段计时日志\n"
+        + "/fpg debugoverlayperf [seconds] - 固定采样 overlay、抛竿和保存耗时日志\n"
         + "/fpg debugclear - 清除附近碰撞面调试 overlay\n"
         + "/fpg flag - 为维护目标中心插旗\n"
         + "/fpg tp - 传送到维护目标附近已共鸣以太之光\n"

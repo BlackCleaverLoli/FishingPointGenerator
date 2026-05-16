@@ -17,6 +17,21 @@ public sealed class MaintenanceAnalysisBuilder
         SpotMaintenanceRecord? maintenance,
         SpotReviewDocument? legacyReview)
     {
+        return Analyze(
+            target,
+            scan is not null && scan.Key.IsValid,
+            scan?.Candidates.Count ?? 0,
+            maintenance,
+            legacyReview);
+    }
+
+    public SpotAnalysis Analyze(
+        FishingSpotTarget target,
+        bool hasScan,
+        int candidateCount,
+        SpotMaintenanceRecord? maintenance,
+        SpotReviewDocument? legacyReview)
+    {
         ArgumentNullException.ThrowIfNull(target);
 
         var reviewDecision = maintenance?.ReviewDecision ?? legacyReview?.Decision ?? SpotReviewDecision.None;
@@ -26,14 +41,13 @@ public sealed class MaintenanceAnalysisBuilder
             {
                 Key = target.Key,
                 Status = SpotAnalysisStatus.Ignored,
-                CandidateCount = scan?.Candidates.Count ?? 0,
+                CandidateCount = candidateCount,
                 ConfirmedApproachPointCount = CountConfirmedPoints(maintenance),
                 Messages = ["该目标已在维护记录中明确忽略。"],
             };
         }
 
         var confirmedCount = CountConfirmedPoints(maintenance);
-        var candidateCount = scan?.Candidates.Count ?? 0;
         var hasMixedRisk = maintenance?.MixedRiskBlocks.Count > 0
             || HasDecision(reviewDecision, SpotReviewDecision.NeedsManualReview);
 
@@ -66,7 +80,7 @@ public sealed class MaintenanceAnalysisBuilder
             };
         }
 
-        if (scan is null || !scan.Key.IsValid)
+        if (!hasScan)
         {
             return new SpotAnalysis
             {

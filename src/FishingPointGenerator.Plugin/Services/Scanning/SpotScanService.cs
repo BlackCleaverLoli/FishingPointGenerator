@@ -52,11 +52,19 @@ internal sealed class SpotScanService
         if (survey.TerritoryId != target.TerritoryId)
         {
             warnings.Add($"当前区域 {survey.TerritoryId} 与目标区域 {target.TerritoryId} 不一致。");
-            return CreateDocument(target.Key, [], warnings);
+            return CreateDocument(target.Key, survey, [], warnings);
         }
 
+        var nearbyTargets = CreateNearbyTargetIndex(target.TerritoryId, catalogTargets);
+        var targetCenter = new Point3(target.WorldX, 0f, target.WorldZ);
+        var targetSearchRadius = GetSearchRadius(target);
         var candidates = survey.Candidates
-            .Select(candidate => CreateSpotCandidate(target, catalogTargets, candidate))
+            .Select(candidate => CreateSpotCandidate(
+                target,
+                targetCenter,
+                targetSearchRadius,
+                nearbyTargets,
+                candidate))
             .GroupBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .Select(group => group
                 .OrderBy(candidate => candidate.SourceCandidateId, StringComparer.Ordinal)
@@ -69,29 +77,42 @@ internal sealed class SpotScanService
         else
             warnings.Add("点缓存未按 FishingSpot 半径裁剪；实际钓场归属以抛竿日志确认为准。");
 
-        return CreateDocument(target.Key, candidates, warnings);
+        return CreateDocument(target.Key, survey, candidates, warnings);
     }
 
-    private SpotScanDocument CreateDocument(SpotKey key, List<SpotCandidate> candidates, List<string> warnings)
+    private SpotScanDocument CreateDocument(
+        SpotKey key,
+        TerritorySurveyDocument survey,
+        List<SpotCandidate> candidates,
+        List<string> warnings)
     {
         return new SpotScanDocument
         {
             Key = key,
+            ScanId = CreateStableScanId(key, survey),
             ScannerName = geometryCache.ScannerName,
             ScannerVersion = geometryCache.ScannerVersion,
+            GeneratedAt = survey.GeneratedAt,
             Candidates = candidates,
             Warnings = warnings,
         };
     }
 
+    private static string CreateStableScanId(SpotKey key, TerritorySurveyDocument survey)
+    {
+        var ticks = survey.GeneratedAt.UtcDateTime.Ticks;
+        return $"territory-{survey.TerritoryId:x8}-spot-{key.FishingSpotId:x8}-{ticks:x16}-{survey.Candidates.Count:x8}";
+    }
+
     private static SpotCandidate CreateSpotCandidate(
         FishingSpotTarget target,
-        IReadOnlyList<FishingSpotTarget> catalogTargets,
+        Point3 targetCenter,
+        float targetSearchRadius,
+        IReadOnlyList<NearbyTargetIndexEntry> nearbyTargets,
         ApproachCandidate candidate)
     {
         var key = target.Key;
-        var targetDistance = GetDistanceToTargetCenter(target, candidate.Position);
-        var searchRadius = GetSearchRadius(target);
+        var targetDistance = candidate.Position.HorizontalDistanceTo(new Point3(targetCenter.X, candidate.Position.Y, targetCenter.Z));
         var territoryId = candidate.TerritoryId != 0 ? candidate.TerritoryId : target.TerritoryId;
         return new SpotCandidate
         {
@@ -110,27 +131,41 @@ internal sealed class SpotScanService
             PathLengthMeters = candidate.PathLengthMeters,
             SourceCandidateId = candidate.CandidateId,
             DistanceToTargetCenterMeters = targetDistance,
-            IsWithinTargetSearchRadius = targetDistance <= searchRadius,
-            NearbyFishingSpotIds = FindNearbyFishingSpotIds(target, catalogTargets, candidate.Position),
+            IsWithinTargetSearchRadius = targetDistance <= targetSearchRadius,
+            NearbyFishingSpotIds = FindNearbyFishingSpotIds(targetSearchRadius, targetDistance, nearbyTargets, candidate.Position),
             CreatedAt = candidate.CreatedAt,
         };
     }
 
+    private static IReadOnlyList<NearbyTargetIndexEntry> CreateNearbyTargetIndex(
+        uint territoryId,
+        IReadOnlyList<FishingSpotTarget> catalogTargets)
+    {
+        return catalogTargets
+            .Where(target => target.TerritoryId == territoryId)
+            .Select(target => new NearbyTargetIndexEntry(
+                target.FishingSpotId,
+                target.WorldX,
+                target.WorldZ,
+                GetSearchRadius(target)))
+            .OrderBy(target => target.FishingSpotId)
+            .ToList();
+    }
+
     private static List<uint> FindNearbyFishingSpotIds(
-        FishingSpotTarget target,
-        IReadOnlyList<FishingSpotTarget> catalogTargets,
+        float targetSearchRadius,
+        float targetDistance,
+        IReadOnlyList<NearbyTargetIndexEntry> nearbyTargets,
         Point3 position)
     {
-        var targetCenter = new Point3(target.WorldX, position.Y, target.WorldZ);
-        if (position.HorizontalDistanceTo(targetCenter) > GetSearchRadius(target))
+        if (targetDistance > targetSearchRadius)
             return [];
 
-        return catalogTargets
-            .Where(other => other.TerritoryId == target.TerritoryId)
+        return nearbyTargets
             .Where(other =>
             {
                 var center = new Point3(other.WorldX, position.Y, other.WorldZ);
-                return position.HorizontalDistanceTo(center) <= GetSearchRadius(other);
+                return position.HorizontalDistanceTo(center) <= other.SearchRadius;
             })
             .Select(other => other.FishingSpotId)
             .Distinct()
@@ -138,14 +173,14 @@ internal sealed class SpotScanService
             .ToList();
     }
 
-    private static float GetDistanceToTargetCenter(FishingSpotTarget target, Point3 position)
-    {
-        var targetCenter = new Point3(target.WorldX, position.Y, target.WorldZ);
-        return position.HorizontalDistanceTo(targetCenter);
-    }
-
     private static float GetSearchRadius(FishingSpotTarget target)
     {
         return Math.Clamp(target.Radius + SearchRadiusPaddingMeters, MinimumSearchRadiusMeters, MaximumSearchRadiusMeters);
     }
+
+    private sealed record NearbyTargetIndexEntry(
+        uint FishingSpotId,
+        float WorldX,
+        float WorldZ,
+        float SearchRadius);
 }

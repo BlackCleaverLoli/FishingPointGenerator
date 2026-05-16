@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
@@ -36,24 +37,47 @@ internal sealed class FishingCastMonitor : IDisposable
         if (logMessageId != CastLogMessageId)
             return;
 
+        var callbackStopwatch = session.OverlayPerformanceDebugEnabled
+            ? Stopwatch.StartNew()
+            : null;
+        var placeNameId = 0u;
         try
         {
-            var param1 = GetLogMessageParamUInt(item, 0);
+            placeNameId = GetLogMessageParamUInt(item, 0);
             var param2 = GetLogMessageParamUInt(item, 1);
             var param3 = GetLogMessageParamUInt(item, 2);
 
-            pluginLog.Debug($"FPG cast log: {logMessageId}|{param1}|{param2}|{param3}");
+            pluginLog.Debug($"FPG cast log: {logMessageId}|{placeNameId}|{param2}|{param3}");
 
             // LogMessage 1110/0x456 uses PlaceName,IntegerParameter(1), which is item parameter index 0.
-            if (!session.RecordCastFill(param1))
+            if (!session.RecordCastFill(placeNameId))
+            {
+                LogCallbackPerf(callbackStopwatch, placeNameId, handled: false, chatPrinted: false);
                 return;
+            }
 
             DService.Instance().Chat.Print($"[FPG] {session.LastMessage}");
+            LogCallbackPerf(callbackStopwatch, placeNameId, handled: true, chatPrinted: true);
         }
         catch (Exception ex)
         {
             pluginLog.Error(ex, "FPG 抛竿监听处理失败");
+            LogCallbackPerf(callbackStopwatch, placeNameId, handled: false, chatPrinted: false);
         }
+    }
+
+    private void LogCallbackPerf(Stopwatch? stopwatch, uint placeNameId, bool handled, bool chatPrinted)
+    {
+        if (stopwatch is null)
+            return;
+
+        stopwatch.Stop();
+        pluginLog.Information(
+            "FPG cast callback perf: placeName={PlaceNameId} handled={Handled} chatPrinted={ChatPrinted} total={TotalMs:F2}ms",
+            placeNameId,
+            handled,
+            chatPrinted,
+            stopwatch.Elapsed.TotalMilliseconds);
     }
 
     private static uint GetLogMessageParamUInt(LogMessageQueueItem item, int index)
