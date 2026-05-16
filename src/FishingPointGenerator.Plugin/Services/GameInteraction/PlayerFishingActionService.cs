@@ -2,6 +2,7 @@ using Dalamud.Game.ClientState.Conditions;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using OmenTools;
 using OmenTools.Interop.Game.Models.Native;
+using GameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace FishingPointGenerator.Plugin.Services.GameInteraction;
 
@@ -125,6 +126,20 @@ internal sealed unsafe class PlayerFishingActionService
         var actionManager = ActionManager.Instance();
         return actionManager != null
             && actionManager->GetActionStatus(ActionType.Action, FishingCastActionId) == 0;
+    }
+
+    public bool TrySetFacingRotation(float rotation)
+    {
+        if (!float.IsFinite(rotation))
+            return false;
+
+        var player = DService.Instance().ObjectTable.LocalPlayer;
+        if (player is null)
+            return false;
+
+        var gameObject = (GameObject*)player.Address;
+        gameObject->SetRotation(rotation);
+        return true;
     }
 
     public FishingCastAttempt TryCast()

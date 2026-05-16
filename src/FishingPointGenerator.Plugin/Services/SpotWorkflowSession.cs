@@ -904,7 +904,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var fillDistances = selection is null
             ? new Dictionary<string, float>(StringComparer.Ordinal)
             : CalculateCastFillDistances(blocks, selection.Block, selection.SeedCandidate, fillRange, blockedCandidateIds);
-        var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange);
+        var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange, blockedCandidateIds);
 
         var nearby = scan.Candidates
             .Select(candidate => new
@@ -1222,7 +1222,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         trace?.Mark("candidateGraphIndex");
         blockedCandidateIds = GetCastFillBlockedCandidateIds(edit.BuildDocument(target.TerritoryName));
         var fillDistances = CalculateCastFillDistances(CurrentTargetBlocks, selection.Block, selection.SeedCandidate, fillRange, blockedCandidateIds);
-        var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange);
+        var fillCandidateIds = SelectCastFillCandidateIds(fillDistances, fillRange, blockedCandidateIds);
         trace?.Mark("calculateFill");
         var candidates = fillCandidateIds
             .Select(candidateId => candidatesByGraphId.TryGetValue(candidateId, out var spotCandidate)
@@ -1230,6 +1230,7 @@ internal sealed class SpotWorkflowSession : IDisposable
                 : null)
             .Where(candidate => candidate is not null)
             .Select(candidate => candidate!)
+            .Where(candidate => !IsCandidateKeyMatched(candidate, blockedCandidateIds))
             .OrderBy(candidate => candidate.CandidateFingerprint, StringComparer.Ordinal)
             .ToList();
         if (candidates.Count == 0)
@@ -4953,7 +4954,7 @@ internal sealed class SpotWorkflowSession : IDisposable
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var point in maintenance.Spots
             .SelectMany(spot => spot.ApproachPoints)
-            .Where(IsCastFillBlockingDisabledPoint))
+            .Where(IsEffectiveDisabledApproachPoint))
         {
             AddRecordedCandidateIds(ids, maintenance.TerritoryId, point);
         }
@@ -5008,19 +5009,24 @@ internal sealed class SpotWorkflowSession : IDisposable
             && !point.Note.Contains(ManualOverlayDisableNote, StringComparison.Ordinal);
     }
 
-    private static bool IsCastFillBlockingDisabledPoint(ApproachPoint point)
-    {
-        return IsEffectiveDisabledApproachPoint(point)
-            && !IsAutoMixedRiskBoundaryDisabledPoint(point);
-    }
-
     private static bool IsBlockedApproachCandidate(
         ApproachCandidate candidate,
         IReadOnlySet<string>? blockedCandidateIds)
     {
-        return blockedCandidateIds is not null
-            && !string.IsNullOrWhiteSpace(candidate.CandidateId)
-            && blockedCandidateIds.Contains(candidate.CandidateId);
+        if (blockedCandidateIds is null || blockedCandidateIds.Count == 0)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(candidate.CandidateId)
+            && blockedCandidateIds.Contains(candidate.CandidateId))
+        {
+            return true;
+        }
+
+        return candidate.TerritoryId != 0
+            && blockedCandidateIds.Contains(SpotFingerprint.CreateTerritoryCandidateFingerprint(
+                candidate.TerritoryId,
+                candidate.Position,
+                candidate.Rotation));
     }
 
     private static HashSet<string> GetOverlayCandidateMatchIds(ApproachCandidate candidate, uint territoryId)
@@ -5517,10 +5523,12 @@ internal sealed class SpotWorkflowSession : IDisposable
 
     private static IReadOnlySet<string> SelectCastFillCandidateIds(
         IReadOnlyDictionary<string, float> distances,
-        float fillRange)
+        float fillRange,
+        IReadOnlySet<string>? blockedCandidateIds = null)
     {
         return distances
             .Where(item => item.Value <= fillRange)
+            .Where(item => blockedCandidateIds is null || !blockedCandidateIds.Contains(item.Key))
             .Select(item => item.Key)
             .ToHashSet(StringComparer.Ordinal);
     }
@@ -5533,8 +5541,11 @@ internal sealed class SpotWorkflowSession : IDisposable
         IReadOnlySet<string>? blockedCandidateIds = null)
     {
         var graph = GetCastFillGraph(blocks, fallbackBlock, seedCandidate);
-        var blockedCandidates = graph.Candidates
+        var blockedCandidates = blocks
+            .SelectMany(block => block.Candidates)
             .Where(candidate => IsBlockedApproachCandidate(candidate, blockedCandidateIds))
+            .GroupBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
+            .Select(group => group.First())
             .ToList();
         return CalculateCandidateGraphDistances(
             graph,
@@ -5653,6 +5664,9 @@ internal sealed class SpotWorkflowSession : IDisposable
                     .OrderBy(candidate => candidate.Position.HorizontalDistanceTo(seedCandidate.Position))
                     .ThenBy(candidate => candidate.CandidateId, StringComparer.Ordinal)
                     .First();
+            if (blockedCandidates?.Contains(seed) == true)
+                continue;
+
             distances[seed.CandidateId] = 0f;
             queue.Enqueue(seed, 0f);
         }
@@ -5661,6 +5675,8 @@ internal sealed class SpotWorkflowSession : IDisposable
         {
             var current = queue.Dequeue();
             if (!visited.Add(current.CandidateId))
+                continue;
+            if (blockedCandidates?.Contains(current) == true)
                 continue;
 
             var currentDistance = distances[current.CandidateId];
@@ -5671,8 +5687,12 @@ internal sealed class SpotWorkflowSession : IDisposable
 
             foreach (var next in EnumerateCastFillNeighbors(graph, current))
             {
-                if (visited.Contains(next.CandidateId) || !ShouldLinkCastWaterSystem(current, next, blockedCandidates))
+                if (visited.Contains(next.CandidateId)
+                    || blockedCandidates?.Contains(next) == true
+                    || !ShouldLinkCastWaterSystem(current, next, blockedCandidates))
+                {
                     continue;
+                }
 
                 var edgeDistance = Math.Max(0.1f, current.Position.HorizontalDistanceTo(next.Position));
                 var nextDistance = currentDistance + edgeDistance;
@@ -5728,16 +5748,18 @@ internal sealed class SpotWorkflowSession : IDisposable
         var heightTolerance = sameWaterSystem
             ? CastWaterSystemHeightToleranceMeters
             : blockOptions.BlockHeightToleranceMeters;
+        var blockRadius = Math.Max(1f, linkDistance * 0.5f);
         return MathF.Abs(left.Position.Y - right.Position.Y) <= heightTolerance
             && left.Position.HorizontalDistanceTo(right.Position) <= linkDistance
-            && !HasBlockedCandidateBetween(left, right, blockedCandidates, heightTolerance);
+            && !HasBlockedCandidateBetween(left, right, blockedCandidates, heightTolerance, blockRadius);
     }
 
     private bool HasBlockedCandidateBetween(
         ApproachCandidate left,
         ApproachCandidate right,
         BlockedCandidateIndex? blockedCandidates,
-        float heightTolerance)
+        float heightTolerance,
+        float blockRadius)
     {
         if (blockedCandidates is null || blockedCandidates.Count == 0)
             return false;
@@ -5752,7 +5774,6 @@ internal sealed class SpotWorkflowSession : IDisposable
         if (lenSq <= 0.0001f)
             return false;
 
-        var blockRadius = Math.Max(1f, blockOptions.BlockLinkDistanceMeters * 0.5f);
         foreach (var blocked in blockedCandidates.FindNearSegment(left.Position, right.Position, blockRadius))
         {
             if (MathF.Abs(blocked.Position.Y - left.Position.Y) > heightTolerance
@@ -6397,6 +6418,7 @@ internal sealed class SpotWorkflowSession : IDisposable
     private sealed class BlockedCandidateIndex
     {
         private readonly Dictionary<CandidateSparseGridCell, List<ApproachCandidate>> cells = [];
+        private readonly HashSet<string> candidateIds = new(StringComparer.Ordinal);
         private readonly float cellSize;
 
         private BlockedCandidateIndex(IReadOnlyList<ApproachCandidate> candidates, float cellSize)
@@ -6405,6 +6427,9 @@ internal sealed class SpotWorkflowSession : IDisposable
             Count = candidates.Count;
             foreach (var candidate in candidates)
             {
+                if (!string.IsNullOrWhiteSpace(candidate.CandidateId))
+                    candidateIds.Add(candidate.CandidateId);
+
                 var cell = CandidateSparseGridCell.From(candidate.Position, this.cellSize);
                 if (!cells.TryGetValue(cell, out var list))
                 {
@@ -6417,6 +6442,12 @@ internal sealed class SpotWorkflowSession : IDisposable
         }
 
         public int Count { get; }
+
+        public bool Contains(ApproachCandidate candidate)
+        {
+            return !string.IsNullOrWhiteSpace(candidate.CandidateId)
+                && candidateIds.Contains(candidate.CandidateId);
+        }
 
         public static BlockedCandidateIndex? Build(
             IReadOnlyList<ApproachCandidate>? candidates,
