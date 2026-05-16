@@ -3855,19 +3855,8 @@ internal sealed class SpotWorkflowSession : IDisposable
             LogFormalScanCandidateStage(capture.TerritoryId, "raw", scannedSurvey.Candidates, playerSnapshot);
 
             var rawCandidates = scannedSurvey.Candidates.Count;
-            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {rawCandidates} 个候选构建块。"));
-            var blocks = blockBuilder.BuildBlocks(
-                scannedSurvey.Candidates,
-                CreateBlockBuildProgressAdapter(progress, "分块", "初次分块："),
-                cancellationToken);
-            var blockedSurvey = scannedSurvey with
-            {
-                Candidates = blocks.SelectMany(block => block.Candidates).ToList(),
-            };
-            LogFormalScanCandidateStage(capture.TerritoryId, "blocked", blockedSurvey.Candidates, playerSnapshot);
-
             var reachability = await FilterSurveyReachabilityAsync(
-                    blockedSurvey,
+                    scannedSurvey,
                     rawCandidates,
                     currentTerritoryFlyable,
                     navmeshReady,
@@ -3883,19 +3872,18 @@ internal sealed class SpotWorkflowSession : IDisposable
             var filteredCandidateLabel = reachability.Survey.ReachabilityMode == SurveyReachabilityMode.NotChecked
                 ? "缓存候选"
                 : "可用候选";
-            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {reachability.Survey.Candidates.Count} 个{filteredCandidateLabel}重建块。"));
+            progress.Report(new TerritoryScanProgress("分块", 0, 1, $"正在为 {reachability.Survey.Candidates.Count} 个{filteredCandidateLabel}构建块。"));
             var filteredBlocks = blockBuilder.BuildBlocks(
                 reachability.Survey.Candidates,
-                CreateBlockBuildProgressAdapter(progress, "分块", $"{filteredCandidateLabel}重分块："),
+                CreateBlockBuildProgressAdapter(progress, "分块", $"{filteredCandidateLabel}分块："),
                 cancellationToken);
             var filteredCandidateCount = filteredBlocks.Sum(block => block.Candidates.Count);
             var finalBlocks = SparsifyFinalCandidateBlocks(filteredBlocks);
             var finalCandidates = finalBlocks.SelectMany(block => block.Candidates).ToList();
-            var finalCandidateCount = finalCandidates.Count;
             var finalReachableCandidateCount = reachability.Survey.ReachabilityMode == SurveyReachabilityMode.NotChecked
                 ? reachability.Survey.ReachableCandidateCount
                 : finalCandidates.Count(candidate => candidate.Reachability != CandidateReachability.Unknown);
-            var sparseDropped = Math.Max(0, filteredCandidateCount - finalCandidateCount);
+            var sparseDropped = Math.Max(0, filteredCandidateCount - finalCandidates.Count);
             var finalSurvey = reachability.Survey with
             {
                 Candidates = finalCandidates,
